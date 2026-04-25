@@ -1,0 +1,6 @@
+Package: altlib
+Version: @ALT_VERSION@
+Architecture: amd64
+Maintainer: Altainia <altainia@gmail.com>
+Depends: libc6
+Description: Generic C++23 utility library

@@ -1,0 +1,7 @@
+build/
+*.deb
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
