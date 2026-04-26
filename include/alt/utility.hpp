@@ -1,7 +1,6 @@
 #pragma once
 
-#include <alt/type_traits.h>
-
+#include <alt/type_traits.hpp>
 #include <type_traits>
 
 namespace alt

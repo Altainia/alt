@@ -1,6 +1,6 @@
-#include <alt/type_traits.h>
 #include <gtest/gtest.h>
 
+#include <alt/type_traits.hpp>
 #include <cstdint>
 #include <type_traits>
 
