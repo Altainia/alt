@@ -15,6 +15,8 @@ add_executable(alt_tests
     test_version.cpp
     test_flags.cpp
     test_functional.cpp
+    test_type_traits.cpp
+    test_utility.cpp
 )
 
 target_link_libraries(alt_tests
