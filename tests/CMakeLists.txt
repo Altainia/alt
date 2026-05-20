@@ -18,6 +18,7 @@ add_executable(alt_tests
     test_type_traits.cpp
     test_utility.cpp
     test_scope.cpp
+    test_memory.cpp
 )
 
 target_link_libraries(alt_tests
