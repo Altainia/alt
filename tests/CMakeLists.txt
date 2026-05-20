@@ -28,5 +28,10 @@ target_link_libraries(alt_tests
         GTest::gtest_main
 )
 
+alt_add_warnings(alt_tests)
+alt_add_sanitizers(alt_tests)
+alt_add_coverage(alt_tests)
+alt_add_coverage_target(${CMAKE_BINARY_DIR})
+
 include(GoogleTest)
 gtest_discover_tests(alt_tests)

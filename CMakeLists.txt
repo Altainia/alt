@@ -6,8 +6,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(cmake/compiler_checks.cmake)
+include(cmake/warnings.cmake)
+include(cmake/sanitizers.cmake)
+include(cmake/coverage.cmake)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+
+option(ALT_CLANG_TIDY "Run clang-tidy on all sources during build" OFF)
+option(ALT_CPPCHECK "Add a 'cppcheck' custom build target" OFF)
+
+if(ALT_CLANG_TIDY)
+    find_program(CLANG_TIDY_PATH clang-tidy REQUIRED)
+    set(CMAKE_CXX_CLANG_TIDY ${CLANG_TIDY_PATH})
+endif()
 
 file(GLOB_RECURSE ALT_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 
@@ -20,7 +31,26 @@ target_include_directories(alt
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-target_compile_options(alt PRIVATE -Wall -Wextra -Wpedantic)
+alt_add_warnings(alt)
+alt_add_sanitizers(alt)
+alt_add_coverage(alt)
+
+if(ALT_CPPCHECK)
+    find_program(CPPCHECK_PATH cppcheck REQUIRED)
+    add_custom_target(cppcheck
+        COMMAND ${CPPCHECK_PATH}
+            --enable=all
+            --std=c++23
+            --error-exitcode=1
+            --suppress=missingIncludeSystem
+            --suppress=unmatchedSuppression
+            -I ${CMAKE_SOURCE_DIR}/include
+            ${CMAKE_SOURCE_DIR}/include/alt
+            ${CMAKE_SOURCE_DIR}/src
+        COMMENT "Running cppcheck static analysis"
+        VERBATIM
+    )
+endif()
 
 install(TARGETS alt
     EXPORT AltTargets
