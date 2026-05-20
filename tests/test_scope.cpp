@@ -113,7 +113,7 @@ TEST(ScopeExit, MoveSourceDoesNotCall)
 {
 	int  calls = 0;
 	auto g1    = std::make_unique<alt::scope_exit<std::function<void()>>>(
-    std::function<void()>{[&] { ++calls; }});
+	  std::function<void()>{[&] { ++calls; }});
 	alt::scope_exit g2{std::move(*g1)};
 	g1.reset(); // destroy g1 (already released)
 	EXPECT_EQ(calls, 0);
@@ -813,7 +813,7 @@ TEST(MakeUniqueResourceChecked, CustomSentinelType)
 		short res     = 5;
 		int   invalid = -1;
 		auto  ur      = alt::make_unique_resource_checked<short, CallCounter, int>(
-      std::move(res), invalid, CallCounter{calls});
+		  std::move(res), invalid, CallCounter{calls});
 	}
 	EXPECT_EQ(calls, 1);
 }
@@ -857,8 +857,8 @@ TEST(UniqueResource, DeleterCalledExactlyOnce_AfterMoveAssign)
 {
 	int calls = 0;
 	{
-		auto ur1 = alt::unique_resource(1, AssignableCounter{&calls});
-		auto ur2 = alt::unique_resource(2, AssignableCounter{&calls});
+		auto ur1 = alt::unique_resource(1, CallCounter{calls});
+		auto ur2 = alt::unique_resource(2, CallCounter{calls});
 		ur1      = std::move(ur2); // deletes old resource in ur1 (value=1), then owns 2
 		EXPECT_EQ(calls, 1);
 	}
