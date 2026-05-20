@@ -857,8 +857,8 @@ TEST(UniqueResource, DeleterCalledExactlyOnce_AfterMoveAssign)
 {
 	int calls = 0;
 	{
-		auto ur1 = alt::unique_resource(1, CallCounter{calls});
-		auto ur2 = alt::unique_resource(2, CallCounter{calls});
+		auto ur1 = alt::unique_resource(1, AssignableCounter{&calls});
+		auto ur2 = alt::unique_resource(2, AssignableCounter{&calls});
 		ur1      = std::move(ur2); // deletes old resource in ur1 (value=1), then owns 2
 		EXPECT_EQ(calls, 1);
 	}
