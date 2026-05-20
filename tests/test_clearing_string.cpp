@@ -177,6 +177,31 @@ namespace
 		// The content is unspecified per the standard, but we require no crash.
 	}
 
+	TEST(SSOClearing, StaleBytesFromShorterAssignmentClearedOnDestruction)
+	{
+		// Regression: assigning a shorter string does not zero bytes beyond the new null
+		// terminator. E.g. "Bobby" (5 chars) then "Hi" (2 chars) leaves 'b' and 'y' at
+		// offsets 3 and 4 — beyond size() == 2. The destructor must clear the full SSO
+		// buffer, not just size() bytes.
+		alignas(ClearingStr) std::array<unsigned char, sizeof(ClearingStr)> storage;
+		storage.fill(0xCC);
+
+		auto* sp = ::new(storage.data()) ClearingStr("Bobby");
+		ASSERT_EQ(sp->size(), 5u);
+		*sp = "Hi";
+		ASSERT_EQ(sp->size(), 2u);
+
+		// After the shorter assignment, 'b' and 'y' from "Bobby" remain beyond offset 2.
+		constexpr std::array<char, 2> stale{'b', 'y'};
+		ASSERT_TRUE(contains_sequence(storage.data(), storage.size(), stale.data(), stale.size()))
+		  << "Pre-condition: stale bytes from 'Bobby' must still be present in object storage";
+
+		sp->~ClearingStr();
+
+		EXPECT_FALSE(contains_sequence(storage.data(), storage.size(), stale.data(), stale.size()))
+		  << "Stale bytes from prior shorter assignment must be cleared on destruction";
+	}
+
 	// ============================================================
 	// Heap Clearing
 	// ============================================================

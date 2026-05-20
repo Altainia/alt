@@ -448,9 +448,10 @@ namespace std
 		 */
 		~basic_string() noexcept
 		{
-			alt::clear_memory(
-			  const_cast<CharT*>(StorageBase::data()),
-			  StorageBase::size() * sizeof(CharT));
+			// Clear the full SSO buffer (capacity+1), not just size(), to erase stale bytes
+			// left from prior assignments that shortened the string (e.g. "Bob" -> "Hi").
+			// For heap strings this is a harmless extra zero before deallocate does the same.
+			zero_sso(*this);
 		}
 
 		// ---- Assignment operators ----
