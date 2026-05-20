@@ -19,6 +19,7 @@ add_executable(alt_tests
     test_utility.cpp
     test_scope.cpp
     test_memory.cpp
+    test_clearing_string.cpp
 )
 
 target_link_libraries(alt_tests
