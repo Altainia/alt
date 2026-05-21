@@ -56,7 +56,7 @@ namespace alt
 		/** Returns the bitwise complement of all bits in the underlying storage. */
 		[[nodiscard]] constexpr flags operator~() const noexcept
 		{
-			return from_value(~m_value);
+			return from_value(static_cast<value_type>(~m_value));
 		}
 
 		/** Sets all bits present in @p other. */

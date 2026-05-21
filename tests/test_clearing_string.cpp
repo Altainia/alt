@@ -40,7 +40,7 @@ namespace
 		void deallocate(T* p, std::size_t n)
 		{
 			auto* raw = reinterpret_cast<std::byte*>(p);
-			captured->assign(raw, raw + n * sizeof(T));
+			captured->assign(raw, raw + (n * sizeof(T)));
 			std::allocator<T>{}.deallocate(p, n);
 		}
 	};
@@ -165,12 +165,17 @@ namespace
 	TEST(SSOClearing, MoveAssignSelfIsNoop)
 	{
 		ClearingStr s("hello");
-#if defined(__GNUC__) && !defined(__clang__)
+#ifdef __clang__
+#	pragma clang diagnostic push
+#	pragma clang diagnostic ignored "-Wself-move"
+#elifdef __GNUC__
 #	pragma GCC diagnostic push
 #	pragma GCC diagnostic ignored "-Wself-move"
 #endif
-		s = std::move(s); // must not crash or corrupt
-#if defined(__GNUC__) && !defined(__clang__)
+		s = std::move(s); // intentional self-move test
+#ifdef __clang__
+#	pragma clang diagnostic pop
+#elifdef __GNUC__
 #	pragma GCC diagnostic pop
 #endif
 		// After self-move, `s` is still in a valid state (our guard: this != &other).
@@ -246,7 +251,7 @@ namespace
 	TEST(Constructors, FromCStringLong)
 	{
 		std::string long_str(64, 'x');
-		ClearingStr s(long_str.c_str());
+		ClearingStr s(long_str.c_str()); // NOLINT(readability-redundant-string-cstr): tests c_str construction path
 		EXPECT_EQ(s, long_str.c_str());
 	}
 
@@ -264,8 +269,8 @@ namespace
 
 	TEST(Constructors, CopyConstruct)
 	{
-		ClearingStr a("test");
-		ClearingStr b(a);
+		ClearingStr       a("test");
+		const ClearingStr b(a); // NOLINT(performance-unnecessary-copy-initialization): tests copy constructor
 		EXPECT_EQ(a, b);
 		EXPECT_EQ(b, "test");
 	}
@@ -523,7 +528,7 @@ namespace
 	TEST(StringOps, FindLastNotOf)
 	{
 		ClearingStr s("aabbcc");
-		EXPECT_EQ(s.find_last_not_of("c"), 3u);
+		EXPECT_EQ(s.find_last_not_of('c'), 3u);
 	}
 
 	TEST(StringOps, Compare)
@@ -642,7 +647,19 @@ namespace
 		ClearingStr s("hello world");
 		EXPECT_EQ(s.substr(6), "world");
 		EXPECT_EQ(s.substr(0, 5), "hello");
+#ifdef __clang__
+#	pragma clang diagnostic push
+#	pragma clang diagnostic ignored "-Wunused-result"
+#elifdef __GNUC__
+#	pragma GCC diagnostic push
+#	pragma GCC diagnostic ignored "-Wunused-result"
+#endif
 		EXPECT_THROW(s.substr(100), std::out_of_range);
+#ifdef __clang__
+#	pragma clang diagnostic pop
+#elifdef __GNUC__
+#	pragma GCC diagnostic pop
+#endif
 	}
 
 	TEST(StringOps, Copy)

@@ -27,9 +27,13 @@ namespace alt
 		EF make_ef(EFP&& f)
 		{
 			if constexpr(!std::is_lvalue_reference_v<EFP> && std::is_nothrow_constructible_v<EF, EFP>)
+			{
 				return EF(std::forward<EFP>(f));
+			}
 			else
+			{
 				return EF(f);
+			}
 		}
 
 		/**
@@ -41,9 +45,13 @@ namespace alt
 		EF move_or_copy_ef(EF& ef)
 		{
 			if constexpr(std::is_nothrow_move_constructible_v<EF>)
+			{
 				return std::move(ef);
+			}
 			else
+			{
 				return ef;
+			}
 		}
 
 		// ---------------------------------------------------------------------------
@@ -61,9 +69,13 @@ namespace alt
 		[[nodiscard]] decltype(auto) get_resource_value(R1& r1) noexcept
 		{
 			if constexpr(std::is_reference_v<R>)
+			{
 				return r1.get();
+			}
 			else
+			{
 				return (r1);
+			}
 		}
 
 		/**
@@ -101,12 +113,12 @@ namespace alt
 		 * category of the argument. The resource member (already initialized) is passed
 		 * so that RESOURCE can be evaluated in the cleanup path if construction throws.
 		 */
-		template<typename R, typename D, typename DD_outer, typename R1>
-		D init_ur_deleter(R1& resource, std::remove_reference_t<DD_outer>& d)
+		template<typename R, typename D, typename DDOuter, typename R1>
+		D init_ur_deleter(R1& resource, std::remove_reference_t<DDOuter>& d)
 		{
-			if constexpr(std::is_nothrow_constructible_v<D, DD_outer>)
+			if constexpr(std::is_nothrow_constructible_v<D, DDOuter>)
 			{
-				return D(std::forward<DD_outer>(d));
+				return D(std::forward<DDOuter>(d));
 			}
 			else
 			{
@@ -129,9 +141,13 @@ namespace alt
 		R1 move_or_copy_ur_resource(R1& r1)
 		{
 			if constexpr(std::is_nothrow_move_constructible_v<R1>)
+			{
 				return std::move(r1);
+			}
 			else
+			{
 				return r1;
+			}
 		}
 
 		/**
@@ -255,7 +271,9 @@ namespace alt
 		~scope_exit() noexcept
 		{
 			if(m_execute_on_destruction)
+			{
 				m_exit_function();
+			}
 		}
 
 		/** @brief Disables the exit function call on destruction. */
@@ -348,7 +366,9 @@ namespace alt
 		~scope_fail() noexcept
 		{
 			if(m_execute_on_destruction && std::uncaught_exceptions() > m_uncaught_on_creation)
+			{
 				m_exit_function();
+			}
 		}
 
 		/** @brief Disables the exit function call on destruction. */
@@ -426,7 +446,9 @@ namespace alt
 		~scope_success() noexcept(noexcept(m_exit_function()))
 		{
 			if(m_execute_on_destruction && std::uncaught_exceptions() <= m_uncaught_on_creation)
+			{
 				m_exit_function();
+			}
 		}
 
 		/** @brief Disables the exit function call on destruction. */
@@ -703,7 +725,7 @@ namespace alt
 
 		// Friend declaration matches the definition exactly (same requires clause).
 		template<typename R2, typename D2, typename S2>
-		  requires requires(const R2& r, const S2& s) { r == s ? true : false; }
+		  requires requires(const R2& r, const S2& s) { static_cast<bool>(r == s); }
 		friend unique_resource<std::decay_t<R2>, std::decay_t<D2>>
 		  make_unique_resource_checked(R2&&, const S2&, D2&&) noexcept(std::is_nothrow_constructible_v<std::decay_t<R2>, R2> &&
 		                                                               std::is_nothrow_constructible_v<std::decay_t<D2>, D2>);
@@ -731,10 +753,10 @@ namespace alt
 	 * @return          A unique_resource owning the resource, or a released-state object
 	 *                  if resource == invalid.
 	 *
-	 * Mandates: The expression (resource == invalid ? true : false) must be well-formed.
+	 * Mandates: The expression static_cast<bool>(resource == invalid) must be well-formed.
 	 */
 	template<typename R, typename D, typename S = std::decay_t<R>>
-	  requires requires(const R& r, const S& s) { r == s ? true : false; }
+	  requires requires(const R& r, const S& s) { static_cast<bool>(r == s); }
 	unique_resource<std::decay_t<R>, std::decay_t<D>>
 	  make_unique_resource_checked(R&& resource, const S& invalid, D&& d) noexcept(std::is_nothrow_constructible_v<std::decay_t<R>, R> &&
 	                                                                               std::is_nothrow_constructible_v<std::decay_t<D>, D>)

@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-gcc:
+    name: Build & Test (GCC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset debug -DALT_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset debug
+      - name: Test
+        run: ctest --preset debug
+
+  build-clang:
+    name: Build & Test (Clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Configure
+        run: >
+          cmake --preset debug
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DALT_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset debug
+      - name: Test
+        run: ctest --preset debug
+
+  asan:
+    name: AddressSanitizer + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset debug-asan -DALT_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset debug-asan
+      - name: Test
+        run: ctest --preset debug-asan
+
+  # MSan (MemorySanitizer) is intentionally excluded from CI. MSan requires a
+  # fully MSan-instrumented C++ standard library (libc++) to avoid false
+  # positives and deadlocks in the error reporter. The debug-msan preset is
+  # provided for local use by developers who have a properly instrumented
+  # libc++ toolchain. See: https://clang.llvm.org/docs/MemorySanitizer.html
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang and clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y clang clang-tidy
+      - name: Configure
+        run: >
+          cmake -B build/tidy
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=Debug
+          -DALT_CLANG_TIDY=ON
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Build (runs clang-tidy on every source)
+        run: cmake --build build/tidy
+
+  cppcheck:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Configure
+        run: cmake --preset debug -DALT_CPPCHECK=ON
+      - name: Run cppcheck
+        run: cmake --build --preset debug --target cppcheck
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+      - name: Configure
+        run: cmake --preset debug-coverage
+      - name: Build
+        run: cmake --build --preset debug-coverage
+      - name: Generate coverage report
+        run: cmake --build --preset debug-coverage --target coverage
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/debug-coverage/coverage/

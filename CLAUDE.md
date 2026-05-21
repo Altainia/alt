@@ -15,10 +15,11 @@ A generic C++23 utility library. Namespace: `alt`. Version: `0.1.0`.
 
 ## Build
 
+Prefer CMake presets for all local work:
+
 ```bash
-# Debug build with tests
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+# Debug build with tests (preferred)
+cmake --preset debug && cmake --build --preset debug
 
 # Release build without tests
 cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
@@ -30,9 +31,44 @@ Requires GCC 13+ or Clang 17+.
 ## Tests
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
+ctest --preset debug --output-on-failure
+```
+
+## Quality checks
+
+Run these before committing. All must pass with zero errors.
+
+### AddressSanitizer + UBSan
+
+```bash
+cmake --preset debug-asan && cmake --build --preset debug-asan
+ctest --preset debug-asan --output-on-failure
+```
+
+### clang-tidy
+
+Requires `clang-tidy` on `PATH`. Warnings are errors — the build fails on any finding.
+
+```bash
+cmake -B build/tidy -DALT_CLANG_TIDY=ON -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/tidy
+```
+
+### cppcheck
+
+```bash
+cmake -B build/check -DALT_CPPCHECK=ON
+cmake --build build/check --target cppcheck
+```
+
+### Code coverage
+
+Requires GCC and `lcov`. Report lands in `build/debug-coverage/coverage/index.html`.
+
+```bash
+cmake --preset debug-coverage && cmake --build --preset debug-coverage
+ctest --preset debug-coverage --output-on-failure
+cmake --build --preset debug-coverage --target coverage
 ```
 
 ## Local install

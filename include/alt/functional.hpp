@@ -33,9 +33,13 @@ namespace alt
 		constexpr bool eval_condition(T&& t)
 		{
 			if constexpr(std::invocable<T>)
+			{
 				return static_cast<bool>(std::invoke(std::forward<T>(t)));
+			}
 			else
+			{
 				return static_cast<bool>(std::forward<T>(t));
+			}
 		}
 
 		/**
@@ -49,9 +53,13 @@ namespace alt
 		constexpr bool eval_with(F& f, Arg&& arg)
 		{
 			if constexpr(requires { { std::invoke(f, std::declval<Arg>()) } -> std::convertible_to<bool>; })
+			{
 				return static_cast<bool>(std::invoke(f, std::forward<Arg>(arg)));
+			}
 			else
+			{
 				return static_cast<bool>(std::invoke(f, std::invoke(std::forward<Arg>(arg))));
+			}
 		}
 
 	} // namespace detail
@@ -203,9 +211,13 @@ namespace alt
 	[[nodiscard]] constexpr bool at_least(Args&&... args)
 	{
 		if constexpr(N == 0)
+		{
 			return true;
+		}
 		else if constexpr(sizeof...(Args) == 0)
+		{
 			return false;
+		}
 		else
 		{
 			std::size_t count{0};
@@ -231,9 +243,13 @@ namespace alt
 	[[nodiscard]] constexpr bool at_least(F&& f, Args&&... args)
 	{
 		if constexpr(N == 0)
+		{
 			return true;
+		}
 		else if constexpr(sizeof...(Args) == 0)
+		{
 			return false;
+		}
 		else
 		{
 			std::size_t count{0};
@@ -300,7 +316,9 @@ namespace alt
 	[[nodiscard]] constexpr bool exactly(Args&&... args)
 	{
 		if constexpr(sizeof...(Args) == 0)
+		{
 			return N == 0;
+		}
 		else
 		{
 			std::size_t count{0};
@@ -326,7 +344,9 @@ namespace alt
 	[[nodiscard]] constexpr bool exactly(F&& f, Args&&... args)
 	{
 		if constexpr(sizeof...(Args) == 0)
+		{
 			return N == 0;
+		}
 		else
 		{
 			std::size_t count{0};

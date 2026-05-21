@@ -1,0 +1,37 @@
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-missing-std-forward,
+  -cppcoreguidelines-rvalue-reference-param-not-moved
+
+WarningsAsErrors: "*"
+
+HeaderFilterRegex: "include/alt/.*"
+
+CheckOptions:
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberPrefix
+    value: m_
+  - key: readability-identifier-naming.ProtectedMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.ProtectedMemberPrefix
+    value: m_
+  - key: readability-identifier-naming.TemplateParameterCase
+    value: CamelCase

@@ -17,9 +17,13 @@ namespace alt
 	constexpr auto to_underlying(T value) noexcept -> underlying_int_t<T>
 	{
 		if constexpr(std::is_enum_v<T>)
+		{
 			return static_cast<underlying_int_t<T>>(value);
+		}
 		else
+		{
 			return value;
+		}
 	}
 
 } // namespace alt

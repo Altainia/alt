@@ -9,16 +9,37 @@ A generic C++23 utility library. Namespace: `alt`.
 
 ## Build
 
-### Debug build with tests
+### Using CMake presets (recommended)
+
+The project ships with named presets. Configure, build, and test in one line:
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --preset debug && cmake --build --preset debug
+ctest --preset debug --output-on-failure
 ```
 
-### Release build without tests
+Available presets:
+
+| Preset | Compiler | Sanitizers | Notes |
+|--------|----------|------------|-------|
+| `debug` | default | none | Standard debug build |
+| `debug-asan` | default | ASan + UBSan | AddressSanitizer + UndefinedBehaviorSanitizer |
+| `debug-msan` | Clang | MSan | Requires MSan-instrumented libc++ — see note below |
+| `debug-coverage` | GCC | none | gcov instrumentation for lcov reports |
+| `release` | default | none | Optimised release build |
+
+> **MSan note:** MemorySanitizer requires a fully instrumented C++ standard library.
+> The `debug-msan` preset is provided for use with a custom MSan-instrumented
+> libc++ build. It will not work correctly with the system libstdc++.
+
+### Manual build
 
 ```bash
+# Debug build with tests
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+
+# Release build without tests
 cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
@@ -26,9 +47,54 @@ cmake --build build/release
 ## Running the tests
 
 ```bash
+ctest --preset debug --output-on-failure
+```
+
+Or without presets:
+
+```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+## Quality checks
+
+### Sanitizers
+
+Run the test suite under AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```bash
+cmake --preset debug-asan && cmake --build --preset debug-asan
+ctest --preset debug-asan --output-on-failure
+```
+
+### Static analysis — clang-tidy
+
+Runs clang-tidy on every compiled translation unit (library and tests).
+Requires `clang-tidy` on `PATH`.
+
+```bash
+cmake -B build/tidy -DALT_CLANG_TIDY=ON -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/tidy
+```
+
+### Static analysis — cppcheck
+
+```bash
+cmake -B build/check -DALT_CPPCHECK=ON
+cmake --build build/check --target cppcheck
+```
+
+### Code coverage
+
+Requires GCC and `lcov`/`genhtml`. Produces an HTML report in `build/debug-coverage/coverage/`.
+
+```bash
+cmake --preset debug-coverage && cmake --build --preset debug-coverage
+ctest --preset debug-coverage --output-on-failure
+cmake --build --preset debug-coverage --target coverage
+xdg-open build/debug-coverage/coverage/index.html
 ```
 
 ## Installation
