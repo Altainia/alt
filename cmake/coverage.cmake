@@ -33,7 +33,7 @@ function(alt_add_coverage_target binary_dir)
             --capture
             --directory ${binary_dir}
             --output-file ${binary_dir}/coverage.info
-            --ignore-errors inconsistent,inconsistent
+            --ignore-errors inconsistent,inconsistent,mismatch
         COMMAND ${LCOV_PATH}
             --remove ${binary_dir}/coverage.info
             "/usr/*"
