@@ -34,7 +34,7 @@ namespace
 		{
 			auto* raw = reinterpret_cast<std::byte*>(p);
 			// clearing_allocator zeroes before delegating here, so captured bytes should be all zero
-			captured->assign(raw, raw + n * sizeof(T));
+			captured->assign(raw, raw + (n * sizeof(T)));
 			std::allocator<T>{}.deallocate(p, n);
 		}
 	};
@@ -56,7 +56,7 @@ namespace
 
 	TEST(ClearMemory, ZeroesMultiByteBuffer)
 	{
-		std::array<unsigned char, 64> buf;
+		std::array<unsigned char, 64> buf{};
 		buf.fill(0xAB);
 		alt::clear_memory(buf.data(), buf.size());
 		EXPECT_TRUE(std::all_of(buf.begin(), buf.end(), [](unsigned char b) { return b == 0x00u; }));
@@ -72,7 +72,9 @@ namespace
 		alt::clear_memory(buf + 1, 8);
 
 		for(std::size_t i = 1; i <= 8u; ++i)
+		{
 			EXPECT_EQ(buf[i], 0x00u) << "index " << i;
+		}
 		EXPECT_EQ(buf[0], 0xDEu);
 		EXPECT_EQ(buf[9], 0xDEu);
 	}
@@ -146,7 +148,9 @@ namespace
 
 		std::vector<int, alt::clearing_allocator<int, spy_allocator<int>>> v{alloc};
 		for(int i = 0; i < 100; ++i)
+		{
 			v.push_back(i);
+		}
 
 		// Repeated push_back triggers reallocations; each reallocation deallocates
 		// the old buffer through clearing_allocator, which zeroes it first.

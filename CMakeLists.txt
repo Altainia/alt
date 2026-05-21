@@ -17,7 +17,6 @@ option(ALT_CPPCHECK "Add a 'cppcheck' custom build target" OFF)
 
 if(ALT_CLANG_TIDY)
     find_program(CLANG_TIDY_PATH clang-tidy REQUIRED)
-    set(CMAKE_CXX_CLANG_TIDY ${CLANG_TIDY_PATH})
 endif()
 
 file(GLOB_RECURSE ALT_SOURCES CONFIGURE_DEPENDS src/*.cpp)
@@ -35,6 +34,10 @@ alt_add_warnings(alt)
 alt_add_sanitizers(alt)
 alt_add_coverage(alt)
 
+if(ALT_CLANG_TIDY)
+    set_target_properties(alt PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_PATH}")
+endif()
+
 if(ALT_CPPCHECK)
     find_program(CPPCHECK_PATH cppcheck REQUIRED)
     add_custom_target(cppcheck
@@ -44,6 +47,7 @@ if(ALT_CPPCHECK)
             --error-exitcode=1
             --suppress=missingIncludeSystem
             --suppress=unmatchedSuppression
+            --suppress=unusedFunction
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

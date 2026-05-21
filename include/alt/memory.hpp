@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#if defined(_WIN32)
+#ifdef _WIN32
 #	include <windows.h>
 #elif (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
 #	include <string.h>
@@ -23,7 +23,7 @@ namespace alt
 	 */
 	inline void clear_memory(void* p, std::size_t n) noexcept
 	{
-#if defined(_WIN32)
+#ifdef _WIN32
 		SecureZeroMemory(p, n);
 #elif (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
 		explicit_bzero(p, n);
@@ -132,7 +132,7 @@ namespace alt
 		}
 
 		/** @brief Returns a reference to the underlying allocator. */
-		Alloc& underlying() noexcept
+		[[nodiscard]] Alloc& underlying() noexcept
 		{
 			return m_alloc;
 		}
@@ -140,13 +140,13 @@ namespace alt
 		/**
 		 * @brief Returns a const reference to the underlying allocator.
 		 */
-		Alloc const& underlying() const noexcept
+		[[nodiscard]] Alloc const& underlying() const noexcept
 		{
 			return m_alloc;
 		}
 
 	private:
-		[[no_unique_address]] Alloc m_alloc{};
+		[[no_unique_address]] Alloc m_alloc;
 	};
 
 	/**
@@ -231,13 +231,13 @@ namespace alt::detail
 		}
 
 		/** @brief Returns the wrapped @c clearing_allocator. */
-		alt::clearing_allocator<T, Alloc> to_clearing_allocator() const noexcept
+		[[nodiscard]] alt::clearing_allocator<T, Alloc> to_clearing_allocator() const noexcept
 		{
 			return m_alloc;
 		}
 
 	private:
-		[[no_unique_address]] alt::clearing_allocator<T, Alloc> m_alloc{};
+		[[no_unique_address]] alt::clearing_allocator<T, Alloc> m_alloc;
 	};
 
 	template<typename T, typename U, typename Alloc>
@@ -309,7 +309,7 @@ namespace std
 		// Bring in all StorageBase constructors. Those that default-construct the
 		// allocator will use basic_string_clearing_alloc{} (identical behaviour to
 		// default-constructed clearing_allocator{}).
-		using StorageBase::StorageBase;
+		using StorageBase::StorageBase; // NOLINT(modernize-use-equals-default)
 
 		/** @brief Default constructor. */
 		basic_string() = default;
@@ -517,7 +517,7 @@ namespace std
 		 * @brief Returns the allocator associated with this string.
 		 * @return @c alt::clearing_allocator<CharT, Alloc> for this object.
 		 */
-		allocator_type get_allocator() const noexcept
+		[[nodiscard]] allocator_type get_allocator() const noexcept
 		{
 			return StorageBase::get_allocator().to_clearing_allocator();
 		}
@@ -533,7 +533,7 @@ namespace std
 		 * @param pos   Start position. Throws @c std::out_of_range if @p pos > size().
 		 * @param count Length of the substring (clamped to available characters).
 		 */
-		Spec substr(size_type pos = 0, size_type count = npos) const
+		[[nodiscard]] Spec substr(size_type pos = 0, size_type count = npos) const
 		{
 			return Spec(StorageBase::substr(pos, count));
 		}

@@ -31,7 +31,7 @@
     {
       "name": "debug-msan",
       "displayName": "Debug + MSan (Clang only)",
-      "description": "Debug build with MemorySanitizer; requires Clang",
+      "description": "Debug build with MemorySanitizer. Requires Clang AND a fully MSan-instrumented libc++ — does not work with the default libstdc++. Not run in CI for this reason.",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",

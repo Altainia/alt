@@ -33,12 +33,14 @@ function(alt_add_coverage_target binary_dir)
             --capture
             --directory ${binary_dir}
             --output-file ${binary_dir}/coverage.info
+            --ignore-errors inconsistent,inconsistent
         COMMAND ${LCOV_PATH}
             --remove ${binary_dir}/coverage.info
             "/usr/*"
             "*/googletest/*"
             "*/gtest/*"
             --output-file ${binary_dir}/coverage.filtered.info
+            --ignore-errors inconsistent,inconsistent,unused
         COMMAND ${GENHTML_PATH}
             --output-directory ${binary_dir}/coverage
             ${binary_dir}/coverage.filtered.info

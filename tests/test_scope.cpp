@@ -113,7 +113,7 @@ TEST(ScopeExit, MoveSourceDoesNotCall)
 {
 	int  calls = 0;
 	auto g1    = std::make_unique<alt::scope_exit<std::function<void()>>>(
-	  std::function<void()>{[&] { ++calls; }});
+    std::function<void()>{[&] { ++calls; }});
 	alt::scope_exit g2{std::move(*g1)};
 	g1.reset(); // destroy g1 (already released)
 	EXPECT_EQ(calls, 0);
@@ -423,8 +423,10 @@ namespace
 		int* count{};
 		void operator()(int) const noexcept
 		{
-			if(count)
+			if(count != nullptr)
+			{
 				++(*count);
+			}
 		}
 	};
 
@@ -434,8 +436,10 @@ namespace
 		std::vector<int>* deleted{};
 		void              operator()(int v) const
 		{
-			if(deleted)
+			if(deleted != nullptr)
+			{
 				deleted->push_back(v);
+			}
 		}
 	};
 
@@ -653,7 +657,7 @@ TEST(UniqueResourceMove, MovedObjectCanBeReset)
 	auto ur2   = std::move(ur1);
 	ur2.reset();
 	EXPECT_EQ(calls, 1);
-	ur1.reset(); // no-op
+	ur1.reset(); // NOLINT(bugprone-use-after-move): intentional — tests that moved-from unique_resource is in released state
 	EXPECT_EQ(calls, 1);
 }
 
@@ -813,7 +817,7 @@ TEST(MakeUniqueResourceChecked, CustomSentinelType)
 		short res     = 5;
 		int   invalid = -1;
 		auto  ur      = alt::make_unique_resource_checked<short, CallCounter, int>(
-		  std::move(res), invalid, CallCounter{calls});
+      std::move(res), invalid, CallCounter{calls});
 	}
 	EXPECT_EQ(calls, 1);
 }

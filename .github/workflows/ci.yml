@@ -49,19 +49,11 @@ jobs:
       - name: Test
         run: ctest --preset debug-asan
 
-  msan:
-    name: MemorySanitizer (Clang)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Configure
-        run: cmake --preset debug-msan -DALT_WARNINGS_AS_ERRORS=ON
-      - name: Build
-        run: cmake --build --preset debug-msan
-      - name: Test
-        run: ctest --preset debug-msan
+  # MSan (MemorySanitizer) is intentionally excluded from CI. MSan requires a
+  # fully MSan-instrumented C++ standard library (libc++) to avoid false
+  # positives and deadlocks in the error reporter. The debug-msan preset is
+  # provided for local use by developers who have a properly instrumented
+  # libc++ toolchain. See: https://clang.llvm.org/docs/MemorySanitizer.html
 
   clang-tidy:
     name: clang-tidy
