@@ -14,7 +14,7 @@ namespace alt {
 }
 ```
 
-Zeroes `n` bytes starting at `p` in a way that the compiler will not optimise away. A plain `memset` can be eliminated by the optimiser when the memory is never read again; `clear_memory` prevents this.
+Zeroes `n` bytes starting at `p` in a way that the compiler will not optimize away. A plain `memset` can be eliminated by the optimizer when the memory is never read again; `clear_memory` prevents this.
 
 - `n == 0` is a no-op. `p` may be null when `n == 0`.
 - Uses the best platform primitive available: `SecureZeroMemory` on Windows, `explicit_bzero` on glibc 2.25+/macOS, or a volatile loop fallback.

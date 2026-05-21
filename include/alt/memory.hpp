@@ -16,7 +16,7 @@ namespace alt
 {
 
 	/**
-	 * @brief Zeroes n bytes starting at p in a way the compiler will not optimise away.
+	 * @brief Zeroes n bytes starting at p in a way the compiler will not optimize away.
 	 * @param p  Pointer to memory to zero. Must point to at least n addressable bytes.
 	 *           May be null only when n == 0.
 	 * @param n  Number of bytes to zero. A value of 0 is a no-op.
@@ -176,7 +176,7 @@ namespace alt::detail
 	 *        @c std::basic_string partial specialization on @c alt::clearing_allocator.
 	 *
 	 * Wraps @c alt::clearing_allocator<T, Alloc> with identical allocate/deallocate
-	 * behaviour but is a **distinct C++ type**, preventing the partial specialization
+	 * behavior but is a **distinct C++ type**, preventing the partial specialization
 	 * from triggering when @c std::basic_string internally rebinds its own allocator.
 	 */
 	template<typename T, typename Alloc = std::allocator<T>>
@@ -307,7 +307,7 @@ namespace std
 		// ---- Constructors ----
 
 		// Bring in all StorageBase constructors. Those that default-construct the
-		// allocator will use basic_string_clearing_alloc{} (identical behaviour to
+		// allocator will use basic_string_clearing_alloc{} (identical behavior to
 		// default-constructed clearing_allocator{}).
 		using StorageBase::StorageBase; // NOLINT(modernize-use-equals-default)
 

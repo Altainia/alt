@@ -62,7 +62,7 @@ namespace
 		EXPECT_TRUE(std::all_of(buf.begin(), buf.end(), [](unsigned char b) { return b == 0x00u; }));
 	}
 
-	TEST(ClearMemory, LeavesNeighboursUntouched)
+	TEST(ClearMemory, LeavesNeighborsUntouched)
 	{
 		unsigned char buf[10];
 		buf[0] = 0xDE;

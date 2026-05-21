@@ -26,7 +26,7 @@ Available presets:
 | `debug-asan` | default | ASan + UBSan | AddressSanitizer + UndefinedBehaviorSanitizer |
 | `debug-msan` | Clang | MSan | Requires MSan-instrumented libc++ — see note below |
 | `debug-coverage` | GCC | none | gcov instrumentation for lcov reports |
-| `release` | default | none | Optimised release build |
+| `release` | default | none | Optimized release build |
 
 > **MSan note:** MemorySanitizer requires a fully instrumented C++ standard library.
 > The `debug-msan` preset is provided for use with a custom MSan-instrumented
