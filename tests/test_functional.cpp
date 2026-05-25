@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <alt/concepts.hpp>
 #include <alt/functional.hpp>
 #include <ranges>
@@ -479,7 +478,8 @@ TEST(Equals, StringComparison)
 TEST(Equals, RangesFilter)
 {
 	std::vector<int> const v{1, 2, 3, 2, 1};
-	auto const             result = v | std::views::filter(alt::equals{2}) | std::ranges::to<std::vector>();
+	auto                   view = v | std::views::filter(alt::equals{2});
+	std::vector<int> const result(view.begin(), view.end());
 	EXPECT_EQ(result, (std::vector<int>{2, 2}));
 }
 
@@ -503,7 +503,8 @@ TEST(NotEquals, BasicInt)
 TEST(NotEquals, RangesFilter)
 {
 	std::vector<int> const v{1, 2, 3, 2, 1};
-	auto const             result = v | std::views::filter(alt::not_equals{2}) | std::ranges::to<std::vector>();
+	auto                   view = v | std::views::filter(alt::not_equals{2});
+	std::vector<int> const result(view.begin(), view.end());
 	EXPECT_EQ(result, (std::vector<int>{1, 3, 1}));
 }
 
@@ -533,7 +534,8 @@ TEST(Less, CrossTypeIntAndShort)
 TEST(Less, RangesFilter)
 {
 	std::vector<int> const v{1, 3, 5, 7, 9};
-	auto const             result = v | std::views::filter(alt::less{5}) | std::ranges::to<std::vector>();
+	auto                   view = v | std::views::filter(alt::less{5});
+	std::vector<int> const result(view.begin(), view.end());
 	EXPECT_EQ(result, (std::vector<int>{1, 3}));
 }
 
@@ -558,7 +560,8 @@ TEST(Greater, BasicInt)
 TEST(Greater, RangesFilter)
 {
 	std::vector<int> const v{1, 3, 5, 7, 9};
-	auto const             result = v | std::views::filter(alt::greater{5}) | std::ranges::to<std::vector>();
+	auto                   view = v | std::views::filter(alt::greater{5});
+	std::vector<int> const result(view.begin(), view.end());
 	EXPECT_EQ(result, (std::vector<int>{7, 9}));
 }
 
@@ -583,7 +586,8 @@ TEST(LessEqual, BasicInt)
 TEST(LessEqual, RangesFilter)
 {
 	std::vector<int> const v{1, 3, 5, 7, 9};
-	auto const             result = v | std::views::filter(alt::less_equal{5}) | std::ranges::to<std::vector>();
+	auto                   view = v | std::views::filter(alt::less_equal{5});
+	std::vector<int> const result(view.begin(), view.end());
 	EXPECT_EQ(result, (std::vector<int>{1, 3, 5}));
 }
 
@@ -608,7 +612,8 @@ TEST(GreaterEqual, BasicInt)
 TEST(GreaterEqual, RangesFilter)
 {
 	std::vector<int> const v{1, 3, 5, 7, 9};
-	auto const             result = v | std::views::filter(alt::greater_equal{5}) | std::ranges::to<std::vector>();
+	auto                   view = v | std::views::filter(alt::greater_equal{5});
+	std::vector<int> const result(view.begin(), view.end());
 	EXPECT_EQ(result, (std::vector<int>{5, 7, 9}));
 }
 
