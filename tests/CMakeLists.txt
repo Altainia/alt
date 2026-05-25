@@ -25,6 +25,7 @@ if(ALT_SANITIZE STREQUAL "memory")
 endif()
 
 add_executable(alt_tests
+    test_algorithm.cpp
     test_version.cpp
     test_flags.cpp
     test_functional.cpp
