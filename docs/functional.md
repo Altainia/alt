@@ -145,6 +145,86 @@ alt::any_of(pred, -1, 2, 3);  // transformer overload — applies pred to each i
 
 ---
 
+## Partial comparison functors
+
+These functors capture a single value at construction and expose a call operator that compares an incoming argument against the stored value. They are designed to be passed directly to range adaptors and algorithms.
+
+The value is **stored by value**. For reference semantics, wrap with `std::ref` or `std::cref`.
+
+```cpp
+std::vector<int> v{1, 2, 3, 2, 1};
+auto twos = v | std::views::filter(alt::equals{2});        // {2, 2}
+auto small = v | std::views::filter(alt::less{3});         // {1, 2, 2, 1, 1}
+auto big   = v | std::views::filter(alt::greater_equal{3}); // {3}
+```
+
+The functors also compose naturally with the combinators above:
+
+```cpp
+alt::all_of(alt::greater{0}, 1, 2, 3);   // true
+alt::any_of(alt::equals{9}, 1, 2, 3);    // false
+```
+
+### `equals`
+
+Returns `true` when the argument compares equal (`==`) to the stored value.
+
+```cpp
+alt::equals{2}(2)   // true
+alt::equals{2}(3)   // false
+```
+
+### `not_equals`
+
+Returns `true` when the argument does not compare equal (`!=`) to the stored value.
+
+```cpp
+alt::not_equals{2}(3)   // true
+alt::not_equals{2}(2)   // false
+```
+
+### `less`
+
+Returns `true` when the argument is less than (`<`) the stored value.
+
+```cpp
+alt::less{5}(3)   // true  — 3 < 5
+alt::less{5}(5)   // false — 5 is not < 5
+alt::less{5}(7)   // false
+```
+
+### `greater`
+
+Returns `true` when the argument is greater than (`>`) the stored value.
+
+```cpp
+alt::greater{5}(7)   // true  — 7 > 5
+alt::greater{5}(5)   // false
+alt::greater{5}(3)   // false
+```
+
+### `less_equal`
+
+Returns `true` when the argument is less than or equal to (`<=`) the stored value.
+
+```cpp
+alt::less_equal{5}(3)   // true
+alt::less_equal{5}(5)   // true
+alt::less_equal{5}(7)   // false
+```
+
+### `greater_equal`
+
+Returns `true` when the argument is greater than or equal to (`>=`) the stored value.
+
+```cpp
+alt::greater_equal{5}(5)   // true
+alt::greater_equal{5}(7)   // true
+alt::greater_equal{5}(3)   // false
+```
+
+---
+
 ## Short-circuit guarantees
 
 | Combinator | Stops evaluating when… |

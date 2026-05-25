@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <alt/concepts.hpp>
 #include <alt/functional.hpp>
+#include <ranges>
+#include <string>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Helpers shared across tests
@@ -444,4 +448,195 @@ TEST(Constexpr, CallableOverloadStaticAsserts)
 	static_assert(!alt::at_most<1>(positive, 1, 2));
 	static_assert(alt::exactly<2>(positive, 1, 2, -1));
 	static_assert(!alt::exactly<2>(positive, 1, 2, 3));
+}
+
+// ---------------------------------------------------------------------------
+// equals
+// ---------------------------------------------------------------------------
+
+TEST(Equals, BasicInt)
+{
+	EXPECT_TRUE(alt::equals{2}(2));
+	EXPECT_FALSE(alt::equals{2}(3));
+	EXPECT_FALSE(alt::equals{2}(-2));
+}
+
+TEST(Equals, CrossTypeIntAndShort)
+{
+	short const s2{2};
+	short const s3{3};
+	EXPECT_TRUE(alt::equals{2}(s2));
+	EXPECT_FALSE(alt::equals{2}(s3));
+}
+
+TEST(Equals, StringComparison)
+{
+	std::string const hello{"hello"};
+	EXPECT_TRUE(alt::equals{std::string{"hello"}}(hello));
+	EXPECT_FALSE(alt::equals{std::string{"world"}}(hello));
+}
+
+TEST(Equals, RangesFilter)
+{
+	std::vector<int> const v{1, 2, 3, 2, 1};
+	auto const             result = v | std::views::filter(alt::equals{2}) | std::ranges::to<std::vector>();
+	EXPECT_EQ(result, (std::vector<int>{2, 2}));
+}
+
+TEST(Equals, Constexpr)
+{
+	static_assert(alt::equals{5}(5));
+	static_assert(!alt::equals{5}(4));
+}
+
+// ---------------------------------------------------------------------------
+// not_equals
+// ---------------------------------------------------------------------------
+
+TEST(NotEquals, BasicInt)
+{
+	EXPECT_TRUE(alt::not_equals{2}(3));
+	EXPECT_TRUE(alt::not_equals{2}(-2));
+	EXPECT_FALSE(alt::not_equals{2}(2));
+}
+
+TEST(NotEquals, RangesFilter)
+{
+	std::vector<int> const v{1, 2, 3, 2, 1};
+	auto const             result = v | std::views::filter(alt::not_equals{2}) | std::ranges::to<std::vector>();
+	EXPECT_EQ(result, (std::vector<int>{1, 3, 1}));
+}
+
+TEST(NotEquals, Constexpr)
+{
+	static_assert(alt::not_equals{5}(4));
+	static_assert(!alt::not_equals{5}(5));
+}
+
+// ---------------------------------------------------------------------------
+// less
+// ---------------------------------------------------------------------------
+
+TEST(Less, BasicInt)
+{
+	EXPECT_TRUE(alt::less{5}(3));
+	EXPECT_FALSE(alt::less{5}(5));
+	EXPECT_FALSE(alt::less{5}(6));
+}
+
+TEST(Less, CrossTypeIntAndShort)
+{
+	EXPECT_TRUE(alt::less{5}(short{3}));
+	EXPECT_FALSE(alt::less{5}(short{5}));
+}
+
+TEST(Less, RangesFilter)
+{
+	std::vector<int> const v{1, 3, 5, 7, 9};
+	auto const             result = v | std::views::filter(alt::less{5}) | std::ranges::to<std::vector>();
+	EXPECT_EQ(result, (std::vector<int>{1, 3}));
+}
+
+TEST(Less, Constexpr)
+{
+	static_assert(alt::less{5}(3));
+	static_assert(!alt::less{5}(5));
+	static_assert(!alt::less{5}(7));
+}
+
+// ---------------------------------------------------------------------------
+// greater
+// ---------------------------------------------------------------------------
+
+TEST(Greater, BasicInt)
+{
+	EXPECT_TRUE(alt::greater{5}(7));
+	EXPECT_FALSE(alt::greater{5}(5));
+	EXPECT_FALSE(alt::greater{5}(3));
+}
+
+TEST(Greater, RangesFilter)
+{
+	std::vector<int> const v{1, 3, 5, 7, 9};
+	auto const             result = v | std::views::filter(alt::greater{5}) | std::ranges::to<std::vector>();
+	EXPECT_EQ(result, (std::vector<int>{7, 9}));
+}
+
+TEST(Greater, Constexpr)
+{
+	static_assert(alt::greater{5}(7));
+	static_assert(!alt::greater{5}(5));
+	static_assert(!alt::greater{5}(3));
+}
+
+// ---------------------------------------------------------------------------
+// less_equal
+// ---------------------------------------------------------------------------
+
+TEST(LessEqual, BasicInt)
+{
+	EXPECT_TRUE(alt::less_equal{5}(3));
+	EXPECT_TRUE(alt::less_equal{5}(5));
+	EXPECT_FALSE(alt::less_equal{5}(6));
+}
+
+TEST(LessEqual, RangesFilter)
+{
+	std::vector<int> const v{1, 3, 5, 7, 9};
+	auto const             result = v | std::views::filter(alt::less_equal{5}) | std::ranges::to<std::vector>();
+	EXPECT_EQ(result, (std::vector<int>{1, 3, 5}));
+}
+
+TEST(LessEqual, Constexpr)
+{
+	static_assert(alt::less_equal{5}(3));
+	static_assert(alt::less_equal{5}(5));
+	static_assert(!alt::less_equal{5}(7));
+}
+
+// ---------------------------------------------------------------------------
+// greater_equal
+// ---------------------------------------------------------------------------
+
+TEST(GreaterEqual, BasicInt)
+{
+	EXPECT_TRUE(alt::greater_equal{5}(7));
+	EXPECT_TRUE(alt::greater_equal{5}(5));
+	EXPECT_FALSE(alt::greater_equal{5}(3));
+}
+
+TEST(GreaterEqual, RangesFilter)
+{
+	std::vector<int> const v{1, 3, 5, 7, 9};
+	auto const             result = v | std::views::filter(alt::greater_equal{5}) | std::ranges::to<std::vector>();
+	EXPECT_EQ(result, (std::vector<int>{5, 7, 9}));
+}
+
+TEST(GreaterEqual, Constexpr)
+{
+	static_assert(alt::greater_equal{5}(7));
+	static_assert(alt::greater_equal{5}(5));
+	static_assert(!alt::greater_equal{5}(3));
+}
+
+// ---------------------------------------------------------------------------
+// Composability with existing functional combinators
+// ---------------------------------------------------------------------------
+
+TEST(PartialComparison, ComposedWithAnyOf)
+{
+	EXPECT_TRUE(alt::any_of(alt::equals{2}, 1, 2, 3));
+	EXPECT_FALSE(alt::any_of(alt::equals{9}, 1, 2, 3));
+}
+
+TEST(PartialComparison, ComposedWithAllOf)
+{
+	EXPECT_TRUE(alt::all_of(alt::greater{0}, 1, 2, 3));
+	EXPECT_FALSE(alt::all_of(alt::greater{0}, 1, -1, 3));
+}
+
+TEST(PartialComparison, ComposedWithNoneOf)
+{
+	EXPECT_TRUE(alt::none_of(alt::equals{9}, 1, 2, 3));
+	EXPECT_FALSE(alt::none_of(alt::equals{2}, 1, 2, 3));
 }
