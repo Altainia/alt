@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.1.0`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.2.0`.
 
 ## Directory layout
 
@@ -89,14 +89,14 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.1.0_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.2.0_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.1.0 REQUIRED)
+find_package(Alt 1.2.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
