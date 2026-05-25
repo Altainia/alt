@@ -357,4 +357,183 @@ namespace alt
 		}
 	}
 
+	// ---------------------------------------------------------------------------
+	// Partial comparison functors
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * @brief Functor that tests whether its argument equals a stored value.
+	 *
+	 * The value is captured by value at construction. Intended for use with
+	 * range adaptors and algorithms:
+	 * @code
+	 *   std::vector<int> v{1, 2, 3, 2, 1};
+	 *   auto twos = v | std::views::filter(alt::equals{2});
+	 * @endcode
+	 *
+	 * @tparam T Type of the stored comparison value.
+	 */
+	template<typename T>
+	struct equals
+	{
+		/** @brief Stores @p value for later comparison. */
+		constexpr explicit equals(T value) noexcept(std::is_nothrow_move_constructible_v<T>): m_value(std::move(value))
+		{}
+
+		/** @brief Returns true when @p other == stored value. */
+		template<typename U>
+		  requires std::equality_comparable_with<U, T>
+		[[nodiscard]] constexpr bool operator()(U&& other) const
+		  noexcept(noexcept(std::forward<U>(other) == m_value))
+		{
+			return std::forward<U>(other) == m_value;
+		}
+
+	private:
+		T m_value;
+	};
+
+	template<typename T>
+	equals(T) -> equals<std::decay_t<T>>;
+
+	/**
+	 * @brief Functor that tests whether its argument does not equal a stored value.
+	 *
+	 * @tparam T Type of the stored comparison value.
+	 */
+	template<typename T>
+	struct not_equals
+	{
+		/** @brief Stores @p value for later comparison. */
+		constexpr explicit not_equals(T value) noexcept(std::is_nothrow_move_constructible_v<T>): m_value(std::move(value))
+		{}
+
+		/** @brief Returns true when @p other != stored value. */
+		template<typename U>
+		  requires std::equality_comparable_with<U, T>
+		[[nodiscard]] constexpr bool operator()(U&& other) const
+		  noexcept(noexcept(std::forward<U>(other) != m_value))
+		{
+			return std::forward<U>(other) != m_value;
+		}
+
+	private:
+		T m_value;
+	};
+
+	template<typename T>
+	not_equals(T) -> not_equals<std::decay_t<T>>;
+
+	/**
+	 * @brief Functor that tests whether its argument is less than a stored value.
+	 *
+	 * @tparam T Type of the stored comparison value.
+	 */
+	template<typename T>
+	struct less
+	{
+		/** @brief Stores @p value for later comparison. */
+		constexpr explicit less(T value) noexcept(std::is_nothrow_move_constructible_v<T>): m_value(std::move(value))
+		{}
+
+		/** @brief Returns true when @p other < stored value. */
+		template<typename U>
+		  requires std::totally_ordered_with<U, T>
+		[[nodiscard]] constexpr bool operator()(U&& other) const
+		  noexcept(noexcept(std::forward<U>(other) < m_value))
+		{
+			return std::forward<U>(other) < m_value;
+		}
+
+	private:
+		T m_value;
+	};
+
+	template<typename T>
+	less(T) -> less<std::decay_t<T>>;
+
+	/**
+	 * @brief Functor that tests whether its argument is greater than a stored value.
+	 *
+	 * @tparam T Type of the stored comparison value.
+	 */
+	template<typename T>
+	struct greater
+	{
+		/** @brief Stores @p value for later comparison. */
+		constexpr explicit greater(T value) noexcept(std::is_nothrow_move_constructible_v<T>): m_value(std::move(value))
+		{}
+
+		/** @brief Returns true when @p other > stored value. */
+		template<typename U>
+		  requires std::totally_ordered_with<U, T>
+		[[nodiscard]] constexpr bool operator()(U&& other) const
+		  noexcept(noexcept(std::forward<U>(other) > m_value))
+		{
+			return std::forward<U>(other) > m_value;
+		}
+
+	private:
+		T m_value;
+	};
+
+	template<typename T>
+	greater(T) -> greater<std::decay_t<T>>;
+
+	/**
+	 * @brief Functor that tests whether its argument is less than or equal to a stored value.
+	 *
+	 * @tparam T Type of the stored comparison value.
+	 */
+	template<typename T>
+	struct less_equal
+	{
+		/** @brief Stores @p value for later comparison. */
+		constexpr explicit less_equal(T value) noexcept(std::is_nothrow_move_constructible_v<T>): m_value(std::move(value))
+		{}
+
+		/** @brief Returns true when @p other <= stored value. */
+		template<typename U>
+		  requires std::totally_ordered_with<U, T>
+		[[nodiscard]] constexpr bool operator()(U&& other) const
+		  noexcept(noexcept(std::forward<U>(other) <= m_value))
+		{
+			return std::forward<U>(other) <= m_value;
+		}
+
+	private:
+		T m_value;
+	};
+
+	template<typename T>
+	less_equal(T) -> less_equal<std::decay_t<T>>;
+
+	/**
+	 * @brief Functor that tests whether its argument is greater than or equal to a stored value.
+	 *
+	 * @tparam T Type of the stored comparison value.
+	 */
+	template<typename T>
+	struct greater_equal
+	{
+		/** @brief Stores @p value for later comparison. */
+		constexpr explicit greater_equal(T value) noexcept(std::is_nothrow_move_constructible_v<T>): m_value(std::move(value))
+		{}
+
+		/** @brief Returns true when @p other >= stored value. */
+		template<typename U>
+		  requires std::totally_ordered_with<U, T>
+		[[nodiscard]] constexpr bool operator()(U&& other) const
+		  noexcept(noexcept(std::forward<U>(other) >= m_value))
+		{
+			return std::forward<U>(other) >= m_value;
+		}
+
+	private:
+		T m_value;
+	};
+
+	template<typename T>
+	greater_equal(T) -> greater_equal<std::decay_t<T>>;
+
 } // namespace alt
