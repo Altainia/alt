@@ -116,11 +116,11 @@ namespace alt
 							out[0] = order_unit<TargetChar>(static_cast<TargetChar>(cp), TargetEndian);
 							return 1;
 						}
-						const char32_t   v  = cp - 0x10000;
-						const TargetChar hi = static_cast<TargetChar>(0xD800 + (v >> 10));
-						const TargetChar lo = static_cast<TargetChar>(0xDC00 + (v & 0x3FF));
-						out[0]              = order_unit<TargetChar>(hi, TargetEndian);
-						out[1]              = order_unit<TargetChar>(lo, TargetEndian);
+						const char32_t v  = cp - 0x10000;
+						const auto     hi = static_cast<TargetChar>(0xD800 + (v >> 10));
+						const auto     lo = static_cast<TargetChar>(0xDC00 + (v & 0x3FF));
+						out[0]            = order_unit<TargetChar>(hi, TargetEndian);
+						out[1]            = order_unit<TargetChar>(lo, TargetEndian);
 						return 2;
 					}
 					else
@@ -159,55 +159,42 @@ namespace alt
 						len = 2;
 						cp  = b0 & 0x1F;
 					}
-					else if(b0 == 0xE0)
+					else if(b0 >= 0xE0 && b0 <= 0xEF)
 					{
 						len = 3;
 						cp  = b0 & 0x0F;
-						lo2 = 0xA0;
+						if(b0 == 0xE0)
+						{
+							lo2 = 0xA0;
+						}
+						else if(b0 == 0xED)
+						{
+							hi2 = 0x9F;
+						}
 					}
-					else if(b0 >= 0xE1 && b0 <= 0xEC)
-					{
-						len = 3;
-						cp  = b0 & 0x0F;
-					}
-					else if(b0 == 0xED)
-					{
-						len = 3;
-						cp  = b0 & 0x0F;
-						hi2 = 0x9F;
-					}
-					else if(b0 >= 0xEE && b0 <= 0xEF)
-					{
-						len = 3;
-						cp  = b0 & 0x0F;
-					}
-					else if(b0 == 0xF0)
+					else if(b0 >= 0xF0 && b0 <= 0xF4)
 					{
 						len = 4;
 						cp  = b0 & 0x07;
-						lo2 = 0x90;
-					}
-					else if(b0 >= 0xF1 && b0 <= 0xF3)
-					{
-						len = 4;
-						cp  = b0 & 0x07;
-					}
-					else if(b0 == 0xF4)
-					{
-						len = 4;
-						cp  = b0 & 0x07;
-						hi2 = 0x8F;
+						if(b0 == 0xF0)
+						{
+							lo2 = 0x90;
+						}
+						else if(b0 == 0xF4)
+						{
+							hi2 = 0x8F;
+						}
 					}
 					else
 					{
-						return replacement_character;
-					} // 0x80-0xC1, 0xF5-0xFF: invalid lead
+						return replacement_character; // 0x80-0xC1, 0xF5-0xFF: invalid lead
+					}
 
 					if(current == end)
 					{
 						return replacement_character;
 					}
-					unsigned char b = static_cast<unsigned char>(*current);
+					auto b = static_cast<unsigned char>(*current);
 					if(b < lo2 || b > hi2)
 					{
 						return replacement_character; // do not consume: may start a new sequence
@@ -244,7 +231,7 @@ namespace alt
 				template<std::endian SourceEndian, std::input_iterator It, std::sentinel_for<It> Sent>
 				constexpr char32_t decode_one_utf16(It& current, Sent end)
 				{
-					const char16_t w0 = order_unit<char16_t>(static_cast<char16_t>(*current), SourceEndian);
+					const auto w0 = order_unit<char16_t>(static_cast<char16_t>(*current), SourceEndian);
 					++current;
 					if(w0 < 0xD800 || w0 > 0xDFFF)
 					{
@@ -258,7 +245,7 @@ namespace alt
 					{
 						return replacement_character; // high surrogate at end of input
 					}
-					const char16_t w1 = order_unit<char16_t>(static_cast<char16_t>(*current), SourceEndian);
+					const auto w1 = order_unit<char16_t>(static_cast<char16_t>(*current), SourceEndian);
 					if(w1 < 0xDC00 || w1 > 0xDFFF)
 					{
 						return replacement_character; // do not consume the mismatched unit
@@ -279,7 +266,7 @@ namespace alt
 				constexpr char32_t decode_one_utf32(It& current, Sent end)
 				{
 					(void)end;
-					const char32_t cp = order_unit<char32_t>(static_cast<char32_t>(*current), SourceEndian);
+					const auto cp = order_unit<char32_t>(static_cast<char32_t>(*current), SourceEndian);
 					++current;
 					if(cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
 					{
