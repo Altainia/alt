@@ -433,10 +433,13 @@ namespace alt
 			/**
 			 * @brief Pipeable range-adaptor closure produced by @c transcode().
 			 *
-			 * Applying it to a viewable range yields a @c transcode_view.
+			 * Applying it to a viewable range yields a @c transcode_view. Deriving
+			 * @c std::ranges::range_adaptor_closure provides the pipe (@c |) operator
+			 * for both `range | transcode<...>()` and composition with other adaptors,
+			 * e.g. `transcode<...>() | std::views::take(n)`.
 			 */
 			template<detail::code_unit TargetChar, std::endian SourceEndian, std::endian TargetEndian>
-			struct transcode_closure
+			struct transcode_closure: std::ranges::range_adaptor_closure<transcode_closure<TargetChar, SourceEndian, TargetEndian>>
 			{
 				/** Builds the transcoding view over @p r. */
 				template<std::ranges::viewable_range R>
@@ -445,14 +448,6 @@ namespace alt
 				{
 					return transcode_view<std::views::all_t<R>, TargetChar, SourceEndian, TargetEndian>{
 					  std::views::all(std::forward<R>(r))};
-				}
-
-				/** Enables `range | transcode<...>()` pipe syntax. */
-				template<std::ranges::viewable_range R>
-				  requires detail::code_unit<std::ranges::range_value_t<R>>
-				friend constexpr auto operator|(R&& r, const transcode_closure& closure)
-				{
-					return closure(std::forward<R>(r));
 				}
 			};
 

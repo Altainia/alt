@@ -281,3 +281,37 @@ TEST(Transcode, ConstexprEvaluation)
 	static_assert(first_unit == U'\U0001F600');
 	SUCCEED();
 }
+
+TEST(Transcode, ClosureComposesWithAdaptor)
+{
+	std::string s1 = "Hello world";
+	// Compose the adaptor with another adaptor before applying it to a range.
+	auto adaptor = alt::transcode<char32_t>() | std::views::take(5);
+	auto first5  = s1 | adaptor | std::ranges::to<std::basic_string>();
+	EXPECT_EQ(first5, U"Hello");
+}
+
+TEST(Transcode, BoundaryCodePoints)
+{
+	// Scalars straddling the encoding-length and surrogate boundaries.
+	const std::u32string cps{
+	  U'\U0000FFFF', U'\U00010000', // BMP/3-byte <-> supplementary/4-byte boundary
+	  U'\U0000D7FF',
+	  U'\U0000E000',  // just below / just above the surrogate range
+	  U'\U0010FFFF'}; // maximum scalar value
+
+	const auto u8  = cps | alt::transcode<char8_t>() | std::ranges::to<std::basic_string>();
+	const auto u16 = cps | alt::transcode<char16_t>() | std::ranges::to<std::basic_string>();
+
+	EXPECT_EQ(u8 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>(), cps);
+	EXPECT_EQ(u16 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>(), cps);
+}
+
+TEST(Transcode, Utf32UpperSurrogateBoundaryBecomesReplacement)
+{
+	// U+DFFF is the top of the surrogate range (the existing test covers U+D800).
+	const std::vector<char32_t> bad{U'A', 0xDFFF, U'B'};
+	const std::u32string        expected{U'A', detail::replacement_character, U'B'};
+	const auto                  out = bad | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	EXPECT_EQ(out, expected);
+}

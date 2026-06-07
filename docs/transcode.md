@@ -71,6 +71,14 @@ following the Unicode-recommended substitution of maximal subparts (one `U+FFFD`
 per ill-formed maximal subsequence). This covers invalid UTF-8 byte sequences,
 unpaired UTF-16 surrogates, and out-of-range or surrogate UTF-32 scalars.
 
+## Range properties
+
+The resulting view is a **single-pass input range**: it decodes lazily and does
+not cache, so iterating it more than once (or calling `begin()` more than once)
+restarts decoding from the source. It composes both as `range | transcode<...>()`
+and as a closure combined with other adaptors, e.g.
+`transcode<...>() | std::views::take(n)`.
+
 ## `constexpr`
 
 The entire pipeline is usable in constant expressions.
