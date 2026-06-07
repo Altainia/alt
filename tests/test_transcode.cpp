@@ -160,3 +160,23 @@ TEST(TranscodeDetail, DecodeRespectsSourceEndian)
 	std::vector<char32_t> swapped{std::byteswap(char32_t{0x41})};
 	EXPECT_EQ(decode_first<other>(swapped), U'A');
 }
+
+TEST(Transcode, Utf8ToUtf32Native)
+{
+	std::string s1 = "Hello world";
+	auto        s2 = s1 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	static_assert(std::same_as<decltype(s2), std::u32string>);
+	EXPECT_EQ(s2, U"Hello world");
+}
+
+TEST(Transcode, NamespaceAliasesNameSameThing)
+{
+	std::string s1 = "hi";
+	auto        a  = s1 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto        b  = s1 | alt::views::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto        c  = s1 | alt::ranges::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto        d  = s1 | alt::ranges::views::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	EXPECT_EQ(a, b);
+	EXPECT_EQ(a, c);
+	EXPECT_EQ(a, d);
+}

@@ -304,6 +304,199 @@ namespace alt
 				}
 
 			} // namespace detail
+
+			/**
+			 * @brief Single-pass iterator that lazily transcodes a source range into
+			 *        target code units.
+			 *
+			 * Decodes one code point from the source, encodes it into an internal buffer,
+			 * and yields the resulting code units one at a time. Models @c input_iterator.
+			 */
+			template<std::ranges::input_range V, detail::code_unit TargetChar, std::endian SourceEndian, std::endian TargetEndian>
+			class transcode_iterator
+			{
+				using base_iterator = std::ranges::iterator_t<V>;
+				using base_sentinel = std::ranges::sentinel_t<V>;
+
+				base_iterator                   m_current{};
+				base_sentinel                   m_end{};
+				detail::unit_buffer<TargetChar> m_buffer{};
+				std::size_t                     m_size = 0; // valid units in buffer; 0 => exhausted
+				std::size_t                     m_pos  = 0; // index of the current unit
+
+				constexpr void fill()
+				{
+					if(m_current == m_end)
+					{
+						m_size = 0;
+						return;
+					}
+					const char32_t cp = detail::decode_one<SourceEndian>(m_current, m_end);
+					m_size            = detail::encode_one<TargetChar, TargetEndian>(cp, m_buffer);
+					m_pos             = 0;
+				}
+
+			public:
+				using value_type       = TargetChar;
+				using difference_type  = std::ptrdiff_t;
+				using iterator_concept = std::input_iterator_tag;
+
+				/** Constructs a past-the-end iterator. */
+				transcode_iterator() = default;
+
+				/** Constructs an iterator over [@p first, @p last) and decodes the first code point. */
+				constexpr transcode_iterator(base_iterator first, base_sentinel last): m_current(std::move(first)), m_end(std::move(last))
+				{
+					fill();
+				}
+
+				/** Returns the current target code unit. */
+				constexpr TargetChar operator*() const
+				{
+					return m_buffer[m_pos];
+				}
+
+				/** Advances to the next target code unit, decoding more input as needed. */
+				constexpr transcode_iterator& operator++()
+				{
+					if(++m_pos >= m_size)
+					{
+						fill();
+					}
+					return *this;
+				}
+
+				/** Advances past the current code unit, discarding the previous value. */
+				constexpr void operator++(int)
+				{
+					++*this;
+				}
+
+				/** Compares against the end sentinel; true once input and buffer are exhausted. */
+				constexpr bool operator==(std::default_sentinel_t /*sentinel*/) const
+				{
+					return m_size == 0;
+				}
+			};
+
+			/**
+			 * @brief A lazy view that transcodes its underlying range of code units into
+			 *        @p TargetChar code units in @p TargetEndian byte order.
+			 *
+			 * @tparam V            The underlying view; its element type is the source encoding.
+			 * @tparam TargetChar   Target code unit type.
+			 * @tparam SourceEndian Byte order of the source units (ignored for UTF-8).
+			 * @tparam TargetEndian Byte order of the produced units (ignored for UTF-8).
+			 */
+			template<std::ranges::input_range V, detail::code_unit TargetChar, std::endian SourceEndian, std::endian TargetEndian>
+			  requires std::ranges::view<V> && detail::code_unit<std::ranges::range_value_t<V>>
+			class transcode_view: public std::ranges::view_interface<transcode_view<V, TargetChar, SourceEndian, TargetEndian>>
+			{
+				V m_base{};
+
+			public:
+				transcode_view()
+				  requires std::default_initializable<V>
+				= default;
+
+				/** Constructs the view over the given underlying view @p base. */
+				constexpr explicit transcode_view(V base): m_base(std::move(base))
+				{}
+
+				/** Returns a copy of the underlying view. */
+				constexpr V base() const&
+				  requires std::copy_constructible<V>
+				{
+					return m_base;
+				}
+
+				/** Returns the underlying view by move. */
+				constexpr V base() &&
+				{
+					return std::move(m_base);
+				}
+
+				/** Returns an iterator to the first transcoded code unit. */
+				[[nodiscard]] constexpr auto begin()
+				{
+					return transcode_iterator<V, TargetChar, SourceEndian, TargetEndian>{
+					  std::ranges::begin(m_base), std::ranges::end(m_base)};
+				}
+
+				/** Returns the end sentinel. */
+				[[nodiscard]] constexpr std::default_sentinel_t end() const noexcept
+				{
+					return std::default_sentinel;
+				}
+			};
+
+			/**
+			 * @brief Pipeable range-adaptor closure produced by @c transcode().
+			 *
+			 * Applying it to a viewable range yields a @c transcode_view.
+			 */
+			template<detail::code_unit TargetChar, std::endian SourceEndian, std::endian TargetEndian>
+			struct transcode_closure
+			{
+				/** Builds the transcoding view over @p r. */
+				template<std::ranges::viewable_range R>
+				  requires detail::code_unit<std::ranges::range_value_t<R>>
+				constexpr auto operator()(R&& r) const
+				{
+					return transcode_view<std::views::all_t<R>, TargetChar, SourceEndian, TargetEndian>{
+					  std::views::all(std::forward<R>(r))};
+				}
+
+				/** Enables `range | transcode<...>()` pipe syntax. */
+				template<std::ranges::viewable_range R>
+				  requires detail::code_unit<std::ranges::range_value_t<R>>
+				friend constexpr auto operator|(R&& r, const transcode_closure& closure)
+				{
+					return closure(std::forward<R>(r));
+				}
+			};
+
+			/**
+			 * @brief Creates a transcoding adaptor targeting @p TargetChar.
+			 *
+			 * Source byte order defaults to native. Use this overload for
+			 * `transcode<Target>()` and `transcode<Target, OutEndian>()`.
+			 *
+			 * @tparam TargetChar   Target code unit type (@c char, @c char8_t, @c char16_t, @c char32_t).
+			 * @tparam TargetEndian Byte order of the produced code units. Defaults to native.
+			 */
+			template<detail::code_unit TargetChar, std::endian TargetEndian = std::endian::native>
+			constexpr auto transcode()
+			{
+				return transcode_closure<TargetChar, std::endian::native, TargetEndian>{};
+			}
+
+			/**
+			 * @brief Creates a transcoding adaptor that reads the source in @p SourceEndian
+			 *        byte order and targets @p TargetChar.
+			 *
+			 * Use this overload for `transcode<InEndian, Target>()` and
+			 * `transcode<InEndian, Target, OutEndian>()`. The leading @c std::endian
+			 * argument selects this overload over the type-leading one.
+			 *
+			 * @tparam SourceEndian Byte order of the source code units (ignored for UTF-8).
+			 * @tparam TargetChar   Target code unit type.
+			 * @tparam TargetEndian Byte order of the produced code units. Defaults to native.
+			 */
+			template<std::endian SourceEndian, detail::code_unit TargetChar, std::endian TargetEndian = std::endian::native>
+			constexpr auto transcode()
+			{
+				return transcode_closure<TargetChar, SourceEndian, TargetEndian>{};
+			}
+
 		} // namespace views
+
+		using views::transcode;
+
 	} // namespace ranges
+
+	namespace views = ranges::views;
+
+	using ranges::views::transcode;
+
 } // namespace alt
