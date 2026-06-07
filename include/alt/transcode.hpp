@@ -68,6 +68,68 @@ namespace alt
 					}
 				}
 
+				/**
+				 * @brief Encodes one Unicode scalar @p cp into @p out in the target encoding.
+				 *
+				 * @tparam TargetChar Target code unit type (selects UTF-8/16/32).
+				 * @tparam TargetEndian Byte order applied to each produced multi-byte unit.
+				 *
+				 * @param cp  A valid Unicode scalar value (<= U+10FFFF, not a surrogate). The
+				 *            caller (the decoder) guarantees validity, so encoding never fails.
+				 * @param out Buffer receiving the produced code units.
+				 *
+				 * @return The number of code units written to @p out.
+				 */
+				template<code_unit TargetChar, std::endian TargetEndian>
+				constexpr std::size_t encode_one(char32_t cp, unit_buffer<TargetChar>& out) noexcept
+				{
+					if constexpr(is_utf8_unit<TargetChar>)
+					{
+						if(cp <= 0x7F)
+						{
+							out[0] = static_cast<TargetChar>(cp);
+							return 1;
+						}
+						if(cp <= 0x7FF)
+						{
+							out[0] = static_cast<TargetChar>(0xC0 | (cp >> 6));
+							out[1] = static_cast<TargetChar>(0x80 | (cp & 0x3F));
+							return 2;
+						}
+						if(cp <= 0xFFFF)
+						{
+							out[0] = static_cast<TargetChar>(0xE0 | (cp >> 12));
+							out[1] = static_cast<TargetChar>(0x80 | ((cp >> 6) & 0x3F));
+							out[2] = static_cast<TargetChar>(0x80 | (cp & 0x3F));
+							return 3;
+						}
+						out[0] = static_cast<TargetChar>(0xF0 | (cp >> 18));
+						out[1] = static_cast<TargetChar>(0x80 | ((cp >> 12) & 0x3F));
+						out[2] = static_cast<TargetChar>(0x80 | ((cp >> 6) & 0x3F));
+						out[3] = static_cast<TargetChar>(0x80 | (cp & 0x3F));
+						return 4;
+					}
+					else if constexpr(is_utf16_unit<TargetChar>)
+					{
+						if(cp <= 0xFFFF)
+						{
+							out[0] = order_unit<TargetChar>(static_cast<TargetChar>(cp), TargetEndian);
+							return 1;
+						}
+						const char32_t   v  = cp - 0x10000;
+						const TargetChar hi = static_cast<TargetChar>(0xD800 + (v >> 10));
+						const TargetChar lo = static_cast<TargetChar>(0xDC00 + (v & 0x3FF));
+						out[0]              = order_unit<TargetChar>(hi, TargetEndian);
+						out[1]              = order_unit<TargetChar>(lo, TargetEndian);
+						return 2;
+					}
+					else
+					{
+						out[0] = order_unit<TargetChar>(static_cast<TargetChar>(cp), TargetEndian);
+						return 1;
+					}
+				}
+
 			} // namespace detail
 		} // namespace views
 	} // namespace ranges
