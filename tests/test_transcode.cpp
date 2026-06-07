@@ -2,8 +2,19 @@
 
 #include <alt/transcode.hpp>
 #include <bit>
+#include <ranges>
+#include <string>
+#include <vector>
 
 namespace detail = alt::ranges::views::detail;
+
+template<std::endian SrcE = std::endian::native, typename R>
+char32_t decode_first(const R& units)
+{
+	auto first = std::ranges::begin(units);
+	auto last  = std::ranges::end(units);
+	return detail::decode_one<SrcE>(first, last);
+}
 
 TEST(TranscodeDetail, CodeUnitConcept)
 {
@@ -93,4 +104,59 @@ TEST(TranscodeDetail, EncodeUtf32)
 	  std::endian::native == std::endian::little ? std::endian::big : std::endian::little;
 	EXPECT_EQ((detail::encode_one<char32_t, other>(U'A', buf)), 1u);
 	EXPECT_EQ(buf[0], std::byteswap(char32_t{0x41}));
+}
+
+TEST(TranscodeDetail, DecodeUtf8Valid)
+{
+	EXPECT_EQ(decode_first(std::u8string{u8"A"}), U'A');
+	EXPECT_EQ(decode_first(std::u8string{u8"é"}), U'é');
+	EXPECT_EQ(decode_first(std::u8string{u8"€"}), U'€');
+	EXPECT_EQ(decode_first(std::u8string{u8"\U0001F600"}), U'\U0001F600');
+}
+
+TEST(TranscodeDetail, DecodeUtf8Invalid)
+{
+	// Lone continuation byte.
+	EXPECT_EQ(decode_first(std::vector<char8_t>{0x80}), detail::replacement_character);
+	// Invalid lead byte.
+	EXPECT_EQ(decode_first(std::vector<char8_t>{0xFF}), detail::replacement_character);
+	// Truncated 2-byte sequence (lead with no continuation).
+	EXPECT_EQ(decode_first(std::vector<char8_t>{0xC3}), detail::replacement_character);
+	// Overlong encoding of U+0000 (C0 80).
+	EXPECT_EQ(decode_first(std::vector<char8_t>{0xC0, 0x80}), detail::replacement_character);
+	// Surrogate U+D800 encoded as UTF-8 (ED A0 80) -> rejected.
+	EXPECT_EQ(decode_first(std::vector<char8_t>{0xED, 0xA0, 0x80}), detail::replacement_character);
+}
+
+TEST(TranscodeDetail, DecodeUtf16Valid)
+{
+	EXPECT_EQ(decode_first(std::u16string{u"A"}), U'A');
+	EXPECT_EQ(decode_first(std::u16string{u"\U0001F600"}), U'\U0001F600'); // surrogate pair
+}
+
+TEST(TranscodeDetail, DecodeUtf16Invalid)
+{
+	// Lone high surrogate.
+	EXPECT_EQ(decode_first(std::vector<char16_t>{0xD83D}), detail::replacement_character);
+	// Lone low surrogate.
+	EXPECT_EQ(decode_first(std::vector<char16_t>{0xDE00}), detail::replacement_character);
+	// High surrogate followed by non-low-surrogate.
+	EXPECT_EQ(decode_first(std::vector<char16_t>{0xD83D, 0x0041}), detail::replacement_character);
+}
+
+TEST(TranscodeDetail, DecodeUtf32Invalid)
+{
+	// Beyond U+10FFFF.
+	EXPECT_EQ(decode_first(std::vector<char32_t>{0x110000}), detail::replacement_character);
+	// Surrogate scalar.
+	EXPECT_EQ(decode_first(std::vector<char32_t>{0xD800}), detail::replacement_character);
+}
+
+TEST(TranscodeDetail, DecodeRespectsSourceEndian)
+{
+	constexpr std::endian other =
+	  std::endian::native == std::endian::little ? std::endian::big : std::endian::little;
+	// A big-endian-stored 'A' decodes back to U'A'.
+	std::vector<char32_t> swapped{std::byteswap(char32_t{0x41})};
+	EXPECT_EQ(decode_first<other>(swapped), U'A');
 }
