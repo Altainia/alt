@@ -58,60 +58,41 @@ TEST(TranscodeDetail, OrderUnitByteSwaps)
 	EXPECT_EQ(detail::order_unit<char16_t>(char16_t{0x41}, other), std::byteswap(char16_t{0x41}));
 }
 
+// Encodes one code point and returns the produced target units as a string, so
+// each case can be asserted against a whole expected sequence in one comparison.
+template<detail::code_unit C, std::endian E = std::endian::native>
+std::basic_string<C> encode_units(char32_t cp)
+{
+	detail::unit_buffer<C> buf{};
+	const std::size_t      count = detail::encode_one<C, E>(cp, buf);
+	return std::basic_string<C>(buf.data(), count);
+}
+
 TEST(TranscodeDetail, EncodeUtf8)
 {
-	detail::unit_buffer<char8_t> buf{};
-	EXPECT_EQ((detail::encode_one<char8_t, std::endian::native>(U'A', buf)), 1u);
-	EXPECT_EQ(buf[0], char8_t{0x41});
-
-	// U+00E9 (é) -> C3 A9
-	EXPECT_EQ((detail::encode_one<char8_t, std::endian::native>(U'é', buf)), 2u);
-	EXPECT_EQ(buf[0], char8_t{0xC3});
-	EXPECT_EQ(buf[1], char8_t{0xA9});
-
-	// U+20AC (€) -> E2 82 AC
-	EXPECT_EQ((detail::encode_one<char8_t, std::endian::native>(U'€', buf)), 3u);
-	EXPECT_EQ(buf[0], char8_t{0xE2});
-	EXPECT_EQ(buf[1], char8_t{0x82});
-	EXPECT_EQ(buf[2], char8_t{0xAC});
-
-	// U+1F600 (😀) -> F0 9F 98 80
-	EXPECT_EQ((detail::encode_one<char8_t, std::endian::native>(U'\U0001F600', buf)), 4u);
-	EXPECT_EQ(buf[0], char8_t{0xF0});
-	EXPECT_EQ(buf[1], char8_t{0x9F});
-	EXPECT_EQ(buf[2], char8_t{0x98});
-	EXPECT_EQ(buf[3], char8_t{0x80});
+	EXPECT_EQ(encode_units<char8_t>(U'A'), (std::u8string{0x41}));                            // 1 byte
+	EXPECT_EQ(encode_units<char8_t>(U'é'), (std::u8string{0xC3, 0xA9}));                      // 2 bytes
+	EXPECT_EQ(encode_units<char8_t>(U'€'), (std::u8string{0xE2, 0x82, 0xAC}));                // 3 bytes
+	EXPECT_EQ(encode_units<char8_t>(U'\U0001F600'), (std::u8string{0xF0, 0x9F, 0x98, 0x80})); // 4 bytes
 }
 
 TEST(TranscodeDetail, EncodeUtf16)
 {
-	detail::unit_buffer<char16_t> buf{};
-	// BMP
-	EXPECT_EQ((detail::encode_one<char16_t, std::endian::native>(U'A', buf)), 1u);
-	EXPECT_EQ(buf[0], char16_t{0x0041});
-
-	// Supplementary: U+1F600 -> D83D DE00
-	EXPECT_EQ((detail::encode_one<char16_t, std::endian::native>(U'\U0001F600', buf)), 2u);
-	EXPECT_EQ(buf[0], char16_t{0xD83D});
-	EXPECT_EQ(buf[1], char16_t{0xDE00});
-
-	// Big-endian output byte-swaps each unit.
 	constexpr std::endian other =
 	  std::endian::native == std::endian::little ? std::endian::big : std::endian::little;
-	EXPECT_EQ((detail::encode_one<char16_t, other>(U'A', buf)), 1u);
-	EXPECT_EQ(buf[0], std::byteswap(char16_t{0x0041}));
+	EXPECT_EQ(encode_units<char16_t>(U'A'), (std::u16string{0x0041}));                  // BMP
+	EXPECT_EQ(encode_units<char16_t>(U'\U0001F600'), (std::u16string{0xD83D, 0xDE00})); // surrogate pair
+	// Big-endian output byte-swaps each unit.
+	EXPECT_EQ((encode_units<char16_t, other>(U'A')), (std::u16string{std::byteswap(char16_t{0x0041})}));
 }
 
 TEST(TranscodeDetail, EncodeUtf32)
 {
-	detail::unit_buffer<char32_t> buf{};
-	EXPECT_EQ((detail::encode_one<char32_t, std::endian::native>(U'\U0001F600', buf)), 1u);
-	EXPECT_EQ(buf[0], char32_t{0x1F600});
-
 	constexpr std::endian other =
 	  std::endian::native == std::endian::little ? std::endian::big : std::endian::little;
-	EXPECT_EQ((detail::encode_one<char32_t, other>(U'A', buf)), 1u);
-	EXPECT_EQ(buf[0], std::byteswap(char32_t{0x41}));
+	EXPECT_EQ(encode_units<char32_t>(U'\U0001F600'), (std::u32string{0x1F600}));
+	// Big-endian output byte-swaps the unit.
+	EXPECT_EQ((encode_units<char32_t, other>(U'A')), (std::u32string{std::byteswap(char32_t{0x41})}));
 }
 
 TEST(TranscodeDetail, DecodeUtf8Valid)

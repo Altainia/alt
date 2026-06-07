@@ -404,7 +404,7 @@ namespace alt
 				{}
 
 				/** Returns a copy of the underlying view. */
-				constexpr V base() const&
+				[[nodiscard]] constexpr V base() const&
 				  requires std::copy_constructible<V>
 				{
 					return m_base;
