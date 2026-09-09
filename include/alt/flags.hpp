@@ -8,14 +8,20 @@ namespace alt
 {
 
 	/**
-	 * @brief A type-safe bitfield wrapper over a scoped enum.
+	 * @brief A type-safe bitfield wrapper over an enumeration.
 	 *
-	 * @tparam Enum A scoped enumeration whose enumerators represent individual bits.
+	 * @tparam Enum An enumeration, scoped or unscoped, whose enumerators represent
+	 *              individual bits. Must satisfy alt::flag_enum.
 	 *
 	 * Storage is the unsigned equivalent of the enum's underlying type.
 	 * All operations are constexpr.
+	 *
+	 * The type safety comes from this class rather than from the enumeration: raw
+	 * integers neither construct a flags value nor serve as a mask, construction from
+	 * an enumerator is explicit, and two flags types over different enumerations
+	 * cannot be combined. Those guarantees hold whether or not Enum is scoped.
 	 */
-	template<scoped_enum Enum>
+	template<flag_enum Enum>
 	class flags
 	{
 	public:

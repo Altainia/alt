@@ -2,6 +2,7 @@
 
 #include <alt/concepts.hpp>
 #include <alt/flags.hpp>
+#include <type_traits>
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -28,8 +29,41 @@ enum unscoped
 	b
 };
 
-using perm_flags = alt::flags<perm>;
-using opt_flags  = alt::flags<opt>;
+// Unscoped with no fixed underlying type — the shape most C APIs hand you.
+enum capability
+{
+	cap_read  = 0x01,
+	cap_write = 0x02,
+	cap_exec  = 0x04,
+};
+
+// Unscoped with a fixed underlying type.
+enum channel : unsigned char
+{
+	chan_fast = 0x01,
+	chan_safe = 0x02,
+};
+
+// Underlying type bool has no unsigned counterpart, so it cannot store a bit set.
+enum unscoped_bool : bool
+{
+	ub = true
+};
+
+enum class scoped_bool : bool
+{
+	sb = true
+};
+
+using perm_flags       = alt::flags<perm>;
+using opt_flags        = alt::flags<opt>;
+using capability_flags = alt::flags<capability>;
+using channel_flags    = alt::flags<channel>;
+
+// alt::flags is a constrained class template, so a requires-expression naming it
+// only reports an unsatisfied requirement from a dependent context.
+template<typename E>
+concept flags_usable = requires { typename alt::flags<E>; };
 
 // ---------------------------------------------------------------------------
 // Concepts
@@ -50,6 +84,147 @@ TEST(Concepts, ScopedEnum)
 	static_assert(alt::scoped_enum<opt>);
 	static_assert(!alt::scoped_enum<unscoped>);
 	static_assert(!alt::scoped_enum<int>);
+}
+
+TEST(Concepts, FlagEnum)
+{
+	// Both enum kinds qualify: scoping is a property of the caller's enum, not
+	// something alt::flags depends on.
+	static_assert(alt::flag_enum<perm>);
+	static_assert(alt::flag_enum<opt>);
+	static_assert(alt::flag_enum<unscoped>);
+	static_assert(alt::flag_enum<capability>);
+	static_assert(alt::flag_enum<channel>);
+
+	// Non-enums never qualify.
+	static_assert(!alt::flag_enum<int>);
+	static_assert(!alt::flag_enum<unsigned char>);
+
+	// An underlying type of bool has no unsigned counterpart to hold the bits.
+	static_assert(!alt::flag_enum<unscoped_bool>);
+	static_assert(!alt::flag_enum<scoped_bool>);
+}
+
+// ---------------------------------------------------------------------------
+// Accepted and rejected enum types
+// ---------------------------------------------------------------------------
+
+TEST(FlagsConstraints, AcceptsScopedAndUnscopedEnums)
+{
+	static_assert(flags_usable<perm>);
+	static_assert(flags_usable<opt>);
+	static_assert(flags_usable<capability>);
+	static_assert(flags_usable<channel>);
+}
+
+TEST(FlagsConstraints, RejectsNonEnumsAndBoolUnderlyingEnums)
+{
+	static_assert(!flags_usable<int>);
+	static_assert(!flags_usable<unsigned char>);
+
+	// Rejected by the constraint rather than failing inside std::make_unsigned.
+	static_assert(!flags_usable<unscoped_bool>);
+	static_assert(!flags_usable<scoped_bool>);
+}
+
+// ---------------------------------------------------------------------------
+// Unscoped enums behave exactly like scoped ones
+// ---------------------------------------------------------------------------
+
+TEST(FlagsUnscoped, ValueTypeFollowsTheUnderlyingType)
+{
+	static_assert(std::is_same_v<capability_flags::value_type, unsigned int>);
+	static_assert(std::is_same_v<channel_flags::value_type, unsigned char>);
+	static_assert(std::is_same_v<capability_flags::enum_type, capability>);
+}
+
+TEST(FlagsUnscoped, BitwiseOperatorsAndQueries)
+{
+	const auto f = capability_flags{cap_read} | capability_flags{cap_exec};
+
+	EXPECT_EQ(f.value(), 0x05u);
+	EXPECT_EQ(f.count(), 2);
+	EXPECT_TRUE(f.has_all(capability_flags{cap_read}));
+	EXPECT_TRUE(f.has_any(capability_flags{cap_exec}));
+	EXPECT_TRUE(f.has_none(capability_flags{cap_write}));
+	EXPECT_FALSE(f.empty());
+	EXPECT_TRUE(static_cast<bool>(f));
+}
+
+TEST(FlagsUnscoped, MutationAndEquality)
+{
+	auto f = capability_flags{cap_read};
+	f.set(capability_flags{cap_write});
+	EXPECT_TRUE(f.has_all(capability_flags{cap_read} | capability_flags{cap_write}));
+
+	f.clear(capability_flags{cap_read});
+	EXPECT_TRUE(f.matches(capability_flags{cap_write}));
+
+	f.toggle(capability_flags{cap_write});
+	EXPECT_TRUE(f.empty());
+
+	EXPECT_EQ(capability_flags{cap_read}, capability_flags{cap_read});
+	EXPECT_NE(capability_flags{cap_read}, capability_flags{cap_write});
+}
+
+TEST(FlagsUnscoped, ConversionsMatchScopedBehavior)
+{
+	const auto f = capability_flags{cap_write};
+	EXPECT_EQ(static_cast<unsigned int>(f), 0x02u);
+	EXPECT_EQ(static_cast<capability>(f), cap_write);
+	EXPECT_EQ(capability_flags::from_value(0x06u).count(), 2);
+}
+
+TEST(FlagsUnscoped, ConstexprEvaluation)
+{
+	constexpr auto f = capability_flags{cap_read} | capability_flags{cap_write};
+	static_assert(f.count() == 2);
+	static_assert(f.has_all(capability_flags{cap_read}));
+	static_assert(f.value() == 0x03u);
+}
+
+// ---------------------------------------------------------------------------
+// Type safety is unchanged for unscoped enums
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	template<typename E, typename Arg>
+	concept constructible_from = requires(Arg arg) { alt::flags<E>{arg}; };
+
+	template<typename E, typename Arg>
+	concept mask_accepts = requires(alt::flags<E> f, Arg arg) { f.has_all(arg); };
+
+	template<typename A, typename B>
+	concept mixable = requires(alt::flags<A> lhs, alt::flags<B> rhs) { lhs | rhs; };
+} // namespace
+
+TEST(FlagsUnscopedSafety, RawIntegersAreStillRejected)
+{
+	static_assert(!constructible_from<capability, int>);
+	static_assert(!constructible_from<opt, int>);
+	static_assert(!mask_accepts<capability, int>);
+
+	// The classic unscoped hazard: cap_read | cap_write is an int, not a flag set,
+	// and it must not slip into the flags API.
+	static_assert(!mask_accepts<capability, decltype(cap_read | cap_write)>);
+	static_assert(mask_accepts<capability, capability_flags>);
+}
+
+TEST(FlagsUnscopedSafety, ConstructionStaysExplicit)
+{
+	static_assert(!std::is_convertible_v<capability, capability_flags>);
+	static_assert(!std::is_convertible_v<perm, perm_flags>);
+	static_assert(constructible_from<capability, capability>);
+}
+
+TEST(FlagsUnscopedSafety, UnrelatedEnumsDoNotMix)
+{
+	static_assert(!constructible_from<capability, channel>);
+	static_assert(!constructible_from<capability, unscoped>);
+	static_assert(!mixable<capability, channel>);
+	static_assert(!mixable<capability, opt>);
+	static_assert(mixable<capability, capability>);
 }
 
 // ---------------------------------------------------------------------------

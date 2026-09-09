@@ -2,9 +2,28 @@
 
 **Header:** `<alt/flags.hpp>`
 
-`alt::flags<Enum>` is a type-safe bitfield wrapper over a scoped enum. It stores a combination of enumerator bits as an unsigned integer while keeping all operations in terms of the enum type, preventing accidental mixing of unrelated enumerations or raw integers.
+`alt::flags<Enum>` is a type-safe bitfield wrapper over an enumeration. It stores a combination of enumerator bits as an unsigned integer while keeping all operations in terms of the enum type, preventing accidental mixing of unrelated enumerations or raw integers.
 
-`Enum` must satisfy [`alt::scoped_enum`](concepts.md) (`enum class` or `enum struct`). All methods are `constexpr` and `noexcept`.
+`Enum` must satisfy [`alt::flag_enum`](concepts.md): any enumeration, scoped or unscoped, whose underlying type is not `bool`. All methods are `constexpr` and `noexcept`.
+
+## Where the type safety comes from
+
+It comes from this class, not from the enumeration, so scoped and unscoped enums are equally safe here:
+
+- A raw integer neither constructs a flags value nor serves as a mask.
+- Construction from an enumerator is explicit, so no enum converts to a flags value on its own.
+- Two flags types over different enumerations cannot be combined.
+
+Unscoped enumerators do promote to `int`, so `Read | Write` is an integer rather than a flag set. That integer cannot enter the `flags` API, so the mistake is a compile error rather than a silent one:
+
+```cpp
+enum Access { Read = 0x01, Write = 0x02 };
+using AccessFlags = alt::flags<Access>;
+
+AccessFlags f{Read};
+f.has_all(Read | Write);                        // error: int is not AccessFlags
+f.has_all(AccessFlags{Read} | AccessFlags{Write});  // correct
+```
 
 ## Defining flag enumerators
 

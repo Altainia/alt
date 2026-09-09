@@ -29,7 +29,22 @@ static_assert(!alt::scoped_enum<Unscoped>);
 static_assert(alt::scoped_enum<Scoped>);
 ```
 
-`scoped_enum` is the constraint used by `alt::flags`.
+## `flag_enum<T>`
+
+Satisfied by any enumeration, scoped or unscoped, whose underlying type has an unsigned counterpart to hold the bits in. That excludes an underlying type of `bool`, which `std::make_unsigned` cannot convert.
+
+```cpp
+enum Unscoped { A = 1 };
+enum class Scoped : uint8_t { B = 1 };
+enum class Flagless : bool { C = true };
+
+static_assert(alt::flag_enum<Unscoped>);
+static_assert(alt::flag_enum<Scoped>);
+static_assert(!alt::flag_enum<Flagless>);
+static_assert(!alt::flag_enum<int>);
+```
+
+`flag_enum` is the constraint used by [`alt::flags`](flags.md). Scoping is deliberately not required: it is a property of the enumeration itself, and nothing `alt::flags` depends on.
 
 ## `bool_condition<T>`
 
