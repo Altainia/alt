@@ -25,12 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sudo apt-get update && sudo apt-get install -y clang-19
       - name: Configure
         run: >
           cmake --preset debug
-          -DCMAKE_C_COMPILER=clang
-          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER=clang-19
+          -DCMAKE_CXX_COMPILER=clang++-19
           -DALT_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build --preset debug
@@ -61,12 +61,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Clang and clang-tidy
-        run: sudo apt-get update && sudo apt-get install -y clang clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y clang-19 clang-tidy-19
       - name: Configure
         run: >
           cmake -B build/tidy
-          -DCMAKE_C_COMPILER=clang
-          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER=clang-19
+          -DCMAKE_CXX_COMPILER=clang++-19
+          -DCLANG_TIDY_PATH=/usr/bin/clang-tidy-19
           -DCMAKE_BUILD_TYPE=Debug
           -DALT_CLANG_TIDY=ON
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON

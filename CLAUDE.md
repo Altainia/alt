@@ -26,7 +26,7 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
 
-Requires GCC 13+ or Clang 17+.
+Requires GCC 13+ or Clang 19+.
 
 ## Tests
 

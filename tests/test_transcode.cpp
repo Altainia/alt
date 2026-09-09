@@ -24,6 +24,28 @@ constexpr C ordered(C value, std::endian order)
 	return detail::order_unit<C>(value, order);
 }
 
+/**
+ * @brief Collects a range of code units into a @c std::basic_string.
+ *
+ * @c std::ranges::to is not available in libstdc++ before GCC 14, and alt
+ * supports GCC 13, so the transcode tests pipe into this closure instead.
+ */
+struct to_basic_string_fn: std::ranges::range_adaptor_closure<to_basic_string_fn>
+{
+	template<std::ranges::input_range Range>
+	[[nodiscard]] constexpr auto operator()(Range&& range) const
+	{
+		std::basic_string<std::ranges::range_value_t<Range>> result;
+		for(const auto unit: range)
+		{
+			result.push_back(unit);
+		}
+		return result;
+	}
+};
+
+inline constexpr to_basic_string_fn to_basic_string{};
+
 TEST(TranscodeDetail, CodeUnitConcept)
 {
 	static_assert(detail::code_unit<char>);
@@ -153,7 +175,7 @@ TEST(TranscodeDetail, DecodeRespectsSourceEndian)
 TEST(Transcode, Utf8ToUtf32Native)
 {
 	std::string s1 = "Hello world";
-	auto        s2 = s1 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto        s2 = s1 | alt::transcode<char32_t>() | to_basic_string;
 	static_assert(std::same_as<decltype(s2), std::u32string>);
 	EXPECT_EQ(s2, U"Hello world");
 }
@@ -161,10 +183,10 @@ TEST(Transcode, Utf8ToUtf32Native)
 TEST(Transcode, NamespaceAliasesNameSameThing)
 {
 	std::string s1 = "hi";
-	auto        a  = s1 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
-	auto        b  = s1 | alt::views::transcode<char32_t>() | std::ranges::to<std::basic_string>();
-	auto        c  = s1 | alt::ranges::transcode<char32_t>() | std::ranges::to<std::basic_string>();
-	auto        d  = s1 | alt::ranges::views::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto        a  = s1 | alt::transcode<char32_t>() | to_basic_string;
+	auto        b  = s1 | alt::views::transcode<char32_t>() | to_basic_string;
+	auto        c  = s1 | alt::ranges::transcode<char32_t>() | to_basic_string;
+	auto        d  = s1 | alt::ranges::views::transcode<char32_t>() | to_basic_string;
 	EXPECT_EQ(a, b);
 	EXPECT_EQ(a, c);
 	EXPECT_EQ(a, d);
@@ -174,10 +196,10 @@ TEST(Transcode, SpecRoundTrips)
 {
 	std::string s1 = "Hello world";
 
-	auto s2 = s1 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
-	auto s3 = s1 | alt::transcode<char32_t, std::endian::big>() | std::ranges::to<std::basic_string>();
-	auto s4 = s3 | alt::transcode<std::endian::big, char16_t>() | std::ranges::to<std::basic_string>();
-	auto s5 = s3 | alt::transcode<std::endian::big, char16_t, std::endian::big>() | std::ranges::to<std::basic_string>();
+	auto s2 = s1 | alt::transcode<char32_t>() | to_basic_string;
+	auto s3 = s1 | alt::transcode<char32_t, std::endian::big>() | to_basic_string;
+	auto s4 = s3 | alt::transcode<std::endian::big, char16_t>() | to_basic_string;
+	auto s5 = s3 | alt::transcode<std::endian::big, char16_t, std::endian::big>() | to_basic_string;
 
 	static_assert(std::same_as<decltype(s2), std::u32string>);
 	static_assert(std::same_as<decltype(s4), std::u16string>);
@@ -210,17 +232,17 @@ TEST(Transcode, AllDirectionsBmpAndSupplementary)
 	// Mix of ASCII, BMP (€ U+20AC), and supplementary (😀 U+1F600).
 	std::string utf8 = "A€\U0001F600";
 
-	auto u32 = utf8 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto u32 = utf8 | alt::transcode<char32_t>() | to_basic_string;
 	EXPECT_EQ(u32, U"A€\U0001F600");
 
-	auto u16 = u32 | alt::transcode<char16_t>() | std::ranges::to<std::basic_string>();
+	auto u16 = u32 | alt::transcode<char16_t>() | to_basic_string;
 	EXPECT_EQ(u16, u"A€\U0001F600");
 
-	auto back8 = u16 | alt::transcode<char8_t>() | std::ranges::to<std::basic_string>();
+	auto back8 = u16 | alt::transcode<char8_t>() | to_basic_string;
 	EXPECT_EQ(back8, u8"A€\U0001F600");
 
 	// char target is treated as UTF-8.
-	auto back_char = u32 | alt::transcode<char>() | std::ranges::to<std::basic_string>();
+	auto back_char = u32 | alt::transcode<char>() | to_basic_string;
 	EXPECT_EQ(back_char, "A€\U0001F600");
 }
 
@@ -228,19 +250,19 @@ TEST(Transcode, InvalidInputBecomesReplacement)
 {
 	// Invalid UTF-8 byte in the middle.
 	std::vector<char8_t> bad8{u8'A', 0xFF, u8'B'};
-	auto                 out           = bad8 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto                 out           = bad8 | alt::transcode<char32_t>() | to_basic_string;
 	const std::u32string expected_bad8 = {U'A', detail::replacement_character, U'B'};
 	EXPECT_EQ(out, expected_bad8);
 
 	// Lone high surrogate in UTF-16.
 	std::vector<char16_t> bad16{u'A', 0xD83D, u'B'};
-	auto                  out2           = bad16 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto                  out2           = bad16 | alt::transcode<char32_t>() | to_basic_string;
 	const std::u32string  expected_bad16 = {U'A', detail::replacement_character, U'B'};
 	EXPECT_EQ(out2, expected_bad16);
 
 	// Out-of-range UTF-32 scalar.
 	std::vector<char32_t> bad32{U'A', 0x110000, U'B'};
-	auto                  out3           = bad32 | alt::transcode<char16_t>() | std::ranges::to<std::basic_string>();
+	auto                  out3           = bad32 | alt::transcode<char16_t>() | to_basic_string;
 	const std::u16string  expected_bad32 = {u'A', static_cast<char16_t>(detail::replacement_character), u'B'};
 	EXPECT_EQ(out3, expected_bad32);
 }
@@ -248,18 +270,18 @@ TEST(Transcode, InvalidInputBecomesReplacement)
 TEST(Transcode, EmptyInput)
 {
 	std::string empty;
-	auto        out = empty | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto        out = empty | alt::transcode<char32_t>() | to_basic_string;
 	EXPECT_TRUE(out.empty());
 }
 
 TEST(Transcode, ComposesWithOtherAdaptors)
 {
 	std::string s1     = "Hello world";
-	auto        first5 = s1 | alt::transcode<char32_t>() | std::views::take(5) | std::ranges::to<std::basic_string>();
+	auto        first5 = s1 | alt::transcode<char32_t>() | std::views::take(5) | to_basic_string;
 	EXPECT_EQ(first5, U"Hello");
 
 	// Source produced by another adaptor (rvalue range).
-	auto filtered = std::string("aXbXc") | std::views::filter([](char c) { return c != 'X'; }) | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	auto filtered = std::string("aXbXc") | std::views::filter([](char c) { return c != 'X'; }) | alt::transcode<char32_t>() | to_basic_string;
 	EXPECT_EQ(filtered, U"abc");
 }
 
@@ -287,7 +309,7 @@ TEST(Transcode, ClosureComposesWithAdaptor)
 	std::string s1 = "Hello world";
 	// Compose the adaptor with another adaptor before applying it to a range.
 	auto adaptor = alt::transcode<char32_t>() | std::views::take(5);
-	auto first5  = s1 | adaptor | std::ranges::to<std::basic_string>();
+	auto first5  = s1 | adaptor | to_basic_string;
 	EXPECT_EQ(first5, U"Hello");
 }
 
@@ -300,11 +322,11 @@ TEST(Transcode, BoundaryCodePoints)
 	  U'\U0000E000',  // just below / just above the surrogate range
 	  U'\U0010FFFF'}; // maximum scalar value
 
-	const auto u8  = cps | alt::transcode<char8_t>() | std::ranges::to<std::basic_string>();
-	const auto u16 = cps | alt::transcode<char16_t>() | std::ranges::to<std::basic_string>();
+	const auto u8  = cps | alt::transcode<char8_t>() | to_basic_string;
+	const auto u16 = cps | alt::transcode<char16_t>() | to_basic_string;
 
-	EXPECT_EQ(u8 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>(), cps);
-	EXPECT_EQ(u16 | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>(), cps);
+	EXPECT_EQ(u8 | alt::transcode<char32_t>() | to_basic_string, cps);
+	EXPECT_EQ(u16 | alt::transcode<char32_t>() | to_basic_string, cps);
 }
 
 TEST(Transcode, Utf32UpperSurrogateBoundaryBecomesReplacement)
@@ -312,6 +334,6 @@ TEST(Transcode, Utf32UpperSurrogateBoundaryBecomesReplacement)
 	// U+DFFF is the top of the surrogate range (the existing test covers U+D800).
 	const std::vector<char32_t> bad{U'A', 0xDFFF, U'B'};
 	const std::u32string        expected{U'A', detail::replacement_character, U'B'};
-	const auto                  out = bad | alt::transcode<char32_t>() | std::ranges::to<std::basic_string>();
+	const auto                  out = bad | alt::transcode<char32_t>() | to_basic_string;
 	EXPECT_EQ(out, expected);
 }

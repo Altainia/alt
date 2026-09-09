@@ -5,7 +5,7 @@ A generic C++23 utility library. Namespace: `alt`.
 ## Requirements
 
 - CMake 3.25 or later
-- GCC 13+ or Clang 17+
+- GCC 13+ or Clang 19+
 
 ## Build
 
