@@ -134,9 +134,33 @@ target_link_libraries(mytarget PRIVATE alt::alt)
 
 ## Git workflow
 
-- Use feature branches for new work (`feature/<name>`) and bug branches for fixes (`bug/<name>`).
-- Commit once tests pass. No need to ask for permission to commit.
-- Do not merge to `main` until explicitly asked to.
+All work reaches `main` through a pull request. `main` is never pushed to directly.
+
+1. Branch: `feature/<name>` for new work, `bug/<name>` for fixes.
+2. Commit once tests pass. No need to ask for permission to commit. CI runs on every branch push, so a broken branch shows up before the pull request exists.
+3. Open a pull request against `main` once the work is ready.
+4. Add the version bump as its own commit on the branch. See below.
+5. Merge with `gh pr merge --merge` after CI is green.
+
+Do not merge to `main` until explicitly asked to.
+
+### Version bump
+
+The bump is a standalone commit on the pull request branch, never bundled into a
+feature or merge commit. Commit message: `Bump version to x.y.z`. Bumping on the
+branch means CI verifies the new version before it reaches `main`.
+
+If a version bump has not been mentioned, ask whether to bump and which part to
+increase. All six of these files change together:
+
+| File | What to change |
+|------|---------------|
+| `CMakeLists.txt` | `project(Alt VERSION x.y.z ...)` |
+| `include/alt/version.hpp` | `ALT_VERSION_MAJOR/MINOR/PATCH` macros and constexpr variables |
+| `src/version.cpp` | String returned by `version()` |
+| `tests/test_version.cpp` | Expected major/minor/patch values and the version string |
+| `README.md` | All occurrences of the version string |
+| `CLAUDE.md` | All occurrences of the version string |
 
 ## Conventions
 
