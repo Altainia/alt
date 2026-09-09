@@ -61,6 +61,16 @@ cmake -B build/check -DALT_CPPCHECK=ON
 cmake --build build/check --target cppcheck
 ```
 
+Only analyzes `src/*.cpp`. Header-only components are not covered.
+
+### clang-format
+
+The codebase conforms to `.clang-format`. Run it on changed files before committing.
+
+```bash
+clang-format -i <changed files>
+```
+
 ### Code coverage
 
 Requires GCC and `lcov`. Report lands in `build/debug-coverage/coverage/index.html`.
@@ -76,10 +86,13 @@ cmake --build --preset debug-coverage --target coverage
 Installs headers, library, and CMake config files to `/usr/local`:
 
 ```bash
-bash scripts/install-local.sh
+cmake -B build/local -DCMAKE_BUILD_TYPE=Release \
+    -DALT_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build build/local --parallel
+sudo cmake --install build/local
 ```
 
-Optional: pass a custom build directory as the first argument.
+Pass a different `--prefix` to install elsewhere.
 
 ## Build .deb package
 
@@ -128,6 +141,8 @@ target_link_libraries(mytarget PRIVATE alt::alt)
 ## Conventions
 
 **Header-only component** — add a single `.hpp` to `include/alt/`.
+
+**Helper-only header** — a header no caller would include without also including a public component belongs in `include/alt/detail/`. Public headers stay directly in `include/alt/`. The subdirectory describes includability, not visibility: those symbols are still public API in `namespace alt`, with only engine internals in `alt::detail`. `install(DIRECTORY include/alt)` is recursive, so a new subdirectory needs no CMake change.
 
 **Compiled component** — add a `.hpp` to `include/alt/` (declaration) and a `.cpp` to `src/` (definition). The root `CMakeLists.txt` uses `GLOB_RECURSE` on `src/`, so new `.cpp` files are picked up automatically after re-running CMake configure.
 
