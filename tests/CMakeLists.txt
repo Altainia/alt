@@ -34,6 +34,7 @@ add_executable(alt_tests
     test_scope.cpp
     test_memory.cpp
     test_clearing_string.cpp
+    test_transcode.cpp
 )
 
 target_link_libraries(alt_tests
