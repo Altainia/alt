@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <alt/scope.hpp>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 // ===========================================================================
 // scope_exit
@@ -867,4 +870,282 @@ TEST(UniqueResource, DeleterCalledExactlyOnce_AfterMoveAssign)
 		EXPECT_EQ(calls, 1);
 	}
 	EXPECT_EQ(calls, 2); // value=2 deleted
+}
+
+// ---------------------------------------------------------------------------
+// take()
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+	// Resource type with a deleted move constructor but a usable copy constructor.
+	struct CopyOnlyResource
+	{
+		int value{};
+
+		CopyOnlyResource() = default;
+		explicit CopyOnlyResource(int v): value(v)
+		{}
+
+		CopyOnlyResource(const CopyOnlyResource&)            = default;
+		CopyOnlyResource& operator=(const CopyOnlyResource&) = default;
+		CopyOnlyResource(CopyOnlyResource&&)                 = delete;
+		CopyOnlyResource& operator=(CopyOnlyResource&&)      = delete;
+		~CopyOnlyResource()                                  = default;
+	};
+
+	// Resource type that can be neither moved nor copied.
+	struct ImmovableResource
+	{
+		int value{};
+
+		ImmovableResource() = default;
+
+		ImmovableResource(const ImmovableResource&)            = delete;
+		ImmovableResource& operator=(const ImmovableResource&) = delete;
+		~ImmovableResource()                                   = default;
+	};
+
+	struct CountingPtrDeleter
+	{
+		int* count{};
+		void operator()(const std::unique_ptr<int>&) const noexcept
+		{
+			if(count != nullptr)
+			{
+				++(*count);
+			}
+		}
+	};
+
+	struct CopyOnlyDeleter
+	{
+		int* count{};
+		void operator()(const CopyOnlyResource&) const noexcept
+		{
+			if(count != nullptr)
+			{
+				++(*count);
+			}
+		}
+	};
+
+	struct ImmovableDeleter
+	{
+		void operator()(const ImmovableResource&) const noexcept
+		{}
+	};
+
+	// Copy-only resource whose copy constructor throws on demand, so that the failure can
+	// be triggered from take() rather than from construction of the unique_resource.
+	struct ThrowOnCopyResource
+	{
+		int   value{};
+		bool* should_throw{};
+
+		ThrowOnCopyResource() = default;
+		ThrowOnCopyResource(int v, bool* flag): value(v), should_throw(flag)
+		{}
+
+		ThrowOnCopyResource(const ThrowOnCopyResource& other):
+		  value(other.value), should_throw(other.should_throw)
+		{
+			if(should_throw != nullptr && *should_throw)
+			{
+				throw std::runtime_error("copy failed");
+			}
+		}
+
+		ThrowOnCopyResource& operator=(const ThrowOnCopyResource&) = default;
+		ThrowOnCopyResource(ThrowOnCopyResource&&)                 = delete;
+		ThrowOnCopyResource& operator=(ThrowOnCopyResource&&)      = delete;
+		~ThrowOnCopyResource()                                     = default;
+	};
+
+	struct ThrowOnCopyResourceDeleter
+	{
+		int* count{};
+		void operator()(const ThrowOnCopyResource&) const noexcept
+		{
+			if(count != nullptr)
+			{
+				++(*count);
+			}
+		}
+	};
+
+	// take() is a constrained non-template member, so naming it on an already-instantiated
+	// unique_resource is a hard error rather than an unsatisfied requirement. Detecting its
+	// absence therefore has to happen in a dependent context.
+	template<typename R, typename D>
+	concept has_take = requires(alt::unique_resource<R, D>& ur) { ur.take(); };
+
+} // namespace
+
+TEST(UniqueResourceTake, ReturnsResourceAndSuppressesDeleter)
+{
+	int calls = 0;
+	{
+		auto      ur    = alt::unique_resource(42, CallCounter{calls});
+		const int taken = ur.take();
+		EXPECT_EQ(taken, 42);
+		EXPECT_EQ(calls, 0);
+	}
+	EXPECT_EQ(calls, 0); // ownership passed to the caller; deleter never runs
+}
+
+TEST(UniqueResourceTake, PointerResourceOwnershipTransfersToCaller)
+{
+	int  calls = 0;
+	auto del   = [&](const int* p) {
+    ++calls;
+    delete p; // NOLINT(cppcoreguidelines-owning-memory)
+	};
+
+	// Adopting the taken pointer proves the caller, not the deleter, now owns it.
+	std::unique_ptr<int> adopted;
+	{
+		auto ur = alt::unique_resource(new int(7), del); // NOLINT(cppcoreguidelines-owning-memory)
+		adopted.reset(ur.take());
+	}
+	ASSERT_NE(adopted, nullptr);
+	EXPECT_EQ(*adopted, 7);
+	EXPECT_EQ(calls, 0);
+}
+
+TEST(UniqueResourceTake, MoveOnlyResourceIsMovedOut)
+{
+	int calls = 0;
+	{
+		auto ur = alt::unique_resource<std::unique_ptr<int>, CountingPtrDeleter>(
+		  std::make_unique<int>(5), CountingPtrDeleter{&calls});
+
+		const std::unique_ptr<int> taken = ur.take();
+		ASSERT_NE(taken, nullptr);
+		EXPECT_EQ(*taken, 5);
+		EXPECT_EQ(ur.get(), nullptr); // moved-from
+	}
+	EXPECT_EQ(calls, 0);
+}
+
+TEST(UniqueResourceTake, CopyOnlyResourceIsCopiedOut)
+{
+	int              calls    = 0;
+	CopyOnlyResource resource = CopyOnlyResource{11};
+	{
+		auto ur = alt::unique_resource<CopyOnlyResource, CopyOnlyDeleter>(
+		  resource, CopyOnlyDeleter{&calls});
+
+		const CopyOnlyResource taken = ur.take();
+		EXPECT_EQ(taken.value, 11);
+		EXPECT_EQ(ur.get().value, 11); // copied, not moved — source is unchanged
+	}
+	EXPECT_EQ(calls, 0);
+}
+
+TEST(UniqueResourceTake, ReferenceResourceReturnsSameReference)
+{
+	int  value   = 42;
+	int  calls   = 0;
+	auto deleter = [&](int& v) {
+		++calls;
+		v = 0;
+	};
+
+	{
+		auto ur    = alt::unique_resource<int&, decltype(deleter)>(value, deleter);
+		int& taken = ur.take();
+		EXPECT_EQ(&taken, &value);
+		taken = 99;
+	}
+	EXPECT_EQ(calls, 0);
+	EXPECT_EQ(value, 99); // deleter never reset it
+}
+
+TEST(UniqueResourceTake, AfterReleaseStillReturnsResource)
+{
+	int calls = 0;
+	{
+		auto ur = alt::unique_resource(3, CallCounter{calls});
+		ur.release();
+		EXPECT_EQ(ur.take(), 3);
+	}
+	EXPECT_EQ(calls, 0);
+}
+
+TEST(UniqueResourceTake, OnDefaultConstructedObject)
+{
+	alt::unique_resource<int, NoopDeleter> ur;
+	EXPECT_EQ(ur.take(), 0);
+}
+
+TEST(UniqueResourceTake, ResetAfterTakeReArmsTheDeleter)
+{
+	std::vector<int> deleted;
+	{
+		auto ur = alt::unique_resource<int, VecDeleter>(1, VecDeleter{&deleted});
+		EXPECT_EQ(ur.take(), 1);
+		ur.reset(2);
+	}
+	EXPECT_EQ(deleted, std::vector<int>{2}); // 1 was taken, only 2 is deleted
+}
+
+TEST(UniqueResourceTake, SecondTakeDoesNotResurrectOwnership)
+{
+	int calls = 0;
+	{
+		auto ur = alt::unique_resource(8, CallCounter{calls});
+		EXPECT_EQ(ur.take(), 8);
+		EXPECT_EQ(ur.take(), 8);
+	}
+	EXPECT_EQ(calls, 0);
+}
+
+TEST(UniqueResourceTakeConstraints, AvailableForMovableAndCopyOnlyResources)
+{
+	static_assert(has_take<int, NoopDeleter>);
+	static_assert(has_take<int&, NoopDeleter>);
+	static_assert(has_take<std::unique_ptr<int>, CountingPtrDeleter>);
+	static_assert(has_take<CopyOnlyResource, CopyOnlyDeleter>);
+}
+
+TEST(UniqueResourceTakeConstraints, UnavailableForImmovableResource)
+{
+	static_assert(!has_take<ImmovableResource, ImmovableDeleter>);
+}
+
+TEST(UniqueResourceTake, FailedExtractionRetainsOwnership)
+{
+	int  calls        = 0;
+	bool should_throw = false;
+
+	ThrowOnCopyResource resource{5, &should_throw};
+	{
+		auto ur = alt::unique_resource<ThrowOnCopyResource, ThrowOnCopyResourceDeleter>(
+		  resource, ThrowOnCopyResourceDeleter{&calls});
+
+		should_throw = true;
+		EXPECT_THROW((void)ur.take(), std::runtime_error);
+		EXPECT_EQ(calls, 0); // still owned — nothing cleaned up yet
+
+		should_throw = false;
+	}
+	EXPECT_EQ(calls, 1); // ownership was retained, so the deleter still ran
+}
+
+TEST(UniqueResourceTakeConstraints, NoexceptFollowsTheSelectedOperation)
+{
+	static_assert(noexcept(std::declval<alt::unique_resource<int, NoopDeleter>&>().take()));
+	static_assert(noexcept(
+	  std::declval<alt::unique_resource<std::unique_ptr<int>, CountingPtrDeleter>&>().take()));
+	static_assert(
+	  noexcept(std::declval<alt::unique_resource<int&, NoopDeleter>&>().take()));
+}
+
+TEST(UniqueResourceTakeConstraints, ReturnValueIsNodiscard)
+{
+	using UR = alt::unique_resource<int, NoopDeleter>;
+	static_assert(std::is_same_v<decltype(std::declval<UR&>().take()), int>);
+	static_assert(std::is_same_v<decltype(std::declval<alt::unique_resource<int&, NoopDeleter>&>().take()), int&>);
 }

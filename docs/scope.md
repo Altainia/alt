@@ -2,7 +2,7 @@
 
 **Header:** `<alt/scope.hpp>`
 
-RAII scope guards and a generic resource wrapper. Implements [P0052r10](https://wg21.link/p0052r10) "Generic Scope Guard and RAII Wrapper for the Standard Library".
+RAII scope guards and a generic resource wrapper. Implements [P0052r10](https://wg21.link/p0052r10) "Generic Scope Guard and RAII Wrapper for the Standard Library", with one deviation: `unique_resource::take()` is an extension not specified by the paper.
 
 ---
 
@@ -116,7 +116,27 @@ res.get_deleter();  // returns const ref to the deleter
 res.reset();        // calls deleter if active, then marks as released
 res.reset(new_r);   // calls deleter on current, adopts new_r — strong exception guarantee
 res.release();      // disables cleanup — caller takes ownership
+res.take();         // returns the resource and disables cleanup — caller takes ownership
 ```
+
+#### `take()` — an extension beyond P0052r10
+
+`release()` gives up ownership but leaves the resource where it is. `take()` hands it to the caller
+in one step: it extracts the resource, disables cleanup, and returns it. The deleter is never
+invoked, so the caller becomes responsible for cleanup.
+
+```cpp
+auto res = alt::unique_resource{open_file("f.txt"), &fclose};
+FILE* raw = res.take();   // res no longer calls fclose; the caller must
+```
+
+The resource is moved out when `R` is move-constructible, and copied out when `R` has a deleted
+move constructor but a usable copy constructor. Resources that are neither cannot be handed out,
+so `take()` is constrained away for them. For a reference resource type nothing is moved and the
+returned reference refers to the same object.
+
+Extraction happens before ownership is surrendered, so if a throwing copy fails, the
+`unique_resource` still owns the resource and still cleans it up.
 
 ### Move semantics
 
