@@ -89,6 +89,7 @@ things vary:
 | Word type | `uint32_t` | `uint32_t` | `uint64_t` |
 | Block size | 64 bytes | 64 bytes | 128 bytes |
 | Length field | 8 bytes | 8 bytes | 16 bytes |
+| Byte counter | 64-bit | 64-bit | 128-bit |
 | State words | 5 | 8 | 8 |
 | Rounds | 80 | 64 | 80 |
 | Digest bytes | 20 | 28 / 32 | 48 / 64 / 28 / 32 |
@@ -109,6 +110,7 @@ struct example_algorithm
 
     static constexpr std::size_t block_size  = 64;      // bytes per block
     static constexpr std::size_t length_size = 8;       // bytes of trailing length field
+                                                        // also selects the byte-counter width
     static constexpr std::size_t digest_size = 32;      // bytes of output
     static constexpr std::string_view name   = "SHA-256";
     static constexpr state_type initial_value = { /* FIPS 180-4 section 5.3 */ };
@@ -119,7 +121,9 @@ struct example_algorithm
 ```
 
 The state is the trait's own `state_type`, which fixes the word count for that
-algorithm. Truncation is implicit: finalization serializes the full state
+algorithm. `length_size` does double duty: it sizes the trailing length field
+and selects the width of the engine's byte counter, so the two can never
+disagree. See *Message length ceilings* under Error handling. Truncation is implicit: finalization serializes the full state
 big-endian and copies the leading `digest_size` bytes, which is exactly how
 sections 6.3, 6.5, 6.6, and 6.7 define SHA-224, SHA-384, SHA-512/224, and
 SHA-512/256.
@@ -257,11 +261,60 @@ with `hex_error` distinguishing:
 
 Uppercase hex input is accepted on parse; `to_hex` always emits lowercase.
 
-FIPS 180-4 caps message length at 2^64 bits for SHA-1, SHA-224, and SHA-256,
-and at 2^128 bits for the SHA-512 family. Both ceilings are documented
-preconditions rather than checked conditions. They sit above 2 exabytes and
-cannot be reached, let alone tested, so a runtime check would be untested code
-guarding an unreachable state.
+### Message length ceilings
+
+FIPS 180-4 defines each algorithm over a bounded message domain, and the bound
+differs by family because the padding block carries the message length in a
+fixed-width field.
+
+| Family | Length field | Spec ceiling | Byte counter | Binding limit |
+|---|---|---|---|---|
+| SHA-1, SHA-224, SHA-256 | 64 bits | 2^61 bytes | 64-bit | the spec |
+| SHA-384, SHA-512, SHA-512/224, SHA-512/256 | 128 bits | 2^125 bytes | 128-bit | the spec |
+
+The counter width is chosen per family so that **the specification is always
+the binding limit, never an artifact of this implementation.**
+
+For the 512-bit-block family a 64-bit byte counter overshoots the spec's own
+domain: the standard stops defining behavior at 2^61 bytes, long before the
+counter could wrap at 2^64. No conformance gap exists, so a 64-bit counter is
+used.
+
+For the 1024-bit-block family the reasoning inverts. A 64-bit byte counter
+would wrap at 2^64 bytes, which lies **inside** the domain FIPS 180-4 defines.
+Those are messages the standard specifies an answer for and that this library
+would answer incorrectly. The gap is unreachable in practice, but it is a
+conformance shortfall rather than an out-of-domain input, so these algorithms
+carry a 128-bit byte counter built from a pair of 64-bit words. The cost is a
+carry-add per `update` and a second word written during padding.
+
+Exceeding a ceiling remains a documented precondition, not a checked condition.
+A per-`update` comparison would be a branch on the hot path that no execution
+ever takes; at one gigabyte per second, 2^61 bytes is roughly seventy-three
+years of continuous hashing, and this is a portable C++ engine that will not
+reach that rate.
+
+### Testing the ceilings
+
+Unreachable by a real message is not the same as untestable. The ceiling
+arithmetic is reachable directly if it is factored out of the streaming path,
+which is the same test-seam argument the sister project's `detail/sha1.hpp`
+makes about its own placement. Two helpers in `alt::detail` provide that seam:
+
+```cpp
+template<std::size_t LengthSize>
+class byte_counter;                       // 64- or 128-bit, constexpr carry-add
+
+template<std::size_t LengthSize>
+constexpr std::array<std::uint8_t, LengthSize>
+encode_bit_length(byte_counter<LengthSize> bytes) noexcept;
+```
+
+A test sets a counter to any value it likes and inspects the encoded field, so
+boundary behavior is pinned by assertion rather than left to inference. What
+this seam verifies is the length encoding, not a full digest of a hypothetical
+exabyte message, which remains uncomputable. That limit is stated here so the
+test group is not later mistaken for broader coverage than it has.
 
 ## Testing
 
@@ -298,6 +351,14 @@ each registered in the `alt_tests` source list in `tests/CMakeLists.txt`.
 6. **Range coverage.** The same input hashed as a contiguous container, as a
    `std::span<const std::byte>`, and as a non-contiguous lazy view must produce
    identical digests, exercising both `update` paths.
+
+7. **Length ceilings.** Through the `byte_counter` and `encode_bit_length`
+   seam described under Error handling, at compile time: the 64-bit field at
+   2^61 minus one bytes, which encodes the largest length the spec defines, and
+   at 2^61 bytes, which is the first value outside it; the 128-bit field at
+   2^64 bytes, the value a 64-bit counter would have wrapped at, and at 2^125
+   bytes; and carry propagation across the 64-bit word boundary of the 128-bit
+   counter.
 
 All of the above must pass under the ASan and UBSan preset, clang-tidy, and
 cppcheck, per the project's quality gates.
