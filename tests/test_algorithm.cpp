@@ -99,10 +99,10 @@ TEST(Erase, WorksWithDeque)
 TEST(EraseProjection, MemberPointerRemovesMatchingDepartment)
 {
 	std::vector<employee> employees{
-	  {"Alice", 1},
-	  {"Bob", 2},
-	  {"Carol", 1},
-	  {"Dave", 3},
+	  {.name = "Alice", .department_id = 1},
+	  {.name = "Bob", .department_id = 2},
+	  {.name = "Carol", .department_id = 1},
+	  {.name = "Dave", .department_id = 3},
 	};
 	const auto removed = alt::erase(employees, 1, &employee::department_id);
 	EXPECT_EQ(removed, 2u);
@@ -113,7 +113,7 @@ TEST(EraseProjection, MemberPointerRemovesMatchingDepartment)
 
 TEST(EraseProjection, MemberPointerNoMatchLeavesContainerUnchanged)
 {
-	std::vector<employee> employees{{"Alice", 1}, {"Bob", 2}};
+	std::vector<employee> employees{{.name = "Alice", .department_id = 1}, {.name = "Bob", .department_id = 2}};
 	const auto            removed = alt::erase(employees, 99, &employee::department_id);
 	EXPECT_EQ(removed, 0u);
 	EXPECT_EQ(employees.size(), 2u);
@@ -121,7 +121,7 @@ TEST(EraseProjection, MemberPointerNoMatchLeavesContainerUnchanged)
 
 TEST(EraseProjection, MemberPointerRemovesAllWhenAllMatch)
 {
-	std::vector<employee> employees{{"Alice", 5}, {"Bob", 5}};
+	std::vector<employee> employees{{.name = "Alice", .department_id = 5}, {.name = "Bob", .department_id = 5}};
 	const auto            removed = alt::erase(employees, 5, &employee::department_id);
 	EXPECT_EQ(removed, 2u);
 	EXPECT_TRUE(employees.empty());
@@ -335,7 +335,7 @@ TEST(EraseIf, WorksOnADequeAndAString)
 
 TEST(EraseIfProjection, PredicateSeesTheProjectedValue)
 {
-	std::vector<employee> employees{{"Alice", 1}, {"Bob", 2}, {"Carol", 3}};
+	std::vector<employee> employees{{.name = "Alice", .department_id = 1}, {.name = "Bob", .department_id = 2}, {.name = "Carol", .department_id = 3}};
 	const auto            removed =
 	  alt::erase_if(employees, [](int dept) { return dept > 1; }, &employee::department_id);
 	EXPECT_EQ(removed, 2u);
