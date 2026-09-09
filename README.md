@@ -147,12 +147,12 @@ Then include headers as needed:
 
 | Header | Description | Reference |
 |--------|-------------|-----------|
-| `<alt/concepts.hpp>` | Concepts: `any_enum`, `scoped_enum`, `bool_condition` | [docs/concepts.md](docs/concepts.md) |
+| `<alt/concepts.hpp>` | Concepts: `any_enum`, `scoped_enum`, `flag_enum`, `bool_condition` | [docs/concepts.md](docs/concepts.md) |
 | `<alt/type_traits.hpp>` | `underlying_int<T>` trait and `underlying_int_t<T>` alias | [docs/type_traits.md](docs/type_traits.md) |
 | `<alt/utility.hpp>` | `to_underlying()` — converts enums/integers to their underlying type | [docs/utility.md](docs/utility.md) |
 | `<alt/functional.hpp>` | Boolean combinators: `any_of`, `all_of`, `none_of`, `not_all_of`, `at_least`, `at_most`, `exactly` | [docs/functional.md](docs/functional.md) |
 | `<alt/algorithm.hpp>` | Container erasure with projections: `erase`, `erase_if` | [docs/algorithm.md](docs/algorithm.md) |
-| `<alt/flags.hpp>` | Type-safe bitfield wrapper over scoped enums | [docs/flags.md](docs/flags.md) |
+| `<alt/flags.hpp>` | Type-safe bitfield wrapper over enumerations | [docs/flags.md](docs/flags.md) |
 | `<alt/memory.hpp>` | Secure memory erasure: `clear_memory`, `clearing_allocator`, and a `std::string` specialization | [docs/memory.md](docs/memory.md) |
 | `<alt/projection.hpp>` | Projection objects for composite values: `key`, `value`, `element<N>` | [docs/projection.md](docs/projection.md) |
 | `<alt/scope.hpp>` | Scope guards and RAII resource wrapper: `scope_exit`, `scope_fail`, `scope_success`, `unique_resource` | [docs/scope.md](docs/scope.md) |

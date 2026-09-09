@@ -15,6 +15,19 @@ namespace alt
 	concept scoped_enum = std::is_scoped_enum_v<T>;
 
 	/**
+	 * @brief Satisfied by enumeration types usable as a bit set.
+	 *
+	 * Any enumeration qualifies, scoped or unscoped, provided its underlying type has
+	 * an unsigned counterpart to hold the bits in. That excludes an underlying type of
+	 * bool, for which std::make_unsigned has no answer.
+	 *
+	 * This is the constraint used by alt::flags. Scoping is deliberately not required:
+	 * it is a property of the enumeration itself and nothing alt::flags depends on.
+	 */
+	template<typename T>
+	concept flag_enum = any_enum<T> && !std::same_as<std::underlying_type_t<T>, bool>;
+
+	/**
 	 * @brief Satisfied when T is directly usable as a boolean condition.
 	 *
 	 * T must be either (1) implicitly convertible to bool and not a callable
