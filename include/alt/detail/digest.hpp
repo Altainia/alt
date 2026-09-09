@@ -94,7 +94,7 @@ namespace alt
 		}
 
 		/** Returns the number of bytes in the digest. */
-		[[nodiscard]] static constexpr std::size_t size() noexcept
+		[[nodiscard]] constexpr std::size_t size() const noexcept
 		{
 			return size_bytes;
 		}
@@ -118,7 +118,7 @@ namespace alt
 		}
 
 		/** Returns the name of the producing algorithm, e.g. @c "SHA-256". */
-		[[nodiscard]] static constexpr std::string_view algorithm_name() noexcept
+		[[nodiscard]] constexpr std::string_view algorithm_name() const noexcept
 		{
 			return Algorithm::name;
 		}
@@ -137,8 +137,8 @@ namespace alt
 			std::array<char, size_bytes * 2> text{};
 			for(std::size_t i = 0; i < size_bytes; ++i)
 			{
-				text[i * 2]     = digits[m_bytes[i] >> 4];
-				text[i * 2 + 1] = digits[m_bytes[i] & 0x0F];
+				text[i * 2]       = digits[m_bytes[i] >> 4];
+				text[(i * 2) + 1] = digits[m_bytes[i] & 0x0F];
 			}
 			return text;
 		}
@@ -168,7 +168,7 @@ namespace alt
 			for(std::size_t i = 0; i < size_bytes; ++i)
 			{
 				const auto high = detail::decode_nibble(text[i * 2]);
-				const auto low  = detail::decode_nibble(text[i * 2 + 1]);
+				const auto low  = detail::decode_nibble(text[(i * 2) + 1]);
 				if(!high.has_value() || !low.has_value())
 				{
 					return std::unexpected(hex_error::invalid_character);

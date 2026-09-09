@@ -69,3 +69,27 @@ static_assert(!alt::bool_condition<decltype(pred)>);
 ```
 
 This concept drives the overload resolution in `<alt/functional.hpp>`, ensuring that a callable that looks like a condition is treated as one and a callable that takes arguments is treated as a transformer.
+
+## `byte_range<T>`
+
+Satisfied by an input range of raw bytes. The element type must be `char`, `signed char`, `unsigned char`, `char8_t`, or `std::byte`. Contiguity is not required, so a lazy view of bytes qualifies just as a `std::vector` or `std::span` does.
+
+```cpp
+static_assert(alt::byte_range<std::string_view>);
+static_assert(alt::byte_range<std::vector<std::byte>>);
+static_assert(alt::byte_range<std::span<const unsigned char>>);
+static_assert(alt::byte_range<std::deque<char>>);       // not contiguous
+
+static_assert(!alt::byte_range<std::vector<int>>);
+static_assert(!alt::byte_range<std::wstring>);
+```
+
+Raw arrays of `char` and `char8_t` are deliberately excluded. Those are the element types carrying a NUL-termination convention, and a string literal is such an array, so treating one as a plain range would process the terminator as data:
+
+```cpp
+static_assert(!alt::byte_range<char[4]>);               // a string literal
+static_assert(alt::byte_range<unsigned char[4]>);       // no NUL convention
+static_assert(alt::byte_range<std::array<char, 4>>);    // not a raw array
+```
+
+This concept constrains the input of the hashing components in [`<alt/sha1.hpp>`](sha1.md) and [`<alt/sha2.hpp>`](sha2.md), which pair it with a `std::string_view` overload so string literals still hash the characters they represent and nothing more.

@@ -45,8 +45,7 @@ namespace alt
 		static constexpr std::string_view name = "SHA-1";
 
 		/** Initial hash value, FIPS 180-4 section 5.3.1. */
-		static constexpr state_type initial_value{0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u,
-		                                          0xc3d2e1f0u};
+		static constexpr state_type initial_value{0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u, 0xc3d2e1f0u};
 
 		/**
 		 * @brief Compresses one 64-byte block into @p state, FIPS 180-4 section 6.1.2.
@@ -54,7 +53,7 @@ namespace alt
 		 * @param state Chaining state, updated in place.
 		 * @param block The block to absorb.
 		 */
-		static constexpr void compress(state_type&                                 state,
+		static constexpr void compress(state_type&                               state,
 		                               std::span<const std::uint8_t, block_size> block) noexcept
 		{
 			// Step 1: prepare the message schedule.
@@ -131,9 +130,7 @@ namespace alt
 	 */
 	[[nodiscard]] constexpr sha1_digest sha1(byte_range auto&& input)
 	{
-		sha1_hasher hasher;
-		hasher.update(input);
-		return hasher.finish();
+		return detail::one_shot<sha1_algorithm>(input);
 	}
 
 	/**
@@ -146,9 +143,7 @@ namespace alt
 	 */
 	[[nodiscard]] constexpr sha1_digest sha1(std::string_view input)
 	{
-		sha1_hasher hasher;
-		hasher.update(input);
-		return hasher.finish();
+		return detail::one_shot<sha1_algorithm>(input);
 	}
 
 } // namespace alt

@@ -147,7 +147,7 @@ Then include headers as needed:
 
 | Header | Description | Reference |
 |--------|-------------|-----------|
-| `<alt/concepts.hpp>` | Concepts: `any_enum`, `scoped_enum`, `flag_enum`, `bool_condition` | [docs/concepts.md](docs/concepts.md) |
+| `<alt/concepts.hpp>` | Concepts: `any_enum`, `scoped_enum`, `flag_enum`, `bool_condition`, `byte_range` | [docs/concepts.md](docs/concepts.md) |
 | `<alt/type_traits.hpp>` | `underlying_int<T>` trait and `underlying_int_t<T>` alias | [docs/type_traits.md](docs/type_traits.md) |
 | `<alt/utility.hpp>` | `to_underlying()` — converts enums/integers to their underlying type | [docs/utility.md](docs/utility.md) |
 | `<alt/functional.hpp>` | Boolean combinators: `any_of`, `all_of`, `none_of`, `not_all_of`, `at_least`, `at_most`, `exactly` | [docs/functional.md](docs/functional.md) |
@@ -157,3 +157,5 @@ Then include headers as needed:
 | `<alt/projection.hpp>` | Projection objects for composite values: `key`, `value`, `element<N>` | [docs/projection.md](docs/projection.md) |
 | `<alt/scope.hpp>` | Scope guards and RAII resource wrapper: `scope_exit`, `scope_fail`, `scope_success`, `unique_resource` | [docs/scope.md](docs/scope.md) |
 | `<alt/transcode.hpp>` | Lazy UTF-8/16/32 conversion: `transcode`, `encode_one`, `decode_one` | [docs/transcode.md](docs/transcode.md) |
+| `<alt/sha1.hpp>` | SHA-1 hashing (deprecated; FIPS 180-4): `sha1`, `sha1_hasher`, `sha1_digest` | [docs/sha1.md](docs/sha1.md) |
+| `<alt/sha2.hpp>` | SHA-2 hashing (FIPS 180-4): `sha224`, `sha256`, `sha384`, `sha512`, `sha512_224`, `sha512_256` | [docs/sha2.md](docs/sha2.md) |

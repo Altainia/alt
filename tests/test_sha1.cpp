@@ -37,8 +37,8 @@ static_assert(alt::sha1(multi_block) == expect("84983e441c3bd26ebaae4aa1f95129e5
 
 // --- digest identity -------------------------------------------------------
 
-static_assert(alt::sha1_digest::size() == 20);
-static_assert(alt::sha1_digest::algorithm_name() == "SHA-1");
+static_assert(alt::sha1_digest::size_bytes == 20);
+static_assert(alt::sha1_algorithm::name == "SHA-1");
 static_assert(std::same_as<decltype(alt::sha1("abc")), alt::sha1_digest>);
 
 TEST(sha1, hashes_the_one_million_character_vector)
@@ -63,12 +63,12 @@ TEST(sha1, streaming_matches_one_shot_at_every_split)
 
 TEST(sha1, accepts_contiguous_and_lazy_ranges_alike)
 {
-	const auto expected = expect("a9993e364706816aba3e25717850c26c9cd0d89d");
-	const std::vector<std::byte> bytes{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
+	const auto                      expected = expect("a9993e364706816aba3e25717850c26c9cd0d89d");
+	const std::vector<std::byte>    bytes{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
 	const std::deque<unsigned char> not_contiguous{'a', 'b', 'c'};
-	const auto lazy = std::views::iota(0, 3) | std::views::transform([](int i) {
-		                  return static_cast<unsigned char>('a' + i);
-	                  });
+	const auto                      lazy = std::views::iota(0, 3) | std::views::transform([](int i) {
+                      return static_cast<unsigned char>('a' + i);
+                    });
 
 	EXPECT_EQ(alt::sha1(std::string_view{"abc"}), expected);
 	EXPECT_EQ(alt::sha1(bytes), expected);

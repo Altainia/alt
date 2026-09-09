@@ -40,6 +40,7 @@ add_executable(alt_tests
     test_hash.cpp
     test_digest.cpp
     test_sha1.cpp
+    test_sha2.cpp
 )
 
 target_link_libraries(alt_tests

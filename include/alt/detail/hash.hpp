@@ -347,10 +347,24 @@ namespace alt
 			return digest_type{bytes};
 		}
 
-		typename Algorithm::state_type              m_state{Algorithm::initial_value};
-		std::array<std::uint8_t, block_size>        m_buffer{};
-		std::size_t                                 m_buffered{};
+		typename Algorithm::state_type               m_state{Algorithm::initial_value};
+		std::array<std::uint8_t, block_size>         m_buffer{};
+		std::size_t                                  m_buffered{};
 		detail::byte_counter<Algorithm::length_size> m_count{};
 	};
+
+	namespace detail
+	{
+
+		/** Runs @p Algorithm over @p input in one call. Shared by the named one-shot functions. */
+		template<hash_algorithm Algorithm>
+		[[nodiscard]] constexpr digest<Algorithm> one_shot(byte_range auto&& input)
+		{
+			hasher<Algorithm> state;
+			state.update(input);
+			return state.finish();
+		}
+
+	} // namespace detail
 
 } // namespace alt
