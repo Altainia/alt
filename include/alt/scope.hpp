@@ -1,5 +1,9 @@
 // Implementation of P0052r10 "Generic Scope Guard and RAII Wrapper for the Standard Library"
 // See: https://wg21.link/p0052r10
+//
+// This implementation deviates from the paper by adding one extension:
+// unique_resource::take(), which hands the managed resource to the caller and gives up
+// ownership without invoking the deleter. The paper specifies no such member.
 
 #pragma once
 
@@ -183,6 +187,48 @@ namespace alt
 					}
 					throw;
 				}
+			}
+		}
+
+		/**
+		 * @brief True when a unique_resource's resource can be handed to a caller.
+		 *
+		 * Satisfied when R can be moved out of, or — for resources with a deleted move
+		 * constructor but a usable copy constructor — copied out of. Reference resource
+		 * types always satisfy this, since binding a reference never moves anything.
+		 */
+		template<typename R>
+		inline constexpr bool is_takeable_resource_v =
+		  std::is_move_constructible_v<R> || std::is_copy_constructible_v<R>;
+
+		/**
+		 * @brief True when extracting a unique_resource's resource cannot throw.
+		 *
+		 * Mirrors the branch selected by take_ur_resource: the move constructor when the
+		 * resource is move-constructible, and the copy constructor otherwise.
+		 */
+		template<typename R>
+		inline constexpr bool is_nothrow_takeable_resource_v =
+		  std::is_move_constructible_v<R> ? std::is_nothrow_move_constructible_v<R> : std::is_nothrow_copy_constructible_v<R>;
+
+		/**
+		 * @brief Extracts a unique_resource's resource so that ownership can pass to a caller.
+		 *
+		 * Moves the stored resource when R is move-constructible, and copies it when R has
+		 * a deleted move constructor but is still copy-constructible. For reference resource
+		 * types the stored reference_wrapper is unwrapped, so the returned reference refers
+		 * to the same object.
+		 */
+		template<typename R, typename R1>
+		R take_ur_resource(R1& r1) noexcept(is_nothrow_takeable_resource_v<R>)
+		{
+			if constexpr(!std::is_reference_v<R> && std::is_move_constructible_v<R>)
+			{
+				return std::move(get_resource_value<R>(r1));
+			}
+			else
+			{
+				return get_resource_value<R>(r1);
 			}
 		}
 
@@ -661,6 +707,34 @@ namespace alt
 		void release() noexcept
 		{
 			m_execute_on_reset = false;
+		}
+
+		/**
+		 * @brief Hands the managed resource to the caller and gives up ownership.
+		 *
+		 * This is an extension beyond P0052r10.
+		 *
+		 * Constraints: R is move-constructible or copy-constructible. Resources that are
+		 * neither cannot be handed out, so take() does not participate in overload
+		 * resolution for them.
+		 *
+		 * Effects: Extracts the resource — moving it when R is move-constructible and
+		 * copying it when R only has a copy constructor — then sets execute_on_reset to
+		 * false. The deleter is never called, so the caller becomes responsible for
+		 * cleaning the resource up. If the extraction throws, ownership is retained and
+		 * this object still cleans the resource up as usual.
+		 *
+		 * For a reference resource type nothing is moved: the returned reference refers
+		 * to the same object.
+		 *
+		 * @return The resource, transferred out of this object.
+		 */
+		[[nodiscard]] R take() noexcept(detail::is_nothrow_takeable_resource_v<R>)
+		  requires detail::is_takeable_resource_v<R>
+		{
+			// Ownership is surrendered only once the extraction below has succeeded.
+			const scope_success surrender_ownership{[this]() noexcept { m_execute_on_reset = false; }};
+			return detail::take_ur_resource<R>(m_resource);
 		}
 
 		/**
