@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.4.0`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.4.1`.
 
 ## Directory layout
 
@@ -26,7 +26,7 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
 
-Requires GCC 13+ or Clang 17+.
+Requires GCC 13+ or Clang 19+.
 
 ## Tests
 
@@ -102,14 +102,14 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.4.0_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.4.1_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.4.0 REQUIRED)
+find_package(Alt 1.4.1 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
@@ -134,9 +134,33 @@ target_link_libraries(mytarget PRIVATE alt::alt)
 
 ## Git workflow
 
-- Use feature branches for new work (`feature/<name>`) and bug branches for fixes (`bug/<name>`).
-- Commit once tests pass. No need to ask for permission to commit.
-- Do not merge to `main` until explicitly asked to.
+All work reaches `main` through a pull request. `main` is never pushed to directly.
+
+1. Branch: `feature/<name>` for new work, `bug/<name>` for fixes.
+2. Commit once tests pass. No need to ask for permission to commit. CI runs on every branch push, so a broken branch shows up before the pull request exists.
+3. Open a pull request against `main` once the work is ready.
+4. Add the version bump as its own commit on the branch. See below.
+5. Merge with `gh pr merge --merge` after CI is green.
+
+Do not merge to `main` until explicitly asked to.
+
+### Version bump
+
+The bump is a standalone commit on the pull request branch, never bundled into a
+feature or merge commit. Commit message: `Bump version to x.y.z`. Bumping on the
+branch means CI verifies the new version before it reaches `main`.
+
+If a version bump has not been mentioned, ask whether to bump and which part to
+increase. All six of these files change together:
+
+| File | What to change |
+|------|---------------|
+| `CMakeLists.txt` | `project(Alt VERSION x.y.z ...)` |
+| `include/alt/version.hpp` | `ALT_VERSION_MAJOR/MINOR/PATCH` macros and constexpr variables |
+| `src/version.cpp` | String returned by `version()` |
+| `tests/test_version.cpp` | Expected major/minor/patch values and the version string |
+| `README.md` | All occurrences of the version string |
+| `CLAUDE.md` | All occurrences of the version string |
 
 ## Conventions
 
