@@ -3382,7 +3382,7 @@ cmake --preset debug && cmake --build --preset debug
 ctest --preset debug --output-on-failure -R CancellableTaskTest
 ```
 
-Expected: PASS, fourteen tests.
+Expected: PASS, thirteen tests.
 
 - [ ] **Step 5: Run the whole suite under AddressSanitizer**
 
