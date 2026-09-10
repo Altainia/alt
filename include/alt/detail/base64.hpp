@@ -18,7 +18,7 @@ namespace alt
 {
 
 	/** Reasons a base64 decode can reject its input, per RFC 4648 sections 3.3 and 3.5. */
-	enum class base64_error
+	enum class base64_error : std::uint8_t
 	{
 		/** A character outside the alphabet appeared, which RFC 4648 section 3.3 requires be rejected. */
 		invalid_character,
@@ -216,6 +216,10 @@ namespace alt
 			base64_encode_iterator() = default;
 
 			/** Constructs an iterator over [@p first, @p last) and encodes the first quantum. */
+			// Sink parameters, moved into the members below. A const reference could not
+			// initialize either member from a move-only iterator, which an input range is
+			// permitted to have.
+			// NOLINTNEXTLINE(performance-unnecessary-value-param)
 			constexpr base64_encode_iterator(base_iterator first, base_sentinel last):
 			  m_current(std::move(first)), m_end(std::move(last))
 			{
@@ -351,6 +355,19 @@ namespace alt
 			return static_cast<std::uint32_t>(((1u << unused) - 1u) << (24 - carried));
 		}
 
+		/** One quantum of input as gathered by a decoder, before it is validated. */
+		struct base64_quantum
+		{
+			/** The sextets read so far, left-aligned within 24 bits. */
+			std::uint32_t bits = 0;
+
+			/** Alphabet characters read, 0 through 4. */
+			std::size_t chars = 0;
+
+			/** Pad characters read, 0 through 2. */
+			std::size_t pads = 0;
+		};
+
 		/**
 		 * @brief Input iterator producing the bytes an underlying range of base64 characters encodes.
 		 *
@@ -374,15 +391,13 @@ namespace alt
 			std::optional<base64_error>                     m_error;
 
 			/**
-			 * @brief Reads one quantum and writes the bytes it encodes to the buffer.
+			 * @brief Reads up to one quantum of characters from the input.
 			 *
-			 * @return The reason the quantum was rejected, or nothing on success.
+			 * @return The gathered quantum, or the reason a character was rejected.
 			 */
-			constexpr std::optional<base64_error> decode_quantum()
+			constexpr std::expected<base64_quantum, base64_error> read_quantum()
 			{
-				std::uint32_t bits  = 0;
-				std::size_t   chars = 0;
-				std::size_t   pads  = 0;
+				base64_quantum quantum{};
 
 				for(std::size_t i = 0; i < base64_chars_per_quantum && m_current != m_end; ++i)
 				{
@@ -397,65 +412,96 @@ namespace alt
 							// always carries at least one byte, which needs two characters.
 							if(i < 2)
 							{
-								return base64_error::unexpected_padding;
+								return std::unexpected(base64_error::unexpected_padding);
 							}
-							++pads;
+							++quantum.pads;
 							continue;
 						}
 					}
 
-					if(pads != 0)
+					if(quantum.pads != 0)
 					{
-						return base64_error::unexpected_padding;
+						return std::unexpected(base64_error::unexpected_padding);
 					}
 
 					const std::int8_t value = base64_decode_table<Alphabet>[static_cast<unsigned char>(c)];
 					if(value == base64_not_in_alphabet)
 					{
-						return base64_error::invalid_character;
+						return std::unexpected(base64_error::invalid_character);
 					}
 
-					bits |= static_cast<std::uint32_t>(value) << (18 - (i * base64_bits_per_char));
-					++chars;
+					quantum.bits |= static_cast<std::uint32_t>(value) << (18 - (i * base64_bits_per_char));
+					++quantum.chars;
 				}
 
-				m_pos  = 0;
-				m_size = 0;
-				if(chars == 0 && pads == 0)
+				return quantum;
+			}
+
+			/**
+			 * @brief Checks a gathered quantum against the rules its alphabet imposes.
+			 *
+			 * @return The reason @p quantum was rejected, or nothing if it is well formed.
+			 */
+			[[nodiscard]] constexpr std::optional<base64_error> check_quantum(const base64_quantum& quantum) const
+			{
+				if constexpr(base64_pads<Alphabet>)
+				{
+					// RFC 4648 section 3.2: the encoder must have completed the quantum.
+					if(quantum.chars + quantum.pads != base64_chars_per_quantum)
+					{
+						return quantum.chars < 2 ? base64_error::invalid_length : base64_error::missing_padding;
+					}
+				}
+
+				// A lone trailing character carries six bits, too few for even one byte.
+				if(quantum.chars < 2)
+				{
+					return base64_error::invalid_length;
+				}
+
+				if((quantum.bits & base64_unused_bit_mask(quantum.chars)) != 0)
+				{
+					return base64_error::non_canonical_bits;
+				}
+
+				if(quantum.pads != 0 && m_current != m_end)
+				{
+					return base64_error::unexpected_padding;
+				}
+
+				return std::nullopt;
+			}
+
+			/**
+			 * @brief Reads one quantum and writes the bytes it encodes to the buffer.
+			 *
+			 * @return The reason the quantum was rejected, or nothing on success.
+			 */
+			constexpr std::optional<base64_error> decode_quantum()
+			{
+				const std::expected<base64_quantum, base64_error> quantum = read_quantum();
+				m_pos                                                     = 0;
+				m_size                                                    = 0;
+				if(!quantum.has_value())
+				{
+					return quantum.error();
+				}
+
+				if(quantum->chars == 0 && quantum->pads == 0)
 				{
 					m_exhausted = true;
 					return std::nullopt;
 				}
 
-				if constexpr(base64_pads<Alphabet>)
+				if(const std::optional<base64_error> error = check_quantum(*quantum))
 				{
-					// RFC 4648 section 3.2: the encoder must have completed the quantum.
-					if(chars + pads != base64_chars_per_quantum)
-					{
-						return chars < 2 ? base64_error::invalid_length : base64_error::missing_padding;
-					}
+					return error;
 				}
 
-				// A lone trailing character carries six bits, too few for even one byte.
-				if(chars < 2)
-				{
-					return base64_error::invalid_length;
-				}
-
-				if((bits & base64_unused_bit_mask(chars)) != 0)
-				{
-					return base64_error::non_canonical_bits;
-				}
-
-				if(pads != 0 && m_current != m_end)
-				{
-					return base64_error::unexpected_padding;
-				}
-
-				m_size = chars - 1;
+				m_size = quantum->chars - 1;
 				for(std::size_t i = 0; i < m_size; ++i)
 				{
-					m_buffer[i] = static_cast<std::byte>((bits >> (16 - (i * 8))) & 0xFFu);
+					m_buffer[i] = static_cast<std::byte>((quantum->bits >> (16 - (i * 8))) & 0xFFu);
 				}
 				return std::nullopt;
 			}
@@ -498,6 +544,10 @@ namespace alt
 			base64_decode_iterator() = default;
 
 			/** Constructs an iterator over [@p first, @p last) and decodes the first quantum. */
+			// Sink parameters, moved into the members below. A const reference could not
+			// initialize either member from a move-only iterator, which an input range is
+			// permitted to have.
+			// NOLINTNEXTLINE(performance-unnecessary-value-param)
 			constexpr base64_decode_iterator(base_iterator first, base_sentinel last):
 			  m_current(std::move(first)), m_end(std::move(last))
 			{

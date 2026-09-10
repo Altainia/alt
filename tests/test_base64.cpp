@@ -20,7 +20,7 @@
 // and "fo"/"fooba" pad with "=". Asserted at compile time so a regression
 // breaks the build rather than the test run.
 
-static_assert(alt::base64_encode("") == "");
+static_assert(alt::base64_encode("").empty());
 static_assert(alt::base64_encode("f") == "Zg==");
 static_assert(alt::base64_encode("fo") == "Zm8=");
 static_assert(alt::base64_encode("foo") == "Zm9v");
@@ -30,7 +30,7 @@ static_assert(alt::base64_encode("foobar") == "Zm9vYmFy");
 
 TEST(base64_encode, matches_the_rfc_4648_vectors)
 {
-	EXPECT_EQ(alt::base64_encode(std::string_view{""}), "");
+	EXPECT_TRUE(alt::base64_encode(std::string_view{""}).empty());
 	EXPECT_EQ(alt::base64_encode(std::string_view{"f"}), "Zg==");
 	EXPECT_EQ(alt::base64_encode(std::string_view{"fo"}), "Zm8=");
 	EXPECT_EQ(alt::base64_encode(std::string_view{"foo"}), "Zm9v");
@@ -62,7 +62,7 @@ namespace
 
 TEST(base64_decode, recovers_the_rfc_4648_vectors)
 {
-	EXPECT_EQ(decoded(""), "");
+	EXPECT_TRUE(decoded("").empty());
 	EXPECT_EQ(decoded("Zg=="), "f");
 	EXPECT_EQ(decoded("Zm8="), "fo");
 	EXPECT_EQ(decoded("Zm9v"), "foo");
@@ -205,7 +205,7 @@ TEST(base64_alphabets, unpadded_omits_padding_on_both_sides)
 {
 	using unpadded = alt::base64_url_unpadded_alphabet;
 
-	EXPECT_EQ(alt::base64_encode<unpadded>(std::string_view{""}), "");
+	EXPECT_TRUE(alt::base64_encode<unpadded>(std::string_view{""}).empty());
 	EXPECT_EQ(alt::base64_encode<unpadded>(std::string_view{"f"}), "Zg");
 	EXPECT_EQ(alt::base64_encode<unpadded>(std::string_view{"fo"}), "Zm8");
 	EXPECT_EQ(alt::base64_encode<unpadded>(std::string_view{"foo"}), "Zm9v");
@@ -395,24 +395,30 @@ TEST(base64_views, decode_surfaces_the_failure_as_a_final_element)
 	EXPECT_EQ(failure, invalid_character);
 }
 
-TEST(base64_views, decode_throws_under_the_throwing_policy)
+namespace
 {
-	auto view = std::string_view{"Zm9!"} |
-	            alt::views::base64_decode<alt::base64_standard_alphabet, alt::base64_throw_errors>();
 
-	EXPECT_THROW(
-	  {
-		  for([[maybe_unused]] const std::byte b: view)
-		  {
-		  }
-	  },
-	  alt::base64_exception);
-
-	try
+	/** Drains a throwing decode view of @p text, propagating any failure. */
+	void drain_throwing(std::string_view text)
 	{
+		auto view = text | alt::views::base64_decode<alt::base64_standard_alphabet, alt::base64_throw_errors>();
 		for([[maybe_unused]] const std::byte b: view)
 		{
 		}
+	}
+
+} // namespace
+
+TEST(base64_views, decode_throws_under_the_throwing_policy)
+{
+	EXPECT_THROW(drain_throwing("Zm9!"), alt::base64_exception);
+}
+
+TEST(base64_views, the_thrown_exception_carries_the_reason)
+{
+	try
+	{
+		drain_throwing("Zm9!");
 		FAIL() << "expected base64_exception";
 	}
 	catch(const alt::base64_exception& e)
@@ -492,8 +498,11 @@ TEST(base64_error_message, describes_every_reason_distinctly)
 
 TEST(base64_error_message, falls_back_for_a_value_that_names_no_reason)
 {
-	// Seven is representable by the enumeration but names nothing, so the fallback
-	// is reachable without the undefined behavior a wildly out-of-range cast would
-	// invoke.
-	EXPECT_EQ(alt::base64_error_message(static_cast<alt::base64_error>(7)), "unknown base64 error");
+	// The enumeration has a fixed underlying type, so every std::uint8_t value is
+	// representable and this cast is well defined. Seven names no reason, which is
+	// exactly what makes the fallback reachable, so the analyzer's objection to the
+	// cast is the behavior under test.
+	// NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+	const auto unnamed = static_cast<alt::base64_error>(7);
+	EXPECT_EQ(alt::base64_error_message(unnamed), "unknown base64 error");
 }
