@@ -11,6 +11,7 @@
 #include <stop_token>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "coroutine_test_support.hpp"
 
@@ -280,6 +281,11 @@ TEST(Task, MoveAssignmentDestroysTheOverwrittenFrame)
 
 TEST(Task, DeepChainRunsInConstantStack)
 {
+	// __OPTIMIZE__ is defined by GCC at -O1 and -Og, but GCC only enables the sibling-call
+	// optimization symmetric transfer depends on at -O2 and above. A GCC build at -O1 or
+	// -Og would therefore run this test with the tail call disabled and overflow; no preset
+	// in this project currently builds at those levels, so that gap is accepted as residual
+	// risk rather than guarded against here.
 #if defined(__GNUC__) && !defined(__clang__) && !defined(__OPTIMIZE__)
 	GTEST_SKIP() << "Symmetric transfer only avoids growing the stack where the compiler "
 	                "tail-calls the handle returned from the final awaiter. GCC does not do "
@@ -292,6 +298,21 @@ TEST(Task, DeepChainRunsInConstantStack)
 	std::optional<int> out;
 	std::exception_ptr error;
 	run_into(countdown(50000), &out, &error);
+	EXPECT_FALSE(error);
+	ASSERT_TRUE(out.has_value());
+	EXPECT_EQ(value_of(out), 0);
+}
+
+TEST(Task, NestedTaskAwaitRunsOnEveryToolchain)
+{
+	// The always-running counterpart to DeepChainRunsInConstantStack above: countdown is
+	// the only coroutine in this file where one alt::task awaits another alt::task (every
+	// other test awaits from the drive or relay_root promise instead), so without this test
+	// that path — including the cancellation-context relay between two task promises — would
+	// have no coverage at all on a toolchain where the deep chain is skipped.
+	std::optional<int> out;
+	std::exception_ptr error;
+	run_into(countdown(3), &out, &error);
 	EXPECT_FALSE(error);
 	ASSERT_TRUE(out.has_value());
 	EXPECT_EQ(value_of(out), 0);
@@ -394,4 +415,61 @@ TEST(TaskCancellationRelay, ChildObservesCancellationRequestedOnTheRoot)
 
 	EXPECT_FALSE(child_ran_past_park);
 	EXPECT_EQ(live_frames, 0); // the child destroyed the whole chain
+}
+
+namespace
+{
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	bool leaf_ran_past_park = false;
+
+	// The leaf of a three-frame chain: relay_root -> middle task -> this leaf task. Unlike
+	// parking_child above, which relay_root awaits directly, this leaf is only ever reached
+	// through an intermediate alt::task frame — that intermediate hop is the recursive step
+	// under test, which the single-hop test above cannot exercise.
+	alt::task<void> park_leaf()
+	{
+		const frame_tracker t{3};
+		co_await park{};
+		co_await park{};
+		leaf_ran_past_park = true;
+	}
+
+	alt::task<void> await_leaf_through_middle()
+	{
+		const frame_tracker t{2};
+		co_await park_leaf();
+	}
+
+	relay_root relay_root_awaiting_middle()
+	{
+		const frame_tracker t{1};
+		co_await await_leaf_through_middle();
+	}
+
+} // namespace
+
+TEST(TaskCancellationRelay, CascadeThroughAnIntermediateTaskFrameDestroysInnerToOuterOrder)
+{
+	reset_coroutine_test_state();
+	leaf_ran_past_park = false;
+
+	auto root = relay_root_awaiting_middle();
+	EXPECT_EQ(live_frames, 3); // root, middle, and leaf frames all live
+
+	root.source.request_stop();
+
+	const auto handle = parked;
+	parked            = {};
+	handle.resume(); // leaf resumes, observes cancellation at its second await
+
+	EXPECT_FALSE(leaf_ran_past_park);
+	EXPECT_EQ(live_frames, 0); // the cascade destroyed all three frames
+
+	// Destroying the root runs its await temporary's destructor, which owns the middle task,
+	// which destroys the middle frame, which runs its own await temporary's destructor, which
+	// owns the leaf. So the leaf's frame_tracker is destroyed before the middle's, and the
+	// middle's before the root's: inner-to-outer order, which is the observable signature of
+	// that recursive step actually happening rather than a two-frame chain repeated once.
+	EXPECT_EQ(destruction_order, (std::vector<int>{3, 2, 1}));
 }
