@@ -116,11 +116,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.4.1_amd64.deb` in the project root:
+Produces `altlib_1.5.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.4.1_amd64.deb
+sudo dpkg -i altlib_1.5.0_amd64.deb
 ```
 
 ## Using in your project
@@ -128,7 +128,7 @@ sudo dpkg -i altlib_1.4.1_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.4.1 REQUIRED)
+find_package(Alt 1.5.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
@@ -157,5 +157,6 @@ Then include headers as needed:
 | `<alt/projection.hpp>` | Projection objects for composite values: `key`, `value`, `element<N>` | [docs/projection.md](docs/projection.md) |
 | `<alt/scope.hpp>` | Scope guards and RAII resource wrapper: `scope_exit`, `scope_fail`, `scope_success`, `unique_resource` | [docs/scope.md](docs/scope.md) |
 | `<alt/transcode.hpp>` | Lazy UTF-8/16/32 conversion: `transcode`, `encode_one`, `decode_one` | [docs/transcode.md](docs/transcode.md) |
+| `<alt/base64.hpp>` | Base 64 encoding and decoding (RFC 4648): `base64_encode`, `base64_decode`, alphabets, and lazy views | [docs/base64.md](docs/base64.md) |
 | `<alt/sha1.hpp>` | SHA-1 hashing (deprecated; FIPS 180-4): `sha1`, `sha1_hasher`, `sha1_digest` | [docs/sha1.md](docs/sha1.md) |
 | `<alt/sha2.hpp>` | SHA-2 hashing (FIPS 180-4): `sha224`, `sha256`, `sha384`, `sha512`, `sha512_224`, `sha512_256` | [docs/sha2.md](docs/sha2.md) |
