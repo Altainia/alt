@@ -2548,7 +2548,7 @@ namespace alt
 		 * the caller owns, and then signals a work_item.
 		 *
 		 * It destroys its own frame at its final suspension point, before
-		 * signalling. Signalling first would let the waiting thread wake up and
+		 * signaling. Signaling first would let the waiting thread wake up and
 		 * destroy the frame while this coroutine is still inside await_suspend.
 		 */
 		class sync_wait_task
@@ -2762,7 +2762,7 @@ git commit -m "Add sync_wait, the library's only blocking entry point
 
 Two overloads: one parks the calling thread, the other pumps a scheduler so
 that single-threaded work cannot deadlock. The internal runner destroys its
-own frame before signalling completion, since signalling first would let the
+own frame before signaling completion, since signaling first would let the
 waiting thread destroy that frame while the runner was still inside
 await_suspend."
 ```
