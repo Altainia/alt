@@ -46,6 +46,7 @@ add_executable(alt_tests
     test_awaitable.cpp
     test_coroutine.cpp
     test_scheduler.cpp
+    test_cancellation.cpp
 )
 
 target_link_libraries(alt_tests
