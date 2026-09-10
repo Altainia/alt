@@ -85,17 +85,18 @@ namespace alt
 		 * worth of tasks can be cancelled from one source. Empty means the task
 		 * relies solely on the handle alt::start returns.
 		 */
-		// NOLINTNEXTLINE(readability-redundant-member-init): the braces are load-bearing here, not redundant. start_options is aggregate-initialized with designated initializers at call sites (e.g. {.token = ...}), and without this default member initializer GCC's -Wmissing-field-initializers fires on every partial designated-init because std::stop_token would then have no in-class default to fall back on.
-		std::stop_token token{};
+		std::stop_token token{}; // NOLINT(readability-redundant-member-init): the braces are load-bearing here, not redundant. start_options is aggregate-initialized with designated initializers at call sites (e.g. {.token = ...}), and without this default member initializer GCC's -Wmissing-field-initializers fires on every partial designated-init because std::stop_token would then have no in-class default to fall back on.
 
 		/**
 		 * Where to destroy the task's frames once cancellation is observed. Empty
 		 * means destroy them in place, on whichever thread observed it. Supply a
 		 * scheduler when the frames hold state that must not be destroyed off its
-		 * own thread, such as anything owned by a UI toolkit.
+		 * own thread, such as anything owned by a UI toolkit. The frames stay
+		 * alive, posted but undestroyed, until this scheduler is drained; a
+		 * scheduler that is never drained, or that is destroyed with this work
+		 * still queued, leaks the whole chain silently rather than crashing.
 		 */
-		// NOLINTNEXTLINE(readability-redundant-member-init): same reasoning as start_options::token above; required for -Wmissing-field-initializers under designated-initializer construction.
-		scheduler_ref home{};
+		scheduler_ref home{}; // NOLINT(readability-redundant-member-init): same reasoning as start_options::token above; required for -Wmissing-field-initializers under designated-initializer construction.
 
 		/** Where an escaped exception goes. Empty means std::terminate. */
 		exception_handler on_exception{};
@@ -206,6 +207,19 @@ namespace alt
 			}
 
 		private:
+			// DELICATE. Read this before reordering these members.
+			//
+			// m_external must stay the last member, so that it is destroyed first,
+			// ahead of m_source. std::stop_callback's destructor blocks until any
+			// concurrently running invocation of its callback returns, and that
+			// callback (stop_forwarder) dereferences m_source. Declaring m_external
+			// any earlier would destroy m_source first: a thread already inside
+			// stop_forwarder::operator(), calling m_source.request_stop() from an
+			// external request_stop(), would then dereference a destroyed
+			// std::stop_source while this frame's own teardown runs on another
+			// thread. Nothing else in this class, no test, no compiler warning, and
+			// no clang-tidy check catches that reordering; only the declaration
+			// order does.
 			cancellation_context                              m_context{};
 			std::stop_source                                  m_source;
 			exception_handler                                 m_handler{};
@@ -242,6 +256,7 @@ namespace alt
 		explicit cancellable_task(std::coroutine_handle<promise_type> handle) noexcept: m_handle(handle)
 		{}
 
+		/** Adopts the other task's frame, leaving the other task empty. */
 		cancellable_task(cancellable_task&& other) noexcept: m_handle(std::exchange(other.m_handle, {}))
 		{}
 
@@ -297,15 +312,16 @@ namespace alt
 	 */
 	struct cancellation_point
 	{
-		[[nodiscard]] static bool await_ready() noexcept
+		// NOLINTNEXTLINE(readability-convert-member-functions-to-static): this type is documented to be awaited from a foreign coroutine with no alt::task/alt::cancellable_task await_transform to absorb the call. A static method here is still called through an instance at that foreign call site, where readability-static-accessed-through-instance would fire with no suppression of ours able to reach it. Kept as an instance method for exactly the reason initial_suspend and final_suspend above are.
+		[[nodiscard]] bool await_ready() const noexcept
 		{
 			return true;
 		}
 
-		static void await_suspend(std::coroutine_handle<> /*h*/) noexcept
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
 		{}
 
-		static void await_resume() noexcept
+		void await_resume() const noexcept
 		{}
 	};
 

@@ -21,6 +21,9 @@ namespace
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable shared test state
 	bool reached_end = false;
 
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable shared test state
+	bool middle_reached_end = false;
+
 	alt::task<void> parking_leaf()
 	{
 		const frame_tracker t{3};
@@ -33,6 +36,7 @@ namespace
 	{
 		const frame_tracker t{2};
 		co_await parking_leaf();
+		middle_reached_end = true;
 	}
 
 	alt::cancellable_task root_over_a_chain()
@@ -89,8 +93,9 @@ protected:
 	void SetUp() override
 	{
 		reset_coroutine_test_state();
-		reached_end    = false;
-		captured_error = {};
+		reached_end        = false;
+		middle_reached_end = false;
+		captured_error     = {};
 	}
 };
 
@@ -123,6 +128,12 @@ TEST_F(CancellableTaskTest, SelfDestructsTheWholeChainFromTheLeaf)
 	resume_parked(); // the leaf observes cancellation at its second await
 
 	EXPECT_FALSE(reached_end);
+	// Proves the middle frame is torn down rather than resumed: a bug that let
+	// the coroutine machinery resume middle() after its child chain was
+	// abandoned would leave live_frames and destruction_order looking correct
+	// (middle's own frame still gets destroyed eventually) but would let this
+	// trailing statement run. Nothing else in this test would catch that.
+	EXPECT_FALSE(middle_reached_end);
 	EXPECT_EQ(live_frames, 0);
 
 	// Root frame destruction reaches the leaf through the owning task destructors,
