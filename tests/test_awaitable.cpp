@@ -11,7 +11,6 @@ namespace
 	// A bare awaiter: satisfies the three await members directly.
 	struct ready_awaiter
 	{
-		// NOLINTBEGIN(modernize-use-nodiscard, readability-convert-member-functions-to-static):
 		// the co_await protocol always uses the return value and dispatches through
 		// the object, so nodiscard is redundant and static would misrepresent the shape.
 		bool await_ready() const noexcept
@@ -24,7 +23,6 @@ namespace
 		{
 			return 42;
 		}
-		// NOLINTEND(modernize-use-nodiscard, readability-convert-member-functions-to-static)
 	};
 
 	// An awaitable that is not itself an awaiter: it has a member operator co_await.
@@ -49,7 +47,6 @@ namespace
 	// An awaiter whose await_resume throws, for as_expected.
 	struct throwing_awaiter
 	{
-		// NOLINTBEGIN(modernize-use-nodiscard, readability-convert-member-functions-to-static):
 		// the co_await protocol always uses the return value and dispatches through
 		// the object, so nodiscard is redundant and static would misrepresent the shape.
 		bool await_ready() const noexcept
@@ -62,7 +59,6 @@ namespace
 		{
 			throw std::runtime_error{"boom"};
 		}
-		// NOLINTEND(modernize-use-nodiscard, readability-convert-member-functions-to-static)
 	};
 
 	struct not_awaitable
@@ -133,7 +129,6 @@ TEST(AsExpected, VoidResultBecomesExpectedVoid)
 {
 	struct void_awaiter
 	{
-		// NOLINTBEGIN(modernize-use-nodiscard, readability-convert-member-functions-to-static):
 		// the co_await protocol always uses the return value and dispatches through
 		// the object, so nodiscard is redundant and static would misrepresent the shape.
 		bool await_ready() const noexcept
@@ -144,7 +139,6 @@ TEST(AsExpected, VoidResultBecomesExpectedVoid)
 		{}
 		void await_resume() const noexcept
 		{}
-		// NOLINTEND(modernize-use-nodiscard, readability-convert-member-functions-to-static)
 	};
 
 	auto       adapted = alt::as_expected(void_awaiter{});

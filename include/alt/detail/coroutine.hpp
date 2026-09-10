@@ -112,7 +112,7 @@ namespace alt::detail
 		}
 
 	private:
-		std::exception_ptr m_error{};
+		std::exception_ptr m_error;
 		bool               m_completed = false;
 	};
 
@@ -152,7 +152,7 @@ namespace alt::detail
 
 	private:
 		T*                 m_value = nullptr;
-		std::exception_ptr m_error{};
+		std::exception_ptr m_error;
 	};
 
 }
