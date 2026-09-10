@@ -1,4 +1,5 @@
 find_package(GTest QUIET)
+find_package(Threads REQUIRED)
 
 if(NOT GTest_FOUND)
     include(FetchContent)
@@ -44,12 +45,14 @@ add_executable(alt_tests
     test_base64.cpp
     test_awaitable.cpp
     test_coroutine.cpp
+    test_scheduler.cpp
 )
 
 target_link_libraries(alt_tests
     PRIVATE
         alt::alt
         GTest::gtest_main
+        Threads::Threads
 )
 
 alt_add_warnings(alt_tests)
