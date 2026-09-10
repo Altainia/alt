@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstddef>
@@ -498,10 +499,16 @@ namespace alt
 					return error;
 				}
 
-				m_size = quantum->chars - 1;
+				// A quantum of n characters yields n - 1 bytes, so never more than the
+				// buffer holds. Taking the top byte and shifting the source up keeps every
+				// shift distance constant, where computing one from the index could appear
+				// to underflow.
+				m_size                  = std::min(quantum->chars - 1, base64_bytes_per_quantum);
+				std::uint32_t remaining = quantum->bits;
 				for(std::size_t i = 0; i < m_size; ++i)
 				{
-					m_buffer[i] = static_cast<std::byte>((quantum->bits >> (16 - (i * 8))) & 0xFFu);
+					m_buffer[i] = static_cast<std::byte>((remaining >> 16) & 0xFFu);
+					remaining <<= 8;
 				}
 				return std::nullopt;
 			}
