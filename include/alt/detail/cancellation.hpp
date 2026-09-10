@@ -77,9 +77,29 @@ namespace alt::detail
 		root.destroy();
 	}
 
-	/** The type Inner::await_suspend returns for a coroutine whose promise is Promise. */
+	/** The type Inner::await_suspend declares for a coroutine whose promise is Promise. */
 	template<typename Inner, typename Promise>
-	using suspend_result_t = decltype(std::declval<Inner&>().await_suspend(std::declval<std::coroutine_handle<Promise>>()));
+	using raw_suspend_result_t = decltype(std::declval<Inner&>().await_suspend(std::declval<std::coroutine_handle<Promise>>()));
+
+	/** True when T is some std::coroutine_handle specialization. */
+	template<typename T>
+	inline constexpr bool is_coroutine_handle = false;
+
+	template<typename Promise>
+	inline constexpr bool is_coroutine_handle<std::coroutine_handle<Promise>> = true;
+
+	/**
+	 * The type the cancellation wrapper declares for its own await_suspend.
+	 *
+	 * A handle-returning inner awaiter is widened to the erased
+	 * std::coroutine_handle<>. This matters: [expr.await] lets an awaiter return
+	 * std::coroutine_handle<Z> for any Z, but std::noop_coroutine_handle converts
+	 * only to the erased handle, so the cancelled path could not return it
+	 * through a typed return type. A typed handle from the inner awaiter converts
+	 * to the erased one, so widening costs nothing and resumes identically.
+	 */
+	template<typename Inner, typename Promise>
+	using suspend_result_t = std::conditional_t<is_coroutine_handle<raw_suspend_result_t<Inner, Promise>>, std::coroutine_handle<>, raw_suspend_result_t<Inner, Promise>>;
 
 	/**
 	 * @brief Wraps an awaiter so that cancellation is observed before it starts.

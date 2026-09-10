@@ -82,6 +82,22 @@ namespace
 		body_ran_past_cancellation = true;
 	}
 
+	test_root parking_root_then_ready()
+	{
+		const frame_tracker t{1};
+		co_await park{};
+		co_await already_ready{};
+		body_ran_past_cancellation = true;
+	}
+
+	test_root parking_root_then_typed_transfer()
+	{
+		const frame_tracker t{1};
+		co_await park{};
+		co_await park_by_typed_transfer{};
+		body_ran_past_cancellation = true;
+	}
+
 } // namespace
 
 class CancellationTest: public ::testing::Test
@@ -127,6 +143,12 @@ TEST_F(CancellationTest, CancelledCoroutineSelfDestructsAtItsNextSuspendPoint)
 
 	EXPECT_FALSE(body_ran_past_cancellation);
 	EXPECT_EQ(live_frames, 0);
+
+	// Ordering check: resume_parked() clears alt_test::parked before resuming, so
+	// an empty handle here means the inner park's await_suspend never ran. If the
+	// wrapper ever delegated to the inner awaiter before checking cancellation,
+	// this would be the second parked handle instead of empty.
+	EXPECT_FALSE(static_cast<bool>(alt_test::parked));
 }
 
 TEST_F(CancellationTest, SelfDestructsWhenTheInnerAwaiterUsesSymmetricTransfer)
@@ -137,6 +159,9 @@ TEST_F(CancellationTest, SelfDestructsWhenTheInnerAwaiterUsesSymmetricTransfer)
 
 	EXPECT_FALSE(body_ran_past_cancellation);
 	EXPECT_EQ(live_frames, 0);
+
+	// See the ordering-check comment above: the inner awaiter must not have run.
+	EXPECT_FALSE(static_cast<bool>(alt_test::parked));
 }
 
 TEST_F(CancellationTest, SelfDestructsWhenTheInnerAwaiterReturnsBool)
@@ -147,6 +172,9 @@ TEST_F(CancellationTest, SelfDestructsWhenTheInnerAwaiterReturnsBool)
 
 	EXPECT_FALSE(body_ran_past_cancellation);
 	EXPECT_EQ(live_frames, 0);
+
+	// See the ordering-check comment above: the inner awaiter must not have run.
+	EXPECT_FALSE(static_cast<bool>(alt_test::parked));
 }
 
 TEST_F(CancellationTest, ATokenSwappedInWhileParkedIsObservedOnResume)
@@ -183,4 +211,35 @@ TEST_F(CancellationTest, HomeSchedulerDefersDestructionUntilItIsPumped)
 	EXPECT_EQ(home.run_all(), 1U);
 	EXPECT_EQ(live_frames, 0);
 	EXPECT_FALSE(body_ran_past_cancellation);
+}
+
+TEST_F(CancellationTest, CancelledCoroutineDoesNotRunPastAnAlreadyReadyAwait)
+{
+	// The inner awaiter here is already complete (await_ready() == true). Without
+	// the wrapper's own cancellation check in await_ready, a cancelled coroutine
+	// would sail straight through this await and run its body regardless.
+	auto root = parking_root_then_ready();
+	EXPECT_EQ(live_frames, 1);
+
+	root.source.request_stop();
+	resume_parked(); // past the first await; the second await is already ready
+
+	EXPECT_FALSE(body_ran_past_cancellation);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationTest, SelfDestructsWhenTheInnerAwaiterReturnsATypedHandle)
+{
+	// The inner awaiter's await_suspend declares std::coroutine_handle<unrelated_promise>
+	// rather than the erased handle. This only compiles because suspend_result_t
+	// widens a handle-returning inner to the erased type; against the un-widened
+	// alias, returning std::noop_coroutine() from the cancelled branch would be a
+	// hard compile error here, since std::noop_coroutine_handle does not convert
+	// to std::coroutine_handle<unrelated_promise>.
+	auto root = parking_root_then_typed_transfer();
+	root.source.request_stop();
+	resume_parked();
+
+	EXPECT_FALSE(body_ran_past_cancellation);
+	EXPECT_EQ(live_frames, 0);
 }
