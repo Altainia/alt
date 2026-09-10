@@ -2,6 +2,7 @@
 
 #include <alt/scheduler.hpp>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -105,6 +106,44 @@ TEST(ManualScheduler, WakeReleasesABlockedPumpWithoutRunningAnything)
 	scheduler.wake();
 	pump.join();
 	EXPECT_TRUE(returned.load(std::memory_order_acquire));
+}
+
+TEST(ManualScheduler, RunOneOrWaitConsumesTheWakeAfterRunningAQueuedItem)
+{
+	// A wake and a queued item pending at the same time must not leave the
+	// wake set once the item has run: a later call with nothing queued must
+	// still block for a real post rather than returning false on a stale wake.
+	std::vector<int>      log;
+	logged_call           first{.log = &log, .tag = 1};
+	logged_call           second{.log = &log, .tag = 2};
+	alt::manual_scheduler scheduler;
+
+	scheduler.post(item_for(first));
+	scheduler.wake();
+
+	EXPECT_TRUE(scheduler.run_one_or_wait());
+	EXPECT_EQ(log, std::vector<int>{1});
+
+	std::atomic<bool> returned{false};
+	std::atomic<bool> ran_second{false};
+
+	std::thread waiter{[&] {
+		const bool ran = scheduler.run_one_or_wait();
+		ran_second.store(ran, std::memory_order_release);
+		returned.store(true, std::memory_order_release);
+	}};
+
+	// If the earlier wake had been left set, the call above would already
+	// have returned by now instead of blocking for the post below.
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	EXPECT_FALSE(returned.load(std::memory_order_acquire));
+
+	scheduler.post(item_for(second));
+	waiter.join();
+
+	EXPECT_TRUE(returned.load(std::memory_order_acquire));
+	EXPECT_TRUE(ran_second.load(std::memory_order_acquire));
+	EXPECT_EQ(log, (std::vector<int>{1, 2}));
 }
 
 TEST(TrampolineScheduler, RunsANonReentrantPostSynchronously)

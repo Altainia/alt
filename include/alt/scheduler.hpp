@@ -196,9 +196,14 @@ namespace alt
 			{
 				std::unique_lock lock{m_mutex};
 				m_signal.wait(lock, [this] { return !m_queue.empty() || m_woken; });
+
+				// Consume the wake on every path. Leaving it set after running a queued
+				// item would make a later call return false on a stale signal, which a
+				// driving sync_wait would read as completion.
+				m_woken = false;
+
 				if(m_queue.empty())
 				{
-					m_woken = false;
 					return false;
 				}
 				next = m_queue.front();
