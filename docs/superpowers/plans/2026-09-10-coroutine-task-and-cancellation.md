@@ -3429,7 +3429,7 @@ Each page covers: what the component is, a worked example, the full public API w
 | Page | Hazards it must document |
 |------|--------------------------|
 | `docs/awaitable.md` | The concepts describe context-free awaitables only, since no concept can observe a promise type's `await_transform`. `as_expected` captures only what `await_resume` throws. |
-| `docs/task.md` | Awaitable exactly once. Discarding a task means it never runs. A `task<T&>` result refers to something the coroutine must keep alive. |
+| `docs/task.md` | Awaitable exactly once. Discarding a task means it never runs. A `task<T&>` result refers to something the coroutine must keep alive. **The constant-stack property for deep chains holds only where the compiler tail-calls the handle returned from the final awaiter: GCC at `-O0` grows the stack linearly and a chain thousands of frames deep can overflow there, while Clang and all optimized builds are fine.** |
 | `docs/scheduler.md` | The scheduler and any object a work item points at must outlive the suspension. `trampoline_scheduler` shares its drain across instances on one thread. |
 | `docs/sync_wait.md` | The blocking overload deadlocks on work that needs the calling thread to pump; use the driving overload for anything built on `manual_scheduler`. |
 | `docs/cancellable_task.md` | Cancellation is not acknowledged, so `request_stop` returning does not mean the frames are gone. Frames are destroyed on the observing thread unless a home scheduler is given. A body that reaches no further suspension point runs to completion. A task parked on something that never resumes never self-destructs, so a home scheduler that stops pumping leaks the frames. |

@@ -133,8 +133,21 @@ dependency on the task type.
 Lazy, move-only, single-consumer, and `[[nodiscard]]`. It suspends at
 `initial_suspend`, so awaiting it is what starts it, and the awaiting
 coroutine's handle becomes its continuation. Its final awaiter returns that
-continuation as a handle rather than resuming it, which is symmetric transfer, so
-a chain of arbitrary depth unwinds in constant stack space. The task object owns
+continuation as a handle rather than resuming it, which is symmetric transfer.
+
+**The constant-stack property is conditional, and this was measured rather than
+assumed.** Symmetric transfer only avoids growing the stack if the compiler
+turns the resumption of the returned handle into a tail call, and the standard
+does not require that. GCC does not do it without optimizations enabled, so on
+GCC at `-O0` a chain's stack usage grows linearly with its depth. A 50000-frame
+chain survives a plain `-O0` build by fitting under the default stack limit and
+overflows once AddressSanitizer enlarges each frame. Clang performs the
+elision even at `-O0`. Any release build on either compiler is fine.
+
+The consequence for callers: deep chains are safe in optimized builds, and a
+debug build on GCC can overflow on a chain thousands of frames deep. This is a
+toolchain property, not something the library can fix, so it is documented on
+the component page rather than worked around. The task object owns
 the frame and destroys it in its destructor, which is precisely what makes the
 cancellation cascade work.
 
@@ -467,7 +480,7 @@ silently swallowing a failure.
 | Throw before the first suspension point | Captured in the promise, rethrown at `await_resume` |
 | Throw from the move constructor of a returned value | Captured, rethrown at `await_resume` |
 | `task<T>` with move-only, reference, or `void` result | All supported |
-| Chain deep enough to overflow the stack | Constant stack via symmetric transfer |
+| Chain deep enough to overflow the stack | Constant stack via symmetric transfer, but only where the compiler tail-calls the returned handle. GCC at `-O0` grows the stack linearly and can overflow; Clang and all optimized builds are fine |
 | `request_stop` concurrent with normal completion | Safe. Only the coroutine ever destroys; `request_stop` only touches the stop state, which is independently reference counted |
 | `request_stop` on an already-finished task | No-op |
 | `request_stop` called twice | Second call is a no-op; the chain is already gone after the first observation |
