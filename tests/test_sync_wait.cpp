@@ -31,12 +31,14 @@ namespace
 		co_return 0;
 	}
 
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): subject is owned by the calling test, which reaches sync_wait and blocks until this coroutine completes, so the reference cannot dangle.
 	alt::task<std::string&> borrow(std::string& subject)
 	{
 		co_return subject;
 	}
 
 	// Hops onto the scheduler and back, so it cannot complete without pumping.
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): scheduler is owned by the calling test, which reaches sync_wait and blocks or pumps until this coroutine completes, so the reference cannot dangle.
 	alt::task<int> hops(alt::manual_scheduler& scheduler)
 	{
 		co_await alt::resume_on(scheduler);
