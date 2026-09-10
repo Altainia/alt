@@ -49,6 +49,7 @@ add_executable(alt_tests
     test_cancellation.cpp
     test_task.cpp
     test_sync_wait.cpp
+    test_cancellable_task.cpp
 )
 
 target_link_libraries(alt_tests
