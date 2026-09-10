@@ -42,6 +42,7 @@ add_executable(alt_tests
     test_sha1.cpp
     test_sha2.cpp
     test_base64.cpp
+    test_awaitable.cpp
 )
 
 target_link_libraries(alt_tests
