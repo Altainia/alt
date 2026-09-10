@@ -1576,9 +1576,29 @@ namespace alt::detail
 		root.destroy();
 	}
 
-	/** The type Inner::await_suspend returns for a coroutine whose promise is Promise. */
+	/** The type Inner::await_suspend declares for a coroutine whose promise is Promise. */
 	template<typename Inner, typename Promise>
-	using suspend_result_t = decltype(std::declval<Inner&>().await_suspend(std::declval<std::coroutine_handle<Promise>>()));
+	using raw_suspend_result_t = decltype(std::declval<Inner&>().await_suspend(std::declval<std::coroutine_handle<Promise>>()));
+
+	/** True when T is some std::coroutine_handle specialization. */
+	template<typename T>
+	inline constexpr bool is_coroutine_handle = false;
+
+	template<typename Promise>
+	inline constexpr bool is_coroutine_handle<std::coroutine_handle<Promise>> = true;
+
+	/**
+	 * The type the cancellation wrapper declares for its own await_suspend.
+	 *
+	 * A handle-returning inner awaiter is widened to the erased
+	 * std::coroutine_handle<>. This matters: [expr.await] lets an awaiter return
+	 * std::coroutine_handle<Z> for any Z, but std::noop_coroutine_handle converts
+	 * only to the erased handle, so the cancelled path could not return it
+	 * through a typed return type. A typed handle from the inner awaiter converts
+	 * to the erased one, so widening costs nothing and resumes identically.
+	 */
+	template<typename Inner, typename Promise>
+	using suspend_result_t = std::conditional_t<is_coroutine_handle<raw_suspend_result_t<Inner, Promise>>, std::coroutine_handle<>, raw_suspend_result_t<Inner, Promise>>;
 
 	/**
 	 * @brief Wraps an awaiter so that cancellation is observed before it starts.
@@ -1689,7 +1709,10 @@ cmake --preset debug && cmake --build --preset debug
 ctest --preset debug --output-on-failure -R CancellationTest
 ```
 
-Expected: PASS, seven tests.
+Expected: PASS, nine tests. Two go beyond the list above, and both exist to make a rule observable rather than merely true:
+
+- A cancelled run must leave the shared `parked` handle empty, proving the inner awaiter never received the handle. Without this, reversing the order inside `await_suspend` so that it delegates before destroying would leave the whole suite green while introducing a use-after-free.
+- A cancelled coroutine awaiting an inner awaitable whose `await_ready` returns `true` must still be torn down. This is what the wrapper's `await_ready` override buys, and `task<T>` in Task 5 has exactly that shape once its result is already stored.
 
 - [ ] **Step 5: Run under AddressSanitizer**
 
