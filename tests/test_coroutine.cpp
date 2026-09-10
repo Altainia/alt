@@ -25,7 +25,7 @@ TEST(ResultStore, RethrowsAStoredException)
 	alt::detail::result_store<int> store;
 	store.set_exception(std::make_exception_ptr(std::runtime_error{"boom"}));
 	EXPECT_TRUE(store.is_set());
-	EXPECT_THROW(store.value(), std::runtime_error);
+	EXPECT_THROW((void)store.value(), std::runtime_error);
 }
 
 TEST(ResultStore, MovesAMoveOnlyValueOut)
@@ -43,7 +43,7 @@ TEST(ResultStore, StoresExceptionPtrAsAValueWithoutAmbiguity)
 	alt::detail::result_store<std::exception_ptr> store;
 	store.set_value(std::make_exception_ptr(std::runtime_error{"as a value"}));
 	EXPECT_TRUE(store.is_set());
-	EXPECT_NO_THROW(store.value());
+	EXPECT_NO_THROW((void)store.value());
 	EXPECT_NE(store.value(), nullptr);
 }
 
@@ -53,14 +53,14 @@ TEST(ResultStoreVoid, HoldsCompletion)
 	EXPECT_FALSE(store.is_set());
 	store.set_value();
 	EXPECT_TRUE(store.is_set());
-	EXPECT_NO_THROW(store.value());
+	EXPECT_NO_THROW((void)store.value());
 }
 
 TEST(ResultStoreVoid, RethrowsAStoredException)
 {
 	alt::detail::result_store<void> store;
 	store.set_exception(std::make_exception_ptr(std::runtime_error{"boom"}));
-	EXPECT_THROW(store.value(), std::runtime_error);
+	EXPECT_THROW((void)store.value(), std::runtime_error);
 }
 
 TEST(ResultStoreReference, RefersToTheOriginalObject)
@@ -77,5 +77,5 @@ TEST(ResultStoreReference, RethrowsAStoredException)
 {
 	alt::detail::result_store<std::string&> store;
 	store.set_exception(std::make_exception_ptr(std::runtime_error{"boom"}));
-	EXPECT_THROW(store.value(), std::runtime_error);
+	EXPECT_THROW((void)store.value(), std::runtime_error);
 }

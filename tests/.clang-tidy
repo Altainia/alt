@@ -1,6 +1,4 @@
 InheritParentConfig: true
 Checks: >
   -modernize-use-nodiscard,
-  -readability-convert-member-functions-to-static,
-  -readability-named-parameter,
-  -bugprone-exception-escape
+  -readability-convert-member-functions-to-static

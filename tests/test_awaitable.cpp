@@ -17,8 +17,10 @@ namespace
 		{
 			return true;
 		}
-		void await_suspend(std::coroutine_handle<>) const noexcept
-		{}
+		void await_suspend(std::coroutine_handle<> handle) const noexcept
+		{
+			(void)handle;
+		}
 		int await_resume() const noexcept
 		{
 			return 42;
@@ -39,8 +41,9 @@ namespace
 	{
 	};
 
-	ready_awaiter operator co_await(free_awaitable) noexcept
+	ready_awaiter operator co_await(free_awaitable awaitable) noexcept
 	{
+		(void)awaitable;
 		return {};
 	}
 
@@ -53,8 +56,10 @@ namespace
 		{
 			return true;
 		}
-		void await_suspend(std::coroutine_handle<>) const noexcept
-		{}
+		void await_suspend(std::coroutine_handle<> handle) const noexcept
+		{
+			(void)handle;
+		}
 		int await_resume() const
 		{
 			throw std::runtime_error{"boom"};
@@ -135,8 +140,10 @@ TEST(AsExpected, VoidResultBecomesExpectedVoid)
 		{
 			return true;
 		}
-		void await_suspend(std::coroutine_handle<>) const noexcept
-		{}
+		void await_suspend(std::coroutine_handle<> handle) const noexcept
+		{
+			(void)handle;
+		}
 		void await_resume() const noexcept
 		{}
 	};

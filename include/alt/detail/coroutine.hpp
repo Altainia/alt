@@ -32,8 +32,10 @@ namespace alt::detail
 		}
 
 		/** Stores an exception to be rethrown by value(). */
-		void set_exception(std::exception_ptr error) noexcept
+		// NOLINTNEXTLINE(bugprone-exception-escape)
+		void set_exception(std::exception_ptr error) noexcept // NOLINT(bugprone-exception-escape)
 		{
+			// Moving a std::exception_ptr is itself noexcept, so emplace<2> cannot throw
 			m_state.template emplace<2>(std::move(error));
 		}
 
@@ -44,21 +46,21 @@ namespace alt::detail
 		}
 
 		/** The stored value, or a rethrow of the stored exception. */
-		T& value() &
+		[[nodiscard]] T& value() &
 		{
 			rethrow_if_failed();
 			return std::get<1>(m_state);
 		}
 
 		/** The stored value moved out, or a rethrow of the stored exception. */
-		T&& value() &&
+		[[nodiscard]] T&& value() &&
 		{
 			rethrow_if_failed();
 			return std::get<1>(std::move(m_state));
 		}
 
 		/** The stored value, or a rethrow of the stored exception. */
-		const T& value() const&
+		[[nodiscard]] const T& value() const&
 		{
 			rethrow_if_failed();
 			return std::get<1>(m_state);
@@ -140,7 +142,7 @@ namespace alt::detail
 		}
 
 		/** The referenced object, or a rethrow of the stored exception. */
-		T& value() const
+		[[nodiscard]] T& value() const
 		{
 			assert(is_set() && "reading an alt coroutine result before it was produced");
 			if(m_error)
