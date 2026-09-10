@@ -714,7 +714,7 @@ std::exception_ptr keeps its value and error channels distinct."
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `alt::awaitable` from Task 1, and `alt::scope_exit` from the existing `include/alt/scope.hpp`.
+- Consumes: `alt::scope_exit` from the existing `include/alt/scope.hpp`. Nothing from Tasks 1 or 2: do not add an include for either.
 - Produces: `alt::work_item{void (*invoke)(void*), void* state}`, `alt::scheduler<S>`, `alt::drivable_scheduler<S>`, `alt::scheduler_ref` (default-constructible, `explicit operator bool`, `post`), `alt::trampoline_scheduler`, `alt::manual_scheduler` (`post`, `run_one`, `run_one_or_wait`, `run_all`, `empty`, `wake`), and `alt::resume_on(S&)`. Task 4 posts a destroy trampoline through `scheduler_ref`; Task 6 drives a `drivable_scheduler`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1098,9 +1098,14 @@ namespace alt
 			{
 				std::unique_lock lock{m_mutex};
 				m_signal.wait(lock, [this] { return !m_queue.empty() || m_woken; });
+
+				// Consume the wake on every path. Leaving it set after running a
+				// queued item would make a later call return false on a stale
+				// signal, which a driving sync_wait would read as completion.
+				m_woken = false;
+
 				if(m_queue.empty())
 				{
-					m_woken = false;
 					return false;
 				}
 				next = m_queue.front();
