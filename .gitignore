@@ -5,3 +5,6 @@ CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
 install_manifest.txt
+
+# Subagent-driven-development scratch workspace
+.superpowers/

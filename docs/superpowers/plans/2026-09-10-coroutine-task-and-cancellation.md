@@ -24,6 +24,7 @@
 - **Formatting:** run `clang-format -i` on every changed file before committing. The config uses tabs for indentation, `IndentWidth: 2`, Allman braces, `NamespaceIndentation: All`, and no column limit.
 - **Header placement:** public headers go directly in `include/alt/`. A header no caller would include without also including a public component goes in `include/alt/detail/`. Both are installed; the subdirectory describes includability, not visibility.
 - **Tests:** every test file must be added to the `alt_tests` sources list in `tests/CMakeLists.txt`. Be thorough; cover edge cases, not just the happy path.
+- **Shared test helpers:** the coroutine test helpers live in one header, `tests/coroutine_test_support.hpp`, created in Task 4 and included by Tasks 5 and 7. Task bodies below show those helpers inline for readability; do not redefine them per test file. This follows the existing `tests/sha_test_support.hpp` precedent.
 - **Version:** the bump to `1.6.0` is Task 9, a standalone commit, never bundled into a feature commit.
 - **No CMake change needed for headers:** `install(DIRECTORY include/alt)` is recursive and the `src/` glob finds nothing new. All seven headers are header-only.
 
@@ -1228,11 +1229,24 @@ hand-pumped scheduler for deterministic tests, and resume_on."
 
 **Files:**
 - Create: `include/alt/detail/cancellation.hpp`
+- Create: `tests/coroutine_test_support.hpp`
 - Test: `tests/test_cancellation.cpp`
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces:**
 - Consumes: `alt::get_awaiter`, `alt::detail::awaiter_t` (Task 1), `alt::work_item`, `alt::scheduler_ref` (Task 3).
+- Produces for tests: `tests/coroutine_test_support.hpp`, holding `frame_tracker`, `park`, `park_by_transfer`, `park_by_bool`, the `parked` handle, `resume_parked()`, and `reset_coroutine_test_state()`. Tasks 5 and 7 include it rather than redefining these.
+
+**Before Step 1, create `tests/coroutine_test_support.hpp`.** Move the helpers out of the test body below into it, in a namespace named `alt_test`, so Tasks 5 and 7 can include it:
+
+- `int live_frames` and `std::vector<int> destruction_order` as `inline` variables
+- `struct frame_tracker` taking an `int tag`, incrementing `live_frames` on construction, and on destruction decrementing it and pushing its tag onto `destruction_order`; copy and assignment deleted
+- `inline std::coroutine_handle<> parked`
+- `struct park` (void `await_suspend`), `struct park_by_transfer` (returns `std::noop_coroutine()`), and `struct park_by_bool` (returns `true`), each storing the handle into `parked`
+- `inline void resume_parked()`, which copies `parked`, clears it, and resumes the copy
+- `inline void reset_coroutine_test_state()`, which zeroes `live_frames`, clears `destruction_order`, and clears `parked`
+
+The three test files then use `alt_test::` qualified names, or a `using namespace alt_test;` at file scope, and call `reset_coroutine_test_state()` in their fixture `SetUp`. Each test file still defines its own coroutines and its own root types; only these helpers are shared.
 - Produces: `alt::detail::cancellation_context` (fields `root`, `token`, `home`; member `stop_requested`), `alt::detail::abandon_chain(cancellation_context&)`, `alt::detail::suspend_result_t<Inner, Promise>`, `alt::detail::cancellation_checked<Inner>`, and `alt::detail::make_cancellation_checked(A&&, cancellation_context*)`. Task 5's `await_transform` calls `make_cancellation_checked`; Task 7 owns a `cancellation_context`.
 
 This task contains the one delicate function in the whole design. Read the spec's "Cancellation" section before starting.
@@ -1243,6 +1257,8 @@ Create `tests/test_cancellation.cpp`. It defines its own root coroutine, standin
 
 ```cpp
 #include <gtest/gtest.h>
+
+#include "coroutine_test_support.hpp"
 
 #include <alt/detail/cancellation.hpp>
 #include <alt/scheduler.hpp>
@@ -1714,6 +1730,8 @@ Create `tests/test_task.cpp`:
 
 ```cpp
 #include <gtest/gtest.h>
+
+#include "coroutine_test_support.hpp"
 
 #include <alt/detail/cancellation.hpp>
 #include <alt/task.hpp>
@@ -2548,11 +2566,18 @@ namespace alt
 
 			explicit sync_wait_task(std::coroutine_handle<promise_type> handle) noexcept : m_handle(handle) {}
 
+			// Movable, not copyable. The frame's get_return_object returns this by
+			// value and make_sync_wait_task returns it again, so a real move
+			// constructor is safer than relying on elision through a coroutine
+			// return object across the whole GCC 13 to Clang 19 range.
+			sync_wait_task(sync_wait_task&& other) noexcept : m_handle(std::exchange(other.m_handle, {})) {}
+
 			sync_wait_task(const sync_wait_task&)            = delete;
 			sync_wait_task& operator=(const sync_wait_task&) = delete;
-			sync_wait_task(sync_wait_task&&)                 = delete;
 			sync_wait_task& operator=(sync_wait_task&&)      = delete;
-			~sync_wait_task()                                = default;
+
+			// No destructor work: the coroutine destroys its own frame at final suspend.
+			~sync_wait_task() = default;
 
 			/** Starts the coroutine. It owns and destroys its own frame from here on. */
 			void start(work_item on_done) noexcept
@@ -2738,6 +2763,8 @@ Create `tests/test_cancellable_task.cpp`:
 
 ```cpp
 #include <gtest/gtest.h>
+
+#include "coroutine_test_support.hpp"
 
 #include <alt/cancellable_task.hpp>
 #include <alt/scheduler.hpp>
