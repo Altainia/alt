@@ -203,12 +203,18 @@ The only blocking entry point in the library. `task<T>` deliberately has no
   the same problem, where `sync_wait` drives a run loop of its own.
 
 Without the second overload, calling `sync_wait` on work that needs the calling
-thread to pump a `manual_scheduler` deadlocks. To make the mistake diagnosable
-rather than a hang, the parking overload marks its thread in a thread-local
-while parked, and `manual_scheduler::post` asserts in debug builds when called
-from a thread that is currently parked inside `sync_wait`. That is a guaranteed
-deadlock and there is no legitimate case for it. The check is one thread-local
-read per post and compiles away in release builds.
+thread to pump a `manual_scheduler` deadlocks. An earlier draft of this design
+proposed detecting that automatically, by marking the parked thread in a
+thread-local and asserting in `manual_scheduler::post`. That check is unsound:
+posting from a parked thread is perfectly legitimate when a *different* thread
+pumps the scheduler, so the assertion would fire on correct programs. No cheap
+sound check exists, because whether a deadlock occurs depends on which threads
+will pump later.
+
+The mitigation is therefore documentation plus a default that steers away from
+the trap. The driving overload is the documented choice whenever a
+`manual_scheduler` is involved, which covers every single-threaded test, and a
+mistake surfaces as a ctest timeout rather than silent corruption.
 
 ### Cancellation
 
@@ -359,7 +365,7 @@ namespace alt
 	class cancellation_handle                  // copyable, outlives the frame
 	{
 	public:
-		void request_stop() const noexcept;
+		bool request_stop() noexcept;          // true when this call requested it
 		[[nodiscard]] bool stop_requested() const noexcept;
 		[[nodiscard]] std::stop_token get_token() const noexcept;
 		[[nodiscard]] std::stop_source get_source() const noexcept;
@@ -373,7 +379,7 @@ namespace alt
 
 	struct start_options
 	{
-		std::stop_token token{};      // empty: the task creates its own source
+		std::stop_token token{};      // linked in; the task always owns its own source
 		scheduler_ref home{};         // empty: destroy in place
 		exception_handler on_exception{};   // empty: std::terminate
 	};
@@ -410,6 +416,17 @@ suspension point. The three candidate ways to configure it were:
 exactly parallel to `task<T>`, and `alt::start` is where ownership transfers to
 the coroutine itself. This differs from the earlier sketch, in which the type was
 eager and exposed a `stop_source` member; that shape could not be configured.
+
+**An external token is linked, not adopted.** The promise always owns a
+`std::stop_source`, and a token supplied through `start_options` is forwarded
+into it by a `std::stop_callback` held in the frame. Adopting the caller's token
+instead would leave the promise with no source, so
+`cancellation_handle::request_stop` would silently do nothing whenever a token
+was supplied. Linking also gives the teardown the synchronization it needs for
+free, because `std::stop_callback`'s destructor blocks until a concurrently
+running callback has finished. A token that has already been stopped fires its
+callback the moment it is registered, so cancellation is then observed at the
+task's first suspension point.
 
 `cancellable_task` returns void and is not awaitable. It is a root, so it has
 nobody to return a value to and nobody to propagate an exception to. On an
@@ -456,15 +473,18 @@ silently swallowing a failure.
 | `request_stop` called twice | Second call is a no-op; the chain is already gone after the first observation |
 | Cancellation observed with a home scheduler that never runs | Frames stay suspended and leak. Documented; the same is true of any posted work |
 | `sync_wait` on work that never completes and never posts | Hangs, as any wait on something that never happens must |
+| Blocking `sync_wait` on work needing the calling thread to pump | Deadlocks. Documented; use the driving overload |
 | Empty `scheduler_ref` posted to | Precondition violation, debug assertion |
 | `cancellation_point` awaited outside a cancellable root | Never suspends, costs one null pointer test |
 | Cancellation requested before `start` is called | Observed at the first suspension point; the body runs up to it |
 
 ## Testing strategy
 
-Tests go in `tests/test_awaitable.cpp`, `tests/test_task.cpp`,
-`tests/test_scheduler.cpp`, `tests/test_sync_wait.cpp`, and
-`tests/test_cancellable_task.cpp`, each registered in `tests/CMakeLists.txt`.
+Tests go in `tests/test_awaitable.cpp`, `tests/test_coroutine.cpp`,
+`tests/test_scheduler.cpp`, `tests/test_cancellation.cpp`, `tests/test_task.cpp`,
+`tests/test_sync_wait.cpp`, and `tests/test_cancellable_task.cpp`, each
+registered in `tests/CMakeLists.txt`. The two covering `detail/` headers follow
+the precedent of `tests/test_digest.cpp` and `tests/test_hash.cpp`.
 
 Everything above the cancellation layer is tested single-threaded and
 deterministically through `manual_scheduler`, so failures are reproducible.
@@ -499,11 +519,13 @@ the wrapper is transparent.
 | `include/alt/detail/coroutine.hpp` | New |
 | `include/alt/detail/cancellation.hpp` | New |
 | `tests/test_awaitable.cpp` | New |
+| `tests/test_coroutine.cpp` | New, covers `detail/coroutine.hpp` |
+| `tests/test_cancellation.cpp` | New, covers `detail/cancellation.hpp` |
 | `tests/test_task.cpp` | New |
 | `tests/test_scheduler.cpp` | New |
 | `tests/test_sync_wait.cpp` | New |
 | `tests/test_cancellable_task.cpp` | New |
-| `tests/CMakeLists.txt` | Register the five test files |
+| `tests/CMakeLists.txt` | Register the seven test files and link `Threads::Threads` |
 | `docs/awaitable.md` | New component page |
 | `docs/task.md` | New component page |
 | `docs/scheduler.md` | New component page |
