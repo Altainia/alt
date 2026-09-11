@@ -32,8 +32,8 @@ namespace alt::detail
 		}
 
 		/** Stores an exception to be rethrown by value(). */
-		// NOLINTNEXTLINE(bugprone-exception-escape)
-		void set_exception(std::exception_ptr error) noexcept // NOLINT(bugprone-exception-escape)
+		// NOLINTNEXTLINE(bugprone-exception-escape): the only statement in the body moves a std::exception_ptr into the variant, which is itself noexcept.
+		void set_exception(std::exception_ptr error) noexcept
 		{
 			// Moving a std::exception_ptr is itself noexcept, so emplace<2> cannot throw
 			m_state.template emplace<2>(std::move(error));

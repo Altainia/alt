@@ -7,6 +7,7 @@
 #include <coroutine>
 #include <exception>
 #include <semaphore>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -151,13 +152,27 @@ namespace alt
 			static_cast<std::binary_semaphore*>(state)->release();
 		}
 
-		/** Completion signal for the driving overload: sets a flag and wakes the pump. */
+		/**
+		 * @brief Completion signal for the driving overload: sets a flag and wakes the pump.
+		 *
+		 * DELICATE. This object lives on the driving sync_wait's stack frame, and the
+		 * flag it sets is the pumping thread's only exit condition. The instant the
+		 * store lands, that thread may leave its loop, return from sync_wait, and
+		 * destroy this object. finish() therefore reads everything it needs into
+		 * locals first and touches nothing through `self` afterwards.
+		 *
+		 * Construction must happen on the thread that will do the pumping, which is
+		 * how finish() recognizes a completion that cannot possibly need a wake.
+		 */
 		template<typename S>
 		class drive_signal
 		{
 		public:
-			explicit drive_signal(S& scheduler) noexcept: m_scheduler(std::addressof(scheduler))
-			{}
+			explicit drive_signal(S& scheduler) noexcept:
+			  m_scheduler(std::addressof(scheduler)),
+			  m_pump(std::this_thread::get_id())
+			{
+			}
 
 			[[nodiscard]] bool finished() const noexcept
 			{
@@ -167,12 +182,28 @@ namespace alt
 			static void finish(void* state) noexcept
 			{
 				auto* const self = static_cast<drive_signal*>(state);
+
+				// Both reads happen before the store that publishes completion, because
+				// *self may be gone the moment it lands.
+				S* const   scheduler = self->m_scheduler;
+				const bool on_pump   = std::this_thread::get_id() == self->m_pump;
+
 				self->m_finished.store(true, std::memory_order_release);
-				self->m_scheduler->wake();
+
+				// Completing on the pumping thread means that thread is inside start() or
+				// inside a work item it is running, never blocked in run_one_or_wait, so a
+				// wake could not be consumed and would be left armed in a scheduler the
+				// caller goes on using. Skipping it here is race-free precisely because
+				// the two cases are distinguished by thread identity rather than by a flag.
+				if(!on_pump)
+				{
+					scheduler->wake();
+				}
 			}
 
 		private:
 			S*                m_scheduler;
+			std::thread::id   m_pump;
 			std::atomic<bool> m_finished{false};
 		};
 

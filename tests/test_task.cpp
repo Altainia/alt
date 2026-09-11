@@ -64,6 +64,21 @@ namespace
 		}
 	}
 
+	// Awaits through task's const lvalue operator co_await, so the caller's task survives
+	// the await and its post-completion state can still be inspected.
+	template<typename T>
+	drive run_into_by_reference(const alt::task<T>* t, std::optional<T>* out, std::exception_ptr* error)
+	{
+		try
+		{
+			*out = co_await *t;
+		}
+		catch(...)
+		{
+			*error = std::current_exception();
+		}
+	}
+
 	drive run_void(alt::task<void> t, bool* completed, std::exception_ptr* error)
 	{
 		try
@@ -303,6 +318,115 @@ TEST(Task, DeepChainRunsInConstantStack)
 	EXPECT_EQ(value_of(out), 0);
 }
 
+namespace
+{
+
+	// An awaiter whose await_resume writes into itself, which is the only way to observe
+	// whether the await ran on the caller's object or on a copy of it.
+	struct writes_into_self
+	{
+		int observed = 0;
+
+		bool await_ready() noexcept
+		{
+			return true;
+		}
+		void await_suspend(std::coroutine_handle<> /*awaiting*/) noexcept
+		{}
+		void await_resume() noexcept
+		{
+			observed = 99;
+		}
+	};
+
+	alt::task<void> awaits_an_awaiter_lvalue(writes_into_self* subject)
+	{
+		co_await *subject;
+	}
+
+	// A move-only awaiter. Awaiting this as an lvalue used to be a hard error, because the
+	// wrapper took its inner awaiter by value and so tried to copy it.
+	struct move_only_awaiter
+	{
+		std::unique_ptr<int> payload = std::make_unique<int>(7);
+
+		move_only_awaiter()                                    = default;
+		~move_only_awaiter()                                   = default;
+		move_only_awaiter(move_only_awaiter&&)                 = default;
+		move_only_awaiter& operator=(move_only_awaiter&&)      = default;
+		move_only_awaiter(const move_only_awaiter&)            = delete;
+		move_only_awaiter& operator=(const move_only_awaiter&) = delete;
+
+		bool await_ready() noexcept
+		{
+			return true;
+		}
+		void await_suspend(std::coroutine_handle<> /*awaiting*/) noexcept
+		{}
+		int await_resume() noexcept
+		{
+			return *payload;
+		}
+	};
+
+	alt::task<int> awaits_a_move_only_awaiter_lvalue(move_only_awaiter* subject)
+	{
+		co_return co_await *subject;
+	}
+
+	alt::task<int> awaits_a_move_only_awaiter_rvalue()
+	{
+		co_return co_await move_only_awaiter{};
+	}
+
+} // namespace
+
+TEST(Task, AwaitingAnAwaiterLvalueRunsOnTheCallersObject)
+{
+	// The cancellation wrapper sits between every co_await in an alt::task and its awaiter.
+	// If it holds the awaiter by value, the caller's object is never touched and the await
+	// silently reports a stale result instead of failing.
+	writes_into_self subject;
+
+	bool               completed = false;
+	std::exception_ptr error;
+	run_void(awaits_an_awaiter_lvalue(&subject), &completed, &error);
+
+	EXPECT_FALSE(error);
+	EXPECT_TRUE(completed);
+	EXPECT_EQ(subject.observed, 99);
+}
+
+TEST(Task, AwaitingAMoveOnlyAwaiterLvalueCompiles)
+{
+	move_only_awaiter subject;
+
+	std::optional<int> out;
+	std::exception_ptr error;
+	run_into(awaits_a_move_only_awaiter_lvalue(&subject), &out, &error);
+
+	EXPECT_FALSE(error);
+	ASSERT_TRUE(out.has_value());
+	EXPECT_EQ(value_of(out), 7);
+
+	// The awaiter was referenced, not moved from, so its payload is still there.
+	ASSERT_TRUE(subject.payload != nullptr);
+	EXPECT_EQ(*subject.payload, 7);
+}
+
+TEST(Task, AwaitingAnAwaiterRvalueStillYieldsItsResult)
+{
+	// The rvalue case is the one the suite already covered. Keep it asserted next to the
+	// lvalue case so a future change cannot fix one by breaking the other: a temporary
+	// awaiter must still be owned by the wrapper rather than referenced.
+	std::optional<int> out;
+	std::exception_ptr error;
+	run_into(awaits_a_move_only_awaiter_rvalue(), &out, &error);
+	EXPECT_FALSE(error);
+	ASSERT_TRUE(out.has_value());
+	EXPECT_EQ(value_of(out), 7);
+}
+
 TEST(Task, NestedTaskAwaitRunsOnEveryToolchain)
 {
 	// The always-running counterpart to DeepChainRunsInConstantStack above: countdown is
@@ -324,8 +448,16 @@ TEST(Task, IsReadyOnlyAfterCompletion)
 	std::optional<int> out;
 	std::exception_ptr error;
 	EXPECT_FALSE(t.is_ready());
-	run_into(std::move(t), &out, &error);
-	EXPECT_TRUE(out.has_value());
+
+	// Await through the lvalue overload so the task outlives the await and can still be
+	// asked. The rvalue overload would leave t owning the frame too, but awaiting the
+	// lvalue is the form a caller would use when it intends to inspect the task afterwards.
+	run_into_by_reference(&t, &out, &error);
+
+	EXPECT_FALSE(error);
+	ASSERT_TRUE(out.has_value());
+	EXPECT_EQ(value_of(out), 42);
+	EXPECT_TRUE(t.is_ready());
 }
 
 namespace

@@ -104,7 +104,7 @@ namespace alt
 			using result_type   = decltype(std::declval<Inner&>().await_resume());
 			using expected_type = expected_result_t<result_type>;
 
-			explicit expected_awaiter(Inner inner): m_inner(std::move(inner))
+			explicit expected_awaiter(Inner&& inner): m_inner(std::forward<Inner>(inner))
 			{}
 
 			bool await_ready()
@@ -152,7 +152,11 @@ namespace alt
 
 			auto operator co_await() &&
 			{
-				return expected_awaiter<awaiter_t<A>>{alt::get_awaiter(std::forward<A>(m_awaitable))};
+				// Deliberately not awaiter_t<A>: see the identical note in
+				// cancellation_checked_awaitable. Stripping the reference here would run
+				// the awaiter on a copy and leave the caller's object untouched.
+				using inner_type = decltype(alt::get_awaiter(std::forward<A>(m_awaitable)));
+				return expected_awaiter<inner_type>{alt::get_awaiter(std::forward<A>(m_awaitable))};
 			}
 
 		private:

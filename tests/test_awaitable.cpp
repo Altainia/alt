@@ -3,6 +3,7 @@
 #include <alt/awaitable.hpp>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
 
@@ -153,4 +154,80 @@ TEST(AsExpected, VoidResultBecomesExpectedVoid)
 	const auto result  = awaiter.await_resume();
 	static_assert(std::is_same_v<decltype(result), const std::expected<void, std::exception_ptr>>);
 	EXPECT_TRUE(result.has_value());
+}
+
+TEST(AsExpected, AwaitingAnAwaiterLvalueRunsOnTheCallersObject)
+{
+	// as_expected wraps the awaiter the same way the cancellation check does. Holding it by
+	// value would run await_resume on a copy, so the caller's object would never see the
+	// write and the adapter would report a stale value rather than failing.
+	struct writes_into_self
+	{
+		int observed = 0;
+
+		bool await_ready() noexcept
+		{
+			return true;
+		}
+		void await_suspend(std::coroutine_handle<> handle) noexcept
+		{
+			(void)handle;
+		}
+		int await_resume() noexcept
+		{
+			observed = 99;
+			return observed;
+		}
+	};
+
+	writes_into_self subject;
+
+	auto       adapted = alt::as_expected(subject);
+	auto       awaiter = std::move(adapted).operator co_await();
+	const auto result  = awaiter.await_resume();
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, 99);
+	EXPECT_EQ(subject.observed, 99);
+}
+
+TEST(AsExpected, AwaitingAMoveOnlyAwaiterLvalueCompiles)
+{
+	struct move_only_awaiter
+	{
+		std::unique_ptr<int> payload = std::make_unique<int>(7);
+
+		move_only_awaiter()                                    = default;
+		~move_only_awaiter()                                   = default;
+		move_only_awaiter(move_only_awaiter&&)                 = default;
+		move_only_awaiter& operator=(move_only_awaiter&&)      = default;
+		move_only_awaiter(const move_only_awaiter&)            = delete;
+		move_only_awaiter& operator=(const move_only_awaiter&) = delete;
+
+		bool await_ready() noexcept
+		{
+			return true;
+		}
+		void await_suspend(std::coroutine_handle<> handle) noexcept
+		{
+			(void)handle;
+		}
+		int await_resume() noexcept
+		{
+			return *payload;
+		}
+	};
+
+	move_only_awaiter subject;
+
+	auto       adapted = alt::as_expected(subject);
+	auto       awaiter = std::move(adapted).operator co_await();
+	const auto result  = awaiter.await_resume();
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, 7);
+
+	// Referenced, not moved from.
+	ASSERT_TRUE(subject.payload != nullptr);
+	EXPECT_EQ(*subject.payload, 7);
 }

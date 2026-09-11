@@ -2,6 +2,7 @@
 
 #include <alt/awaitable.hpp>
 #include <alt/scheduler.hpp>
+#include <cassert>
 #include <coroutine>
 #include <stop_token>
 #include <type_traits>
@@ -61,8 +62,13 @@ namespace alt::detail
 	 * exception would propagate into a coroutine that cancellation has already
 	 * decided must not run again, so terminating is preferable to resuming it.
 	 */
-	inline void abandon_chain(cancellation_context& ctx) noexcept
+	inline void abandon_chain(const cancellation_context& ctx) noexcept
 	{
+		// Before the copies, and before anything is destroyed: destroying an empty
+		// handle is undefined behavior, so the precondition is worth stating here the
+		// way scheduler_ref::post states its own.
+		assert(ctx.root && "abandoning an alt cancellation context with no root frame");
+
 		const std::coroutine_handle<> root = ctx.root;
 		const scheduler_ref           home = ctx.home;
 
@@ -113,8 +119,8 @@ namespace alt::detail
 	class cancellation_checked
 	{
 	public:
-		cancellation_checked(Inner inner, cancellation_context* context):
-		  m_inner(std::move(inner)),
+		cancellation_checked(Inner&& inner, cancellation_context* context):
+		  m_inner(std::forward<Inner>(inner)),
 		  m_context(context)
 		{
 		}
@@ -186,7 +192,14 @@ namespace alt::detail
 
 		auto operator co_await() &&
 		{
-			return cancellation_checked<awaiter_t<A>>{alt::get_awaiter(std::forward<A>(m_awaitable)), m_context};
+			// Deliberately not awaiter_t<A>, which strips the reference that
+			// get_awaiter returns for an awaiter lvalue. Instantiating the wrapper on
+			// the unstripped type keeps a reference a reference, so await_suspend and
+			// await_resume run on the caller's object rather than on a copy of it.
+			// m_awaitable outlives the awaiter, so the reference cannot dangle, and
+			// the rvalue case stops paying a move.
+			using inner_type = decltype(alt::get_awaiter(std::forward<A>(m_awaitable)));
+			return cancellation_checked<inner_type>{alt::get_awaiter(std::forward<A>(m_awaitable)), m_context};
 		}
 
 	private:
