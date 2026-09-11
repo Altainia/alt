@@ -56,8 +56,10 @@ alt::task<int> compute()
 const int result = alt::sync_wait(compute(), worker);
 ```
 
-The calling thread pumps `scheduler` (via `run_one_or_wait()`) instead of
-parking, until the awaitable signals completion.
+The calling thread pumps `scheduler` instead of parking, until the awaitable
+signals completion. It passes its own completion flag to
+`run_one_or_wait(stop)`, so the wait ends on that flag directly and nothing is
+left armed in the scheduler afterwards.
 
 ## Choosing between them
 

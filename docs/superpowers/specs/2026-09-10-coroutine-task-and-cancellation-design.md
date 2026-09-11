@@ -213,7 +213,7 @@ A scheduler has exactly one required operation:
 ```cpp
 struct work_item
 {
-    void (*invoke)(void* state);
+    void (*invoke)(void* state) noexcept;
     void* state;
 };
 
@@ -368,7 +368,7 @@ namespace alt
 {
 	struct work_item
 	{
-		void (*invoke)(void* state);
+		void (*invoke)(void* state) noexcept;
 		void* state;
 	};
 
@@ -376,10 +376,10 @@ namespace alt
 
 	// A scheduler whose queue a blocked thread can drive itself.
 	template<typename S>
-	concept drivable_scheduler = scheduler<S> && requires(S& s) {
-		{ s.run_one() } -> std::same_as<bool>;        // false when the queue was empty
-		{ s.run_one_or_wait() } -> std::same_as<bool>;// blocks; false when woken instead
-		s.wake();                                     // releases a blocked run_one_or_wait
+	concept drivable_scheduler = scheduler<S> && requires(S& s, const std::atomic<bool>* stop) {
+		{ s.run_one() } -> std::same_as<bool>;            // false when the queue was empty
+		{ s.run_one_or_wait(stop) } -> std::same_as<bool>;// blocks; false when stopped or woken
+		s.notify_waiters();                              // prompts a re-test, arms nothing
 	};
 
 	class scheduler_ref
@@ -398,7 +398,7 @@ namespace alt
 	public:
 		void post(work_item w);
 		bool run_one();             // false when the queue was empty
-		bool run_one_or_wait();     // blocks until an item ran or wake() was called
+		bool run_one_or_wait(const std::atomic<bool>* stop = nullptr); // blocks
 		std::size_t run_all();
 		bool empty() const;
 		void wake();                // releases a blocked run_one_or_wait

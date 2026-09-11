@@ -166,14 +166,18 @@ each item runs. Thread-safe.
 
 - `run_one()` runs the oldest queued item and returns `true`, or returns
   `false` immediately if nothing is queued.
-- `run_one_or_wait()` blocks until an item can be run, then runs it; it
-  returns `false` instead if `wake()` released the wait with nothing queued,
-  which is how the driving `alt::sync_wait` overload learns the awaited work
-  finished without having posted anything further itself.
+- `run_one_or_wait(stop)` blocks until an item can be run, then runs it. It
+  returns `false` instead when the wait ended for another reason: the optional
+  `stop` flag became true, or `wake()` released it with nothing queued. The
+  driving `alt::sync_wait` overload passes its own completion flag as `stop`,
+  which is how it learns the awaited work finished without needing any state
+  here.
 - `run_all()` runs `run_one()` in a loop until the queue is empty and returns
   how many items ran.
+- `notify_waiters()` prompts a blocked waiter to re-test its condition and arms
+  nothing.
 - `wake()` releases a thread blocked in `run_one_or_wait()` without queueing
-  anything.
+  anything, and stays armed until a waiter consumes it.
 
 ```cpp
 alt::manual_scheduler worker;
