@@ -1,6 +1,5 @@
 #pragma once
 
-#include <alt/awaitable.hpp>
 #include <alt/detail/cancellation.hpp>
 #include <alt/detail/coroutine.hpp>
 #include <cassert>

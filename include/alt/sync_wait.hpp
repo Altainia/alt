@@ -247,6 +247,14 @@ namespace alt
 	 * The calling thread drives the scheduler's queue instead of parking, so
 	 * single-threaded work completes rather than deadlocking. This is the
 	 * overload to reach for in any test built around an alt::manual_scheduler.
+	 *
+	 * The scheduler must outlive this call, and by a little more than it looks.
+	 * Completion publishes its flag and then notifies the scheduler, so a thread
+	 * that completed the work elsewhere can still be inside the scheduler after
+	 * this function has returned. Destroying the scheduler immediately on return
+	 * therefore races that notification. Holding it until the threads that might
+	 * complete the work have been joined is sufficient, and is what
+	 * alt::scheduler_ref's outlive-every-use contract already asks for.
 	 */
 	template<awaitable A, drivable_scheduler S>
 	detail::sync_wait_result_t<await_result_t<A>> sync_wait(A&& a, S& scheduler)

@@ -181,8 +181,10 @@ namespace
 		{
 			return *opt;
 		}
-		ADD_FAILURE() << "value_of() called on an optional with no value";
-		std::abort();
+		// Throwing rather than aborting: this path is unreachable while every call site
+		// is preceded by an assertion, but if one were ever removed, aborting would take
+		// the whole binary down and lose every result after this test.
+		throw std::logic_error{"value_of() called on an optional with no value"};
 	}
 
 } // namespace

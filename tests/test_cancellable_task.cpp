@@ -67,6 +67,9 @@ namespace
 		throw std::runtime_error{"boom"};
 	}
 
+	// The iteration count is deliberately modest. Neither assertion depends on it:
+	// an uncancelled loop must finish and a cancelled one must not, and a larger
+	// count would prove nothing extra while costing every run.
 	alt::cancellable_task compute_loop(int iterations)
 	{
 		const frame_tracker t{1};
@@ -150,7 +153,10 @@ TEST_F(CancellableTaskTest, CancellationObservedAtTheRootNeverStartsTheChild)
 	resume_parked();
 
 	EXPECT_FALSE(reached_end);
-	EXPECT_EQ(live_frames, 0); // the child coroutine was never created
+	// Zero tracked frames, which is the child's body never having started. Calling
+	// parking_leaf() does create its frame; what the cancellation prevented is the
+	// first statement of that body, and so the tracker it would have constructed.
+	EXPECT_EQ(live_frames, 0);
 }
 
 TEST_F(CancellableTaskTest, AnExternalTokenCancelsTheTask)
@@ -195,7 +201,7 @@ TEST_F(CancellableTaskTest, HomeSchedulerDefersDestructionOffTheObservingThread)
 
 TEST_F(CancellableTaskTest, CancellationPointCreatesASuspendPointInAComputeLoop)
 {
-	auto handle = alt::start(compute_loop(1000000));
+	auto handle = alt::start(compute_loop(1000));
 	// The loop has no natural suspension point, so without cancellation_point it
 	// would run to completion. It suspends only when cancellation is requested,
 	// so an uncancelled loop still finishes.
@@ -207,7 +213,7 @@ TEST_F(CancellableTaskTest, CancellationPointObservesAPreRequestedStop)
 {
 	std::stop_source external;
 	external.request_stop();
-	auto handle = alt::start(compute_loop(1000000), {.token = external.get_token()});
+	auto handle = alt::start(compute_loop(1000), {.token = external.get_token()});
 
 	EXPECT_FALSE(reached_end);
 	EXPECT_EQ(live_frames, 0);

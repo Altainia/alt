@@ -64,9 +64,13 @@ namespace
 		void await_suspend(std::coroutine_handle<> awaiting) const
 		{
 			*worker = std::jthread{[awaiting] {
-				// A short delay makes it likely that the calling thread is already
-				// blocked in run_one_or_wait when completion lands, which is the
-				// ordering the driving overload has to survive.
+				// Biases towards completion landing while the calling thread is already
+				// blocked in run_one_or_wait. That ordering cannot be forced, because a
+				// thread being parked is not observable from here, so this is a nudge
+				// rather than a guarantee. Since the driving overload now waits on the
+				// completion flag itself, correctness no longer depends on which side of
+				// the park completion falls; the sibling test below forces the one
+				// ordering that used to be missed.
 				std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				awaiting.resume();
 			}};

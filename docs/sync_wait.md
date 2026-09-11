@@ -74,3 +74,17 @@ every such test in this library — must use the driving overload,
 test posts to. The blocking overload is for awaitables whose progress does
 not depend on the thread calling `sync_wait`, typically because the work runs
 on a separate thread pool or I/O reactor that pumps itself.
+
+### The scheduler must outlive the call, with a little margin
+
+Completion publishes the flag the pumping thread is waiting on and then
+notifies the scheduler. Those are two steps, and only the first has to happen
+before `sync_wait` returns. So when the work completes on some other thread,
+that thread can still be inside the scheduler after the call has returned.
+
+Destroying the scheduler the moment `sync_wait` returns races that
+notification. Keep it alive until the threads that might complete the work
+have been joined. In practice a scheduler outlives the work it schedules
+anyway, and `alt::scheduler_ref` already requires exactly this, but the
+driving overload is the place where a caller is most tempted to treat the
+scheduler as a local whose job ends when the wait does.
