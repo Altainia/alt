@@ -153,3 +153,9 @@ skipped under GCC when `__SANITIZE_ADDRESS__` is defined, which is one
 measured failure mode, and also in any unoptimized GCC build (`-O0` or
 without `-O`), which is the other. Both are configurations where the
 property genuinely does not hold.
+
+Those two skips together mean it never ran on GCC in any `Debug` preset, so
+the property was asserted nowhere on that compiler. The `release-tests` preset
+exists for it: an optimized build that still builds the test suite, where the
+tail call is present and the test actually measures something. On Clang it
+runs everywhere.

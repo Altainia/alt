@@ -24,9 +24,11 @@ Available presets:
 |--------|----------|------------|-------|
 | `debug` | default | none | Standard debug build |
 | `debug-asan` | default | ASan + UBSan | AddressSanitizer + UndefinedBehaviorSanitizer |
+| `debug-tsan` | default | TSan | ThreadSanitizer, for the coroutine components. Mutually exclusive with ASan |
 | `debug-msan` | Clang | MSan | Requires MSan-instrumented libc++ — see note below |
 | `debug-coverage` | GCC | none | gcov instrumentation for lcov reports |
-| `release` | default | none | Optimized release build |
+| `release` | default | none | Optimized release build, no tests |
+| `release-tests` | default | none | Optimized build that still builds the tests. The only preset in which the deep-chain task test runs on GCC |
 
 > **MSan note:** MemorySanitizer requires a fully instrumented C++ standard library.
 > The `debug-msan` preset is provided for use with a custom MSan-instrumented

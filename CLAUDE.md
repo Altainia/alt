@@ -45,6 +45,27 @@ cmake --preset debug-asan && cmake --build --preset debug-asan
 ctest --preset debug-asan --output-on-failure
 ```
 
+### ThreadSanitizer
+
+The coroutine components are the only concurrent code in the library, so this is
+the build that covers them. AddressSanitizer does not find data races.
+
+```bash
+cmake --preset debug-tsan && cmake --build --preset debug-tsan
+ctest --preset debug-tsan --output-on-failure
+```
+
+### Optimized test run
+
+One property cannot be checked in a debug build: `task<T>`'s constant stack use
+for deep chains needs the tail call GCC only emits from `-O2` upward, so the test
+for it skips in every `Debug` preset. This preset is where it actually runs.
+
+```bash
+cmake --preset release-tests && cmake --build --preset release-tests
+ctest --preset release-tests --output-on-failure
+```
+
 ### clang-tidy
 
 Requires `clang-tidy` on `PATH`. Warnings are errors — the build fails on any finding.

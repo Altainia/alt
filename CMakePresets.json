@@ -71,6 +71,16 @@
         "CMAKE_BUILD_TYPE": "Release",
         "ALT_BUILD_TESTS": "OFF"
       }
+    },
+    {
+      "name": "release-tests",
+      "displayName": "Release + tests",
+      "description": "Optimized build that still builds the test suite. The only preset in which the deep-chain task test actually runs on GCC, because symmetric transfer needs the tail call GCC only emits from -O2 upward.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ALT_BUILD_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -97,6 +107,10 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "release-tests",
+      "configurePreset": "release-tests"
     }
   ],
   "testPresets": [
@@ -131,6 +145,13 @@
     {
       "name": "debug-coverage",
       "configurePreset": "debug-coverage",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release-tests",
+      "configurePreset": "release-tests",
       "output": {
         "outputOnFailure": true
       }
