@@ -98,6 +98,15 @@ namespace
 		body_ran_past_cancellation = true;
 	}
 
+	// No cancellation, so the wrapper delegates to the inner awaiter and hands its
+	// typed handle back to the compiler as the erased one.
+	test_root uncancelled_root_over_a_typed_transfer()
+	{
+		const frame_tracker t{1};
+		co_await park_by_typed_transfer{};
+		body_ran_past_cancellation = true;
+	}
+
 } // namespace
 
 class CancellationTest: public ::testing::Test
@@ -241,5 +250,25 @@ TEST_F(CancellationTest, SelfDestructsWhenTheInnerAwaiterReturnsATypedHandle)
 	resume_parked();
 
 	EXPECT_FALSE(body_ran_past_cancellation);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationTest, DelegatesATypedHandleTransferWhenNotCancelled)
+{
+	// The other half of the widening: with no cancellation the wrapper returns what
+	// the inner awaiter returned, a handle naming an unrelated promise type, through
+	// a declared return type of the erased handle. Asserting the transfer actually
+	// happened, rather than only that this compiles, is the point: the compiler
+	// resumes whatever comes back, and typed_transfers_resumed is incremented by the
+	// body of the coroutine it resumes.
+	auto root = uncancelled_root_over_a_typed_transfer();
+
+	EXPECT_EQ(typed_transfers_resumed, 1);
+	EXPECT_FALSE(body_ran_past_cancellation);
+	EXPECT_EQ(live_frames, 1);
+
+	resume_parked();
+
+	EXPECT_TRUE(body_ran_past_cancellation);
 	EXPECT_EQ(live_frames, 0);
 }

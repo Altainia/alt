@@ -1,6 +1,7 @@
 #pragma once
 
 #include <coroutine>
+#include <exception>
 #include <vector>
 
 namespace alt_test
@@ -118,16 +119,58 @@ namespace alt_test
 	};
 
 	/** A stand-in promise type used only to type a coroutine_handle in tests below. Never instantiated as a real coroutine. */
-	struct unrelated_promise
-	{};
+	// A real coroutine whose promise type is unrelated to any awaiting coroutine's, so
+	// an awaiter can hand back a genuinely typed handle that is also safe to resume.
+	// A null handle will not do: [expr.await] has the compiler resume whatever
+	// await_suspend returns, and resuming a null handle is undefined behavior, which
+	// GCC diagnoses as a potential null dereference once optimizations are on.
+	inline int typed_transfers_resumed = 0;
+
+	struct unrelated_coroutine
+	{
+		struct promise_type
+		{
+			unrelated_coroutine get_return_object() noexcept
+			{
+				return unrelated_coroutine{std::coroutine_handle<promise_type>::from_promise(*this)};
+			}
+
+			std::suspend_always initial_suspend() noexcept
+			{
+				return {};
+			}
+
+			// Self-destroying, so resuming the handle runs the body and frees the frame.
+			std::suspend_never final_suspend() noexcept
+			{
+				return {};
+			}
+
+			void return_void() noexcept
+			{}
+
+			void unhandled_exception()
+			{
+				std::terminate();
+			}
+		};
+
+		std::coroutine_handle<promise_type> handle{};
+	};
+
+	inline unrelated_coroutine make_unrelated_coroutine()
+	{
+		++typed_transfers_resumed;
+		co_return;
+	}
 
 	/**
 	 * An inner awaiter whose await_suspend declares a genuinely typed handle
 	 * return type, std::coroutine_handle<unrelated_promise>, rather than the
 	 * erased std::coroutine_handle<>. [expr.await] permits an awaiter to return
 	 * a handle naming any coroutine's promise, not necessarily the awaiting
-	 * coroutine's own, so this covers that case. The returned handle is always
-	 * the null default of that type; nothing in these tests ever resumes it.
+	 * coroutine's own, so this covers that case. The handle it returns is a real
+	 * suspended coroutine, because the compiler resumes whatever comes back.
 	 */
 	struct park_by_typed_transfer
 	{
@@ -136,10 +179,14 @@ namespace alt_test
 			return false;
 		}
 
-		std::coroutine_handle<unrelated_promise> await_suspend(std::coroutine_handle<> h) const noexcept
+		std::coroutine_handle<unrelated_coroutine::promise_type> await_suspend(std::coroutine_handle<> h) const
 		{
 			parked = h;
-			return {};
+
+			// A live, suspended coroutine of an unrelated promise type. Resuming it runs
+			// its body and frees its frame, so the transfer the compiler performs here is
+			// real rather than a null dereference waiting to happen.
+			return make_unrelated_coroutine().handle;
 		}
 
 		void await_resume() const noexcept
@@ -157,7 +204,8 @@ namespace alt_test
 	/** Resets all shared test state. Call this from each fixture's SetUp. */
 	inline void reset_coroutine_test_state()
 	{
-		live_frames = 0;
+		typed_transfers_resumed = 0;
+		live_frames             = 0;
 		destruction_order.clear();
 		parked = {};
 	}
