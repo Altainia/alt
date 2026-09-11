@@ -296,17 +296,24 @@ TEST(Task, MoveAssignmentDestroysTheOverwrittenFrame)
 
 TEST(Task, DeepChainRunsInConstantStack)
 {
-	// __OPTIMIZE__ is defined by GCC at -O1 and -Og, but GCC only enables the sibling-call
-	// optimization symmetric transfer depends on at -O2 and above. A GCC build at -O1 or
-	// -Og would therefore run this test with the tail call disabled and overflow; no preset
-	// in this project currently builds at those levels, so that gap is accepted as residual
-	// risk rather than guarded against here.
-#if defined(__GNUC__) && !defined(__clang__) && !defined(__OPTIMIZE__)
+	// Measured on GCC 15.2 and 16 for a 50000-frame chain: plain GCC elides the tail call
+	// and passes at -O0, -O1, -O2 and -O3, and UBSan alone does not change that. Enabling
+	// AddressSanitizer defeats GCC's sibling-call optimization at *every* optimization
+	// level, so the chain then grows the stack linearly and overflows. That is the cause,
+	// not larger frames: an optimized build would have no frames left to enlarge and so
+	// could not overflow. Clang elides with or without the sanitizers at every level.
+	//
+	// __SANITIZE_ADDRESS__ covers the measured failure. The extra -O0 disjunct is deliberate
+	// conservatism: GCC documents sibling-call elision as an optimization, so an unoptimized
+	// build anywhere in the supported GCC 13+ range is not entitled to it even though the
+	// versions measured here do elide.
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__SANITIZE_ADDRESS__) || !defined(__OPTIMIZE__))
 	GTEST_SKIP() << "Symmetric transfer only avoids growing the stack where the compiler "
-	                "tail-calls the handle returned from the final awaiter. GCC does not do "
-	                "that without optimizations, so this chain grows the stack linearly at "
-	                "-O0 and overflows. Clang elides even at -O0, and optimized builds on "
-	                "either compiler are fine.";
+	                "tail-calls the handle returned from the final awaiter. Under GCC, "
+	                "AddressSanitizer defeats that tail call at every optimization level, so "
+	                "this chain overflows the stack; an unoptimized GCC build is also not "
+	                "entitled to the elision across the supported GCC range. Clang elides "
+	                "in every configuration, and so does GCC once AddressSanitizer is off.";
 #endif
 	// Where symmetric transfer holds (see the guard above for where it does not), this
 	// chain runs in constant stack regardless of depth.

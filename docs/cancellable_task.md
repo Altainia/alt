@@ -184,6 +184,27 @@ down there. Awaited anywhere else — a plain coroutine with no cancellation
 machinery — it is an inert no-op, so a helper function that awaits one is
 safe to call from any coroutine.
 
+## Every frame in the chain must be owned by the root
+
+The teardown works by destroying the root frame and letting ownership do the
+rest: destroying the root runs the destructor of the await temporary in scope
+there, which owns the child `task`, which destroys the child frame, and so on
+down to the leaf. The cascade therefore reaches exactly those frames that are
+**transitively owned by the root frame**, which is what awaiting a `task`
+directly — `co_await child()`, or `co_await std::move(child)` where `child` is
+a local of the awaiting coroutine — gives you.
+
+A `task` held anywhere else does not qualify. If a member variable or an outer
+local owns the `task`, and a cancellable root awaits it from there, cancelling
+the root destroys the root but not that task's frame. The frame survives,
+suspended, with a continuation pointing at storage that no longer exists.
+Resuming it, awaiting it again, or letting its owner's destructor destroy it
+later and run anything that touches the continuation is a use-after-free.
+
+Keep every `task` in a cancellable chain owned by the await expression that
+awaits it. A `task` that must outlive one await is not a participant in the
+cascade and must not be awaited from a cancellable root.
+
 ## Cancellation is not acknowledged
 
 `request_stop()` returns immediately and tells you nothing about *when* the

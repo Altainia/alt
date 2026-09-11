@@ -154,9 +154,12 @@ namespace alt
 	 * ownership is what lets alt::cancellable_task tear a whole chain down by
 	 * destroying only its root.
 	 *
-	 * Move-only, and awaitable exactly once. Awaiting an lvalue yields a
-	 * reference to the result; awaiting an rvalue moves the result out. T may be
-	 * void or a reference type. Arrays are not supported.
+	 * Move-only, and awaitable exactly once. Awaiting an lvalue yields a reference
+	 * to the result; awaiting an rvalue yields an rvalue reference to it, so binding
+	 * the await result with auto moves it out. Bind that case with auto rather than
+	 * auto&& or decltype(auto), which would keep a reference into a frame the await
+	 * temporary destroys at the end of the full-expression; see docs/task.md. T may
+	 * be void or a reference type. Arrays are not supported.
 	 *
 	 * Discarding a task is nearly always a bug, since a lazy task nobody awaits
 	 * never runs, hence [[nodiscard]].
@@ -219,7 +222,12 @@ namespace alt
 			return task_awaiter<false>{m_handle};
 		}
 
-		/** Awaits the task, moving its result out. */
+		/**
+		 * Awaits the task, yielding an rvalue reference to its result, so binding the
+		 * await result with auto moves it out. Binding it to auto&& or decltype(auto)
+		 * instead keeps a reference into a frame the await temporary destroys at the
+		 * end of the full-expression.
+		 */
 		[[nodiscard]] auto operator co_await() && noexcept
 		{
 			return task_awaiter<true>{m_handle};

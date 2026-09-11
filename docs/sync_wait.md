@@ -21,10 +21,11 @@ template<awaitable A, drivable_scheduler S>
 /* result */ sync_wait(A&& a, S& scheduler);
 ```
 
-Both overloads return the awaitable's result (with an rvalue reference result
-decayed to a value, since the temporary that produced it is gone by the time
-`sync_wait` returns; an lvalue reference result is preserved), or rethrow
-whatever exception escaped it.
+Both overloads return the awaitable's result. An rvalue reference result has its
+reference removed and is returned by value, since the temporary that produced it
+is gone by the time `sync_wait` returns; that is reference removal only, not full
+decay, so cv-qualification and array or function types are left alone. An lvalue
+reference result is preserved. Anything that escaped the awaitable is rethrown.
 
 ## The blocking overload
 

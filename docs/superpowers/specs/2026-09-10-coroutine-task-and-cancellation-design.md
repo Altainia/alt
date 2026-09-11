@@ -82,6 +82,12 @@ AddressSanitizer and UndefinedBehaviorSanitizer. All four combinations clean.
 The project baseline of GCC 13 and Clang 19 was not exercised locally and is
 covered by CI on the branch.
 
+A second measured claim, independent of the cascade, concerns the constant-stack
+property of a deep chain. It is **not** a frame-size effect: AddressSanitizer
+defeats GCC's sibling-call optimization at every optimization level, so the tail
+call symmetric transfer depends on is simply absent under ASan. The per-level
+numbers are in the `task<T>` section below.
+
 The probe produced two findings that constrain the implementation:
 
 - The checking wrapper's `await_suspend` must mirror the return type of the
@@ -138,17 +144,29 @@ continuation as a handle rather than resuming it, which is symmetric transfer.
 **The constant-stack property is conditional, and this was measured rather than
 assumed.** Symmetric transfer only avoids growing the stack if the compiler
 turns the resumption of the returned handle into a tail call, and the standard
-does not require that. GCC does not do it without optimizations enabled, so on
-GCC at `-O0` a chain's stack usage grows linearly with its depth. A 50000-frame
-chain survives a plain `-O0` build by fitting under the default stack limit and
-overflows once AddressSanitizer enlarges each frame. Clang performs the
-elision even at `-O0`. Any release build on either compiler is fine.
+does not require that. Measured with a 50000-frame chain:
 
-The consequence for callers: deep chains are safe in optimized builds, and a
-debug build on GCC can overflow on a chain thousands of frames deep. This is a
-toolchain property, not something the library can fix, so it is documented on
-the component page rather than worked around. The task object owns
-the frame and destroys it in its destructor, which is precisely what makes the
+| Configuration | Result |
+|---|---|
+| GCC `-O0`, `-O1`, `-O2`, `-O3` | passes |
+| GCC `-O0` + AddressSanitizer | stack overflow |
+| GCC `-O2` + AddressSanitizer | stack overflow |
+| GCC `-O2` + UBSan only | passes |
+| Clang `-O0` and `-O2`, with and without the sanitizers | passes |
+
+The determining factor is AddressSanitizer, not the optimization level:
+**ASan defeats GCC's sibling-call optimization at every optimization level.**
+The cause is the lost tail call rather than larger frames — if enlarged frames
+were the explanation, an optimized build would have no frames left to enlarge
+and so could not overflow, yet GCC `-O2` with ASan overflows exactly as `-O0`
+does. Clang elides in every configuration measured.
+
+The consequence for callers: on GCC, unbounded chain depth is unsafe in any
+build with AddressSanitizer enabled — which is this project's `debug-asan`
+preset — and safe otherwise, at every optimization level including `-O0`. This
+is a toolchain property, not something the library can fix, so it is documented
+on the component page rather than worked around. The task object owns the frame
+and destroys it in its destructor, which is precisely what makes the
 cancellation cascade work.
 
 `task<void>` and `task<T&>` are supported through one internal result store, so
@@ -292,7 +310,8 @@ namespace alt
 
 	template<awaitable A> using await_result_t = /* ... */;
 
-	template<awaitable A> decltype(auto) get_awaiter(A&& a);
+	// Unconstrained, and must be: the awaitable concept is defined in terms of it.
+	template<typename A> constexpr decltype(auto) get_awaiter(A&& a);
 
 	template<awaitable A> auto as_expected(A&& a);   // -> expected<R, exception_ptr>
 }
@@ -347,7 +366,7 @@ namespace alt
 		void post(work_item w) const;
 	};
 
-	class trampoline_scheduler { public: void post(work_item w); };
+	class trampoline_scheduler { public: void post(work_item w) const; };
 
 	class manual_scheduler
 	{
@@ -366,8 +385,10 @@ namespace alt
 // --------------------------------------------------------------- sync_wait.hpp
 namespace alt
 {
-	template<awaitable A> await_result_t<A> sync_wait(A&& a);
-	template<awaitable A, drivable_scheduler S> await_result_t<A> sync_wait(A&& a, S& s);
+	// An rvalue-reference result becomes a value; an lvalue reference is preserved.
+	template<awaitable A> detail::sync_wait_result_t<await_result_t<A>> sync_wait(A&& a);
+	template<awaitable A, drivable_scheduler S>
+	detail::sync_wait_result_t<await_result_t<A>> sync_wait(A&& a, S& s);
 }
 
 // -------------------------------------------------------- cancellable_task.hpp
@@ -397,7 +418,7 @@ namespace alt
 		exception_handler on_exception{};   // empty: std::terminate
 	};
 
-	[[nodiscard]] cancellation_handle start(cancellable_task t, start_options options = {});
+	[[nodiscard]] cancellation_handle start(cancellable_task t, const start_options& options = {});
 
 	// co_await this where a long computation has no natural suspension point.
 	// Awaited inside alt's coroutine types, await_transform wraps it in the
@@ -480,7 +501,7 @@ silently swallowing a failure.
 | Throw before the first suspension point | Captured in the promise, rethrown at `await_resume` |
 | Throw from the move constructor of a returned value | Captured, rethrown at `await_resume` |
 | `task<T>` with move-only, reference, or `void` result | All supported |
-| Chain deep enough to overflow the stack | Constant stack via symmetric transfer, but only where the compiler tail-calls the returned handle. GCC at `-O0` grows the stack linearly and can overflow; Clang and all optimized builds are fine |
+| Chain deep enough to overflow the stack | Constant stack via symmetric transfer, but only where the compiler tail-calls the returned handle. Measured: GCC under AddressSanitizer loses that tail call at every optimization level and grows the stack linearly; GCC without ASan and Clang in every configuration are fine |
 | `request_stop` concurrent with normal completion | Safe. Only the coroutine ever destroys; `request_stop` only touches the stop state, which is independently reference counted |
 | `request_stop` on an already-finished task | No-op |
 | `request_stop` called twice | Second call is a no-op; the chain is already gone after the first observation |
