@@ -147,7 +147,8 @@ namespace alt
 	 * The coroutine does not start until the task is awaited, and the awaiting
 	 * coroutine becomes its continuation. Completion transfers control straight
 	 * back to that continuation, so a chain of any depth unwinds in constant
-	 * stack space.
+	 * stack space where the compiler turns that transfer into a tail call; see
+	 * docs/task.md for the toolchain-dependent caveat.
 	 *
 	 * The task owns the coroutine frame and destroys it in its destructor. That
 	 * ownership is what lets alt::cancellable_task tear a whole chain down by
