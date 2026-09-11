@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <coroutine>
+#include <latch>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -131,6 +132,55 @@ namespace
 		EXPECT_TRUE(returned.load(std::memory_order_acquire));
 		EXPECT_EQ(log, std::vector<int>{tag});
 	}
+
+	// Holds the pumping thread inside a work item until completion has landed on a worker
+	// thread. That is the one ordering in which the driving overload arms a wake with no
+	// opportunity for the pump to consume it: the pump is busy rather than blocked, so it
+	// returns from the item, sees the work finished and leaves the loop.
+	struct pump_gate
+	{
+		std::latch* pump_inside_item = nullptr;
+		std::latch* completion_done  = nullptr;
+	};
+
+	void invoke_pump_gate(void* state) noexcept
+	{
+		auto* const gate = static_cast<pump_gate*>(state);
+		gate->pump_inside_item->count_down();
+		gate->completion_done->wait();
+	}
+
+	// Resumes on a worker only once the pumping thread is known to be inside a work item,
+	// then reports that the whole completion path, including the signal, has run.
+	struct resumes_once_the_pump_is_busy
+	{
+		std::jthread* worker           = nullptr;
+		std::latch*   pump_inside_item = nullptr;
+		std::latch*   completion_done  = nullptr;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return false;
+		}
+
+		void await_suspend(std::coroutine_handle<> awaiting) const
+		{
+			*worker = std::jthread{[awaiting, inside = pump_inside_item, done = completion_done] {
+				inside->wait();
+				awaiting.resume();
+				done->count_down();
+			}};
+		}
+
+		void await_resume() const noexcept
+		{}
+	};
+
+	alt::task<int> completes_while_the_pump_runs_an_item(std::jthread* worker, std::latch* inside, std::latch* done)
+	{
+		co_await resumes_once_the_pump_is_busy{.worker = worker, .pump_inside_item = inside, .completion_done = done};
+		co_return 17;
+	}
 }
 
 TEST(SyncWait, ReturnsAValue)
@@ -239,4 +289,21 @@ TEST(SyncWait, DrivingOverloadLeavesNoStaleWakeAfterPumpedCompletion)
 	EXPECT_EQ(alt::sync_wait(hops(scheduler), scheduler), 7);
 	EXPECT_TRUE(scheduler.empty());
 	expect_no_stale_wake(scheduler, 2);
+}
+
+TEST(SyncWait, DrivingOverloadLeavesNoStaleWakeWhenCompletionLandsDuringAWorkItem)
+{
+	alt::manual_scheduler scheduler;
+	std::latch            pump_inside_item{1};
+	std::latch            completion_done{1};
+	pump_gate             gate{.pump_inside_item = &pump_inside_item, .completion_done = &completion_done};
+
+	// Declared last so it is joined before the latches it borrows are destroyed.
+	std::jthread worker;
+
+	scheduler.post(alt::work_item{.invoke = &invoke_pump_gate, .state = &gate});
+
+	EXPECT_EQ(alt::sync_wait(completes_while_the_pump_runs_an_item(&worker, &pump_inside_item, &completion_done), scheduler), 17);
+
+	expect_no_stale_wake(scheduler, 17);
 }

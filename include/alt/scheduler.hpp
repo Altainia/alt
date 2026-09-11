@@ -1,6 +1,7 @@
 #pragma once
 
 #include <alt/scope.hpp>
+#include <atomic>
 #include <cassert>
 #include <concepts>
 #include <condition_variable>
@@ -44,10 +45,10 @@ namespace alt
 	 * parking so that single-threaded work cannot deadlock.
 	 */
 	template<typename S>
-	concept drivable_scheduler = scheduler<S> && requires(S& s) {
+	concept drivable_scheduler = scheduler<S> && requires(S& s, const std::atomic<bool>* stop) {
 		{ s.run_one() } -> std::same_as<bool>;
-		{ s.run_one_or_wait() } -> std::same_as<bool>;
-		s.wake();
+		{ s.run_one_or_wait(stop) } -> std::same_as<bool>;
+		s.notify_waiters();
 	};
 
 	/**
@@ -187,15 +188,23 @@ namespace alt
 		/**
 		 * @brief Blocks until an item can be run, then runs it.
 		 *
+		 * An optional stop flag joins the wait condition, so a caller waiting on
+		 * something this scheduler knows nothing about can be released without
+		 * arming any state here. That is what the driving alt::sync_wait uses, and
+		 * it is why that overload leaves nothing behind in a scheduler the caller
+		 * goes on using.
+		 *
 		 * Returns false when wake() released the wait instead, which is how a
 		 * driving alt::sync_wait learns that the work it was waiting on finished.
 		 */
-		bool run_one_or_wait()
+		bool run_one_or_wait(const std::atomic<bool>* stop = nullptr)
 		{
 			work_item next{};
 			{
 				std::unique_lock lock{m_mutex};
-				m_signal.wait(lock, [this] { return !m_queue.empty() || m_woken; });
+				m_signal.wait(lock, [this, stop] {
+					return !m_queue.empty() || m_woken || (stop != nullptr && stop->load(std::memory_order_acquire));
+				});
 
 				// Consume the wake on every path. Leaving it set after running a queued
 				// item would make a later call return false on a stale signal, which a
@@ -229,6 +238,25 @@ namespace alt
 		{
 			const std::scoped_lock lock{m_mutex};
 			return m_queue.empty();
+		}
+
+		/**
+		 * @brief Prompts a blocked run_one_or_wait to re-evaluate its condition.
+		 *
+		 * Arms nothing, so unlike wake() it cannot be observed by a later call.
+		 * Use it when the condition a waiter is waiting on lives outside this
+		 * scheduler, which is the case for the driving alt::sync_wait.
+		 */
+		void notify_waiters()
+		{
+			// Acquiring the mutex is what closes the lost-wakeup window. A waiter that
+			// has already evaluated its condition holds the mutex until it is genuinely
+			// blocked inside wait(), so a notification cannot arrive before it parks and
+			// then be missed.
+			{
+				const std::scoped_lock lock{m_mutex};
+			}
+			m_signal.notify_all();
 		}
 
 		/** Releases a thread blocked in run_one_or_wait without queueing work. */

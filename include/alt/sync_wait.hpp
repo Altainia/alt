@@ -7,7 +7,6 @@
 #include <coroutine>
 #include <exception>
 #include <semaphore>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -153,7 +152,7 @@ namespace alt
 		}
 
 		/**
-		 * @brief Completion signal for the driving overload: sets a flag and wakes the pump.
+		 * @brief Completion signal for the driving overload: sets a flag and notifies the pump.
 		 *
 		 * DELICATE. This object lives on the driving sync_wait's stack frame, and the
 		 * flag it sets is the pumping thread's only exit condition. The instant the
@@ -161,17 +160,22 @@ namespace alt
 		 * destroy this object. finish() therefore reads everything it needs into
 		 * locals first and touches nothing through `self` afterwards.
 		 *
-		 * Construction must happen on the thread that will do the pumping, which is
-		 * how finish() recognizes a completion that cannot possibly need a wake.
+		 * The pump waits on this object's own flag rather than on state inside the
+		 * scheduler, so completion arms nothing that could outlive the call. That is
+		 * what makes the scheduler safe for the caller to keep using afterwards.
 		 */
 		template<typename S>
 		class drive_signal
 		{
 		public:
-			explicit drive_signal(S& scheduler) noexcept:
-			  m_scheduler(std::addressof(scheduler)),
-			  m_pump(std::this_thread::get_id())
+			explicit drive_signal(S& scheduler) noexcept: m_scheduler(std::addressof(scheduler))
 			{
+			}
+
+			/** The flag a driving pump waits on, so the wait needs no state in the scheduler. */
+			[[nodiscard]] const std::atomic<bool>& flag() const noexcept
+			{
+				return m_finished;
 			}
 
 			[[nodiscard]] bool finished() const noexcept
@@ -183,27 +187,21 @@ namespace alt
 			{
 				auto* const self = static_cast<drive_signal*>(state);
 
-				// Both reads happen before the store that publishes completion, because
-				// *self may be gone the moment it lands.
-				S* const   scheduler = self->m_scheduler;
-				const bool on_pump   = std::this_thread::get_id() == self->m_pump;
+				// Read before the store that publishes completion, because *self may be
+				// gone the moment it lands.
+				S* const scheduler = self->m_scheduler;
 
 				self->m_finished.store(true, std::memory_order_release);
 
-				// Completing on the pumping thread means that thread is inside start() or
-				// inside a work item it is running, never blocked in run_one_or_wait, so a
-				// wake could not be consumed and would be left armed in a scheduler the
-				// caller goes on using. Skipping it here is race-free precisely because
-				// the two cases are distinguished by thread identity rather than by a flag.
-				if(!on_pump)
-				{
-					scheduler->wake();
-				}
+				// A pure notification. The pump's wait condition reads the flag above
+				// directly, so nothing is armed in the scheduler and a caller who reuses it
+				// cannot observe a leftover signal from this call. The scheduler itself must
+				// outlive this, which is the contract the driving overload documents.
+				scheduler->notify_waiters();
 			}
 
 		private:
 			S*                m_scheduler;
-			std::thread::id   m_pump;
 			std::atomic<bool> m_finished{false};
 		};
 
@@ -264,7 +262,7 @@ namespace alt
 
 		while(!signal.finished())
 		{
-			scheduler.run_one_or_wait();
+			scheduler.run_one_or_wait(&signal.flag());
 		}
 
 		if constexpr(std::is_void_v<stored_type>)
