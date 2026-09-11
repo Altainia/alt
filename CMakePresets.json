@@ -29,9 +29,19 @@
       }
     },
     {
+      "name": "debug-tsan",
+      "displayName": "Debug + TSan",
+      "description": "Debug build with ThreadSanitizer. Covers the coroutine components, which are the only concurrent part of the library. Mutually exclusive with AddressSanitizer.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ALT_SANITIZE": "thread"
+      }
+    },
+    {
       "name": "debug-msan",
       "displayName": "Debug + MSan (Clang only)",
-      "description": "Debug build with MemorySanitizer. Requires Clang AND a fully MSan-instrumented libc++ — does not work with the default libstdc++. Not run in CI for this reason.",
+      "description": "Debug build with MemorySanitizer. Requires Clang AND a fully MSan-instrumented libc++ \u2014 does not work with the default libstdc++. Not run in CI for this reason.",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
@@ -73,6 +83,10 @@
       "configurePreset": "debug-asan"
     },
     {
+      "name": "debug-tsan",
+      "configurePreset": "debug-tsan"
+    },
+    {
       "name": "debug-msan",
       "configurePreset": "debug-msan"
     },
@@ -96,6 +110,13 @@
     {
       "name": "debug-asan",
       "configurePreset": "debug-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-tsan",
+      "configurePreset": "debug-tsan",
       "output": {
         "outputOnFailure": true
       }

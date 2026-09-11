@@ -275,3 +275,50 @@ TEST_F(CancellableTaskTest, CancelOnOneThreadAndSelfDestructOnAnother)
 	EXPECT_FALSE(reached_end);
 	EXPECT_EQ(live_frames, 0);
 }
+
+TEST_F(CancellableTaskTest, AnExternalStopConcurrentWithTeardownIsSafe)
+{
+	// Exercises an external stop request landing while this thread tears the chain
+	// down: request_stop runs the forwarder on the requesting thread, so the two
+	// overlap. Worth running under both sanitizers.
+	//
+	// Be clear about what this does not do. It does not prove the teardown is safe
+	// against every interleaving. The sharpest one, a forwarder dereferencing the
+	// promise's own source mid-destruction, was only a couple of destructor calls
+	// wide, and this test was measured against a deliberately reordered member block
+	// and passed, so it would not have caught that defect. That is why the hazard was
+	// removed structurally, by giving the forwarder a reference-counted copy rather
+	// than a pointer into the frame, instead of being left to a test to catch.
+	for(int attempt = 0; attempt < 100; ++attempt)
+	{
+		reset_coroutine_test_state();
+
+		std::stop_source external;
+		auto             handle = alt::start(root_over_a_chain(), {.token = external.get_token()});
+		ASSERT_EQ(live_frames, 3) << "attempt " << attempt;
+
+		std::thread stopper{[&external] { external.request_stop(); }};
+
+		// The stop may land on either side of any given suspension point, so resume
+		// until the chain is gone. It goes either by teardown or by running out of
+		// park points, and both leave no frames behind.
+		while(live_frames != 0)
+		{
+			const auto resume_me = parked;
+			if(!resume_me)
+			{
+				break;
+			}
+			parked = {};
+			resume_me.resume();
+		}
+
+		stopper.join();
+
+		ASSERT_EQ(live_frames, 0) << "attempt " << attempt;
+
+		// The handle outlives the frame whichever way the interleaving went.
+		handle.request_stop();
+		ASSERT_TRUE(handle.stop_requested()) << "attempt " << attempt;
+	}
+}

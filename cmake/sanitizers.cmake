@@ -1,5 +1,5 @@
-set(ALT_SANITIZE "none" CACHE STRING "Sanitizer to enable: none, address, memory")
-set_property(CACHE ALT_SANITIZE PROPERTY STRINGS none address memory)
+set(ALT_SANITIZE "none" CACHE STRING "Sanitizer to enable: none, address, thread, memory")
+set_property(CACHE ALT_SANITIZE PROPERTY STRINGS none address thread memory)
 
 function(alt_add_sanitizers target)
     if(ALT_SANITIZE STREQUAL "none")
@@ -11,6 +11,18 @@ function(alt_add_sanitizers target)
         )
         target_link_options(${target} PRIVATE
             -fsanitize=address,undefined
+        )
+    elseif(ALT_SANITIZE STREQUAL "thread")
+        # ThreadSanitizer is mutually exclusive with AddressSanitizer, and finds a
+        # different class of defect: data races rather than invalid accesses. The
+        # coroutine components are the only part of this library with concurrency,
+        # so this is the build that covers them.
+        target_compile_options(${target} PRIVATE
+            -fsanitize=thread
+            -fno-omit-frame-pointer
+        )
+        target_link_options(${target} PRIVATE
+            -fsanitize=thread
         )
     elseif(ALT_SANITIZE STREQUAL "memory")
         if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -30,7 +42,7 @@ function(alt_add_sanitizers target)
         )
     else()
         message(FATAL_ERROR
-            "Unknown ALT_SANITIZE value '${ALT_SANITIZE}'. Valid values: none, address, memory."
+            "Unknown ALT_SANITIZE value '${ALT_SANITIZE}'. Valid values: none, address, thread, memory."
         )
     endif()
 endfunction()
