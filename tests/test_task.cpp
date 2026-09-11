@@ -297,23 +297,29 @@ TEST(Task, MoveAssignmentDestroysTheOverwrittenFrame)
 TEST(Task, DeepChainRunsInConstantStack)
 {
 	// Measured on GCC 15.2 and 16 for a 50000-frame chain: plain GCC elides the tail call
-	// and passes at -O0, -O1, -O2 and -O3, and UBSan alone does not change that. Enabling
-	// AddressSanitizer defeats GCC's sibling-call optimization at *every* optimization
-	// level, so the chain then grows the stack linearly and overflows. That is the cause,
-	// not larger frames: an optimized build would have no frames left to enlarge and so
-	// could not overflow. Clang elides with or without the sanitizers at every level.
+	// only from -O2 upward. At -O0 it costs 64 bytes of native stack per frame and at -O1
+	// it costs 48, both growing linearly with chain depth; a 200000-frame chain segfaults
+	// at either level with no sanitizer involved, and this test's 50000 frames pass at -O0
+	// only because that depth fits under a default 8 MB stack, not because the tail call is
+	// elided. Enabling AddressSanitizer makes things worse in two separate, measured ways:
+	// it defeats GCC's sibling-call optimization at -O2, and it also enlarges frames at -O0
+	// (64 bytes to about 208), so both the lost tail call and larger frames are real causes,
+	// each in its own regime. Clang elides with or without the sanitizers at every level.
 	//
-	// __SANITIZE_ADDRESS__ covers the measured failure. The extra -O0 disjunct is deliberate
-	// conservatism: GCC documents sibling-call elision as an optimization, so an unoptimized
-	// build anywhere in the supported GCC 13+ range is not entitled to it even though the
-	// versions measured here do elide.
+	// __SANITIZE_ADDRESS__ covers the -O2-with-ASan failure, and !defined(__OPTIMIZE__)
+	// covers the -O0 failure. One gap is known and accepted: a GCC build at -O1 or -Og
+	// still runs this test, and it passes only by fitting under the stack limit rather than
+	// by eliding the tail call, so a pass there measures nothing about constant stack. No
+	// preset in this project currently builds at -O1 or -Og; if one is added, this comment
+	// is the warning that its pass on this test is not evidence of the property holding.
 #if defined(__GNUC__) && !defined(__clang__) && (defined(__SANITIZE_ADDRESS__) || !defined(__OPTIMIZE__))
 	GTEST_SKIP() << "Symmetric transfer only avoids growing the stack where the compiler "
-	                "tail-calls the handle returned from the final awaiter. Under GCC, "
-	                "AddressSanitizer defeats that tail call at every optimization level, so "
-	                "this chain overflows the stack; an unoptimized GCC build is also not "
-	                "entitled to the elision across the supported GCC range. Clang elides "
-	                "in every configuration, and so does GCC once AddressSanitizer is off.";
+	                "tail-calls the handle returned from the final awaiter. GCC takes that "
+	                "tail call only from -O2 upward, and AddressSanitizer defeats it there "
+	                "too; an unoptimized GCC build never gets the tail call at all, with or "
+	                "without a sanitizer, so this chain would grow the stack linearly with "
+	                "depth and, at a large enough size, overflow. Clang elides in every "
+	                "configuration, and so does GCC from -O2 upward with AddressSanitizer off.";
 #endif
 	// Where symmetric transfer holds (see the guard above for where it does not), this
 	// chain runs in constant stack regardless of depth.

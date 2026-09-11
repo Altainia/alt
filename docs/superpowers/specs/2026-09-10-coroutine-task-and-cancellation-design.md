@@ -83,10 +83,14 @@ The project baseline of GCC 13 and Clang 19 was not exercised locally and is
 covered by CI on the branch.
 
 A second measured claim, independent of the cascade, concerns the constant-stack
-property of a deep chain. It is **not** a frame-size effect: AddressSanitizer
-defeats GCC's sibling-call optimization at every optimization level, so the tail
-call symmetric transfer depends on is simply absent under ASan. The per-level
-numbers are in the `task<T>` section below.
+property of a deep chain. The determining factor is **optimization level, not
+AddressSanitizer**: GCC only turns the resumption into a tail call from `-O2`
+upward, so at `-O0` and `-O1` each frame consumes real, linearly growing stack
+regardless of any sanitizer. AddressSanitizer makes this worse through two
+separate mechanisms on top of that — it defeats the tail call GCC would
+otherwise take at `-O2`, and it enlarges frames at `-O0` — so frame size is not
+irrelevant either; it is one of two real, independently measured effects. The
+per-level numbers are in the `task<T>` section below.
 
 The probe produced two findings that constrain the implementation:
 
@@ -144,30 +148,51 @@ continuation as a handle rather than resuming it, which is symmetric transfer.
 **The constant-stack property is conditional, and this was measured rather than
 assumed.** Symmetric transfer only avoids growing the stack if the compiler
 turns the resumption of the returned handle into a tail call, and the standard
-does not require that. Measured with a 50000-frame chain:
+does not require that. Native stack consumed per coroutine frame, sampled with
+`__builtin_frame_address(0)`, no sanitizer:
 
-| Configuration | Result |
-|---|---|
-| GCC `-O0`, `-O1`, `-O2`, `-O3` | passes |
-| GCC `-O0` + AddressSanitizer | stack overflow |
-| GCC `-O2` + AddressSanitizer | stack overflow |
-| GCC `-O2` + UBSan only | passes |
-| Clang `-O0` and `-O2`, with and without the sanitizers | passes |
+| Configuration | Per frame | Elided? |
+|---|---|---|
+| GCC `-O0` | 64 bytes | no, linear |
+| GCC `-O1` | 48 bytes | no, linear |
+| GCC `-O2` (and `-O3`) | constant at any depth | yes |
+| Clang `-O0` (and every level up) | constant at any depth | yes |
 
-The determining factor is AddressSanitizer, not the optimization level:
-**ASan defeats GCC's sibling-call optimization at every optimization level.**
-The cause is the lost tail call rather than larger frames — if enlarged frames
-were the explanation, an optimized build would have no frames left to enlarge
-and so could not overflow, yet GCC `-O2` with ASan overflows exactly as `-O0`
-does. Clang elides in every configuration measured.
+Pass/fail at depth, no sanitizer:
 
-The consequence for callers: on GCC, unbounded chain depth is unsafe in any
-build with AddressSanitizer enabled — which is this project's `debug-asan`
-preset — and safe otherwise, at every optimization level including `-O0`. This
-is a toolchain property, not something the library can fix, so it is documented
-on the component page rather than worked around. The task object owns the frame
-and destroys it in its destructor, which is precisely what makes the
-cancellation cascade work.
+| Configuration | 50,000 frames | 200,000 frames |
+|---|---|---|
+| GCC `-O0` | passes | **SIGSEGV** |
+| GCC `-O1` | passes | **SIGSEGV** |
+| GCC `-O2` | passes | passes |
+| Clang `-O0` | passes | passes |
+
+**GCC elides the tail call from `-O2` upward only** — not at `-O0`, not at
+`-O1` — while **Clang elides at every optimization level**, including `-O0`.
+On GCC below `-O2` the stack grows linearly with chain depth: the project's
+own 50,000-frame test passes there only because 50,000 × 64 bytes is about
+3.2 MB, comfortably under a default 8 MB stack. The practical ceiling at
+`-O0` is roughly 130,000 frames, and a deeper chain overflows with no
+sanitizer involved at all.
+
+**AddressSanitizer adds two further, separate effects on top of that**, and
+both matter. It defeats GCC's tail-call elision at `-O2`, turning constant
+usage into roughly 700 bytes per frame. And, independently, it enlarges
+frames at `-O0`, from 64 bytes to about 208 — which is what flips the
+project's own 50,000-frame test from comfortably passing to overflowing
+under the `debug-asan` preset. Neither effect alone is the whole story: the
+optimization level determines whether GCC elides at all, and ASan then makes
+whichever case applies worse.
+
+The consequence for callers: a deep chain is safe on Clang at any
+optimization level, and on GCC from `-O2` upward. It is **not** safe on GCC
+at `-O0` or `-O1` — which includes this project's own `debug` and
+`debug-asan` presets, both of which build at `-O0` — regardless of whether a
+sanitizer is enabled; a sanitizer only makes an already-unsafe case worse or,
+at `-O2`, turns a safe case unsafe. This is a toolchain property, not
+something the library can fix, so it is documented on the component page
+rather than worked around. The task object owns the frame and destroys it in
+its destructor, which is precisely what makes the cancellation cascade work.
 
 `task<void>` and `task<T&>` are supported through one internal result store, so
 the task template itself is not specialized. Arrays are not supported. Awaiting
@@ -501,7 +526,7 @@ silently swallowing a failure.
 | Throw before the first suspension point | Captured in the promise, rethrown at `await_resume` |
 | Throw from the move constructor of a returned value | Captured, rethrown at `await_resume` |
 | `task<T>` with move-only, reference, or `void` result | All supported |
-| Chain deep enough to overflow the stack | Constant stack via symmetric transfer, but only where the compiler tail-calls the returned handle. Measured: GCC under AddressSanitizer loses that tail call at every optimization level and grows the stack linearly; GCC without ASan and Clang in every configuration are fine |
+| Chain deep enough to overflow the stack | Constant stack via symmetric transfer, but only where the compiler tail-calls the returned handle. Measured: GCC tail-calls from `-O2` upward only, so at `-O0`/`-O1` the stack grows linearly with depth regardless of any sanitizer, and a chain beyond roughly 100,000 frames overflows even with none enabled; AddressSanitizer makes this worse still, defeating the tail call at `-O2` and enlarging frames at `-O0`. Clang tail-calls at every level, with or without sanitizers |
 | `request_stop` concurrent with normal completion | Safe. Only the coroutine ever destroys; `request_stop` only touches the stop state, which is independently reference counted |
 | `request_stop` on an already-finished task | No-op |
 | `request_stop` called twice | Second call is a no-op; the chain is already gone after the first observation |

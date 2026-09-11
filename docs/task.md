@@ -119,33 +119,37 @@ symmetric transfer to avoid growing the stack; it does not require the
 compiler to actually implement the resumption as a tail call, and this
 project's baseline compilers do not agree on when they do:
 
-- **Clang** turns the resumption into a tail call in every configuration
-  measured, including `-O0` and with the sanitizers on. A chain of any depth
-  is safe.
-- **GCC** elides the tail call at every optimization level measured,
-  including `-O0`, *except* when AddressSanitizer is enabled. **ASan defeats
-  GCC's sibling-call optimization, and it does so at every optimization
-  level**, so under ASan each layer of a chain consumes real stack space and
-  a chain's stack usage grows **linearly** with its depth until it overflows.
-  UBSan alone does not have this effect.
+- **Clang** turns the resumption into a tail call at every optimization level
+  measured, including `-O0`, with and without the sanitizers. A chain of any
+  depth is safe.
+- **GCC** turns it into a tail call from `-O2` upward only. **At `-O0` and
+  `-O1` it does not**, and each layer of the chain then consumes real,
+  measured stack: 64 bytes per frame at `-O0`, 48 bytes at `-O1`, growing
+  **linearly** with chain depth until it overflows. This is exactly the
+  configuration of this project's own `debug` and `debug-asan` presets, both
+  of which build at `-O0`.
+- **AddressSanitizer makes things worse, through two separate, independently
+  measured mechanisms.** At `-O2`, it defeats the tail-call elision GCC would
+  otherwise perform, so per-frame usage jumps from constant to roughly 700
+  bytes and again grows linearly with depth. At `-O0`, GCC was already not
+  eliding, and ASan additionally enlarges each frame, from 64 bytes to about
+  208. Both effects are real; neither one alone is the whole story.
 
-  The cause is the lost tail call, not larger frames: if enlarged frames were
-  the explanation, an optimized build would have no frames left to enlarge
-  and could not overflow, yet a GCC `-O2` build with ASan overflows exactly
-  as the `-O0` one does.
-
-This was measured, not assumed — see this project's design spec for the
-coroutine components for the exact configurations tested — and it is a
-toolchain property the library cannot work around. What it means for a
-caller: on GCC, do not rely on unbounded chain depth in any build with
-AddressSanitizer enabled, which for this project is the `debug-asan` preset
-the coroutine components otherwise treat as a hard requirement. Everywhere
-else — Clang in any configuration, GCC without ASan at any optimization
-level — the depth is bounded only by memory for the frames themselves.
+This was measured, not assumed — a 200,000-frame chain segfaults on plain
+GCC at `-O0` and `-O1` with no sanitizer involved, and survives at `-O2` and
+on Clang at every level tested. See this project's design spec for the
+coroutine components for the exact configurations. What it means for a
+caller: a deep chain is safe on Clang at any optimization level, and on GCC
+from `-O2` upward. On GCC at `-O0` or `-O1` — which includes this project's
+own debug presets — stack use grows with chain depth regardless of whether a
+sanitizer is present, and a chain beyond roughly a hundred thousand frames
+will overflow the default stack even with no sanitizer at all. The project's
+own 50,000-frame test happens to pass at plain `-O0` only because that depth
+fits comfortably under a typical 8 MB stack, not because the tail call is
+being elided.
 
 The project's own test for this (`Task.DeepChainRunsInConstantStack`) is
-skipped under GCC when `__SANITIZE_ADDRESS__` is defined, which is the
-measured failure, and also in an unoptimized GCC build, because GCC
-documents sibling-call elision as an optimization and so an unoptimized
-build anywhere in the supported GCC 13+ range is not entitled to it even
-though the versions measured here do elide.
+skipped under GCC when `__SANITIZE_ADDRESS__` is defined, which is one
+measured failure mode, and also in any unoptimized GCC build (`-O0` or
+without `-O`), which is the other. Both are configurations where the
+property genuinely does not hold.
