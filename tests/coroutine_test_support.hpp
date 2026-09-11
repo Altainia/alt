@@ -7,11 +7,9 @@ namespace alt_test
 {
 
 	/** Count of frame_tracker instances currently alive. */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable shared test state
 	inline int live_frames = 0;
 
 	/** Tags of destroyed frame_tracker instances, in destruction order. */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable shared test state
 	inline std::vector<int> destruction_order;
 
 	/** Tracks a coroutine frame's lifetime for the tests in this suite. */
@@ -38,7 +36,6 @@ namespace alt_test
 	};
 
 	/** The handle most recently parked by one of the park* awaiters below. */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable shared test state
 	inline std::coroutine_handle<> parked{};
 
 	/** Suspends and hands its handle to the test, standing in for off-thread work. */
