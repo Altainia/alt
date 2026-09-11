@@ -106,6 +106,31 @@ namespace
 	{
 		return alt::work_item{.invoke = &invoke_logged_call, .state = &call};
 	}
+
+	// Asserts that no wake is left armed in scheduler: a thread entering run_one_or_wait
+	// must block until a real post arrives, rather than returning on a stale signal.
+	void expect_no_stale_wake(alt::manual_scheduler& scheduler, int tag)
+	{
+		std::vector<int>  log;
+		logged_call       call{.log = &log, .tag = tag};
+		std::atomic<bool> returned{false};
+
+		std::thread waiter{[&] {
+			const bool ran = scheduler.run_one_or_wait();
+			returned.store(true, std::memory_order_release);
+			EXPECT_TRUE(ran);
+		}};
+
+		// A stale wake would have released the waiter by now.
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		EXPECT_FALSE(returned.load(std::memory_order_acquire));
+
+		scheduler.post(item_for(call));
+		waiter.join();
+
+		EXPECT_TRUE(returned.load(std::memory_order_acquire));
+		EXPECT_EQ(log, std::vector<int>{tag});
+	}
 }
 
 TEST(SyncWait, ReturnsAValue)
@@ -202,26 +227,7 @@ TEST(SyncWait, DrivingOverloadLeavesNoStaleWakeAfterSynchronousCompletion)
 	// stale signal instead of waiting for a real post.
 	alt::manual_scheduler scheduler;
 	EXPECT_EQ(alt::sync_wait(answer(), scheduler), 42);
-
-	std::vector<int>  log;
-	logged_call       call{.log = &log, .tag = 1};
-	std::atomic<bool> returned{false};
-
-	std::thread waiter{[&] {
-		const bool ran = scheduler.run_one_or_wait();
-		returned.store(true, std::memory_order_release);
-		EXPECT_TRUE(ran);
-	}};
-
-	// A stale wake would have released the call above by now.
-	std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	EXPECT_FALSE(returned.load(std::memory_order_acquire));
-
-	scheduler.post(item_for(call));
-	waiter.join();
-
-	EXPECT_TRUE(returned.load(std::memory_order_acquire));
-	EXPECT_EQ(log, std::vector<int>{1});
+	expect_no_stale_wake(scheduler, 1);
 }
 
 TEST(SyncWait, DrivingOverloadLeavesNoStaleWakeAfterPumpedCompletion)
@@ -232,23 +238,5 @@ TEST(SyncWait, DrivingOverloadLeavesNoStaleWakeAfterPumpedCompletion)
 	alt::manual_scheduler scheduler;
 	EXPECT_EQ(alt::sync_wait(hops(scheduler), scheduler), 7);
 	EXPECT_TRUE(scheduler.empty());
-
-	std::vector<int>  log;
-	logged_call       call{.log = &log, .tag = 2};
-	std::atomic<bool> returned{false};
-
-	std::thread waiter{[&] {
-		const bool ran = scheduler.run_one_or_wait();
-		returned.store(true, std::memory_order_release);
-		EXPECT_TRUE(ran);
-	}};
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	EXPECT_FALSE(returned.load(std::memory_order_acquire));
-
-	scheduler.post(item_for(call));
-	waiter.join();
-
-	EXPECT_TRUE(returned.load(std::memory_order_acquire));
-	EXPECT_EQ(log, std::vector<int>{2});
+	expect_no_stale_wake(scheduler, 2);
 }

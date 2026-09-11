@@ -370,7 +370,9 @@ namespace
 		}
 		void await_suspend(std::coroutine_handle<> /*awaiting*/) noexcept
 		{}
-		int await_resume() noexcept
+		// const, not static: it reads payload. The file's other awaiters cannot be const
+		// because they mutate, or are flagged as convertible to static instead.
+		int await_resume() const noexcept
 		{
 			return *payload;
 		}
