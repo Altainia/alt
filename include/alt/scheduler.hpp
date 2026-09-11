@@ -21,11 +21,17 @@ namespace alt
 	 * A function pointer plus an opaque state pointer. The state must outlive the
 	 * point at which the item runs, which for a coroutine resume means the frame
 	 * itself supplies the storage.
+	 *
+	 * The callback may not throw, and the type enforces it. There is no error
+	 * channel here, so an escaping exception would surface in whichever thread
+	 * happened to be draining the queue, unrelated to whoever posted the item, and
+	 * would abandon any work that item had queued behind it. A callback that can
+	 * fail must handle that itself.
 	 */
 	struct work_item
 	{
-		void (*invoke)(void* state) = nullptr;
-		void* state                 = nullptr;
+		void (*invoke)(void* state) noexcept = nullptr;
+		void* state                          = nullptr;
 	};
 
 	/**
@@ -135,6 +141,10 @@ namespace alt
 			}
 
 			state.running = true;
+
+			// Work items cannot throw (see alt::work_item), so nothing below can leave
+			// this flag set. The guard stays because the flag being wrong is unrecoverable
+			// for every later post on this thread, and it costs nothing.
 			const alt::scope_exit reset{[&state] { state.running = false; }};
 
 			w.invoke(w.state);
@@ -279,7 +289,12 @@ namespace alt
 	namespace detail
 	{
 
-		inline void resume_trampoline(void* address)
+		// noexcept by contract, not by accident: see alt::work_item. Resuming one of
+		// this library's coroutines cannot throw, because every promise here stores an
+		// escaped exception rather than rethrowing it. A foreign coroutine whose promise
+		// rethrows would terminate here, which is the honest outcome: the exception's
+		// only other destination is an arbitrary pumping thread.
+		inline void resume_trampoline(void* address) noexcept
 		{
 			std::coroutine_handle<>::from_address(address).resume();
 		}

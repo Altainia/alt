@@ -14,8 +14,8 @@ concrete schedulers and the awaitable that hops a coroutine onto one.
 ```cpp
 struct work_item
 {
-    void (*invoke)(void* state) = nullptr;
-    void* state                 = nullptr;
+    void (*invoke)(void* state) noexcept = nullptr;
+    void* state                          = nullptr;
 };
 
 template<typename S>
@@ -28,12 +28,26 @@ allocates nothing. Both resuming a coroutine (`alt::resume_on`) and
 destroying a cancelled frame elsewhere are expressed as work items, so a
 scheduler implementation never needs to know coroutines exist.
 
+**The callback may not throw**, and the type enforces it: a potentially
+throwing function will not convert. There is no error channel in a `work_item`,
+so an escaping exception would surface in whichever thread happened to be
+draining the queue, with no relationship to whoever posted the item, and would
+abandon anything that item had queued behind it. A callback that can fail has
+to handle that itself.
+
+One consequence is worth stating for `alt::resume_on`. Resuming any of this
+library's coroutines cannot throw, because every promise here stores an escaped
+exception rather than rethrowing it. A foreign coroutine type whose promise
+rethrows would terminate when resumed through a scheduler, which is the honest
+outcome: the only other destination for that exception is an arbitrary pumping
+thread.
+
 ```cpp
 template<typename S>
-concept drivable_scheduler = scheduler<S> && requires(S& s) {
+concept drivable_scheduler = scheduler<S> && requires(S& s, const std::atomic<bool>* stop) {
     { s.run_one() } -> std::same_as<bool>;
-    { s.run_one_or_wait() } -> std::same_as<bool>;
-    s.wake();
+    { s.run_one_or_wait(stop) } -> std::same_as<bool>;
+    s.notify_waiters();
 };
 ```
 
@@ -123,14 +137,28 @@ public:
     void post(work_item w);
 
     bool run_one();
-    bool run_one_or_wait();
+    bool run_one_or_wait(const std::atomic<bool>* stop = nullptr);
     std::size_t run_all();
 
     [[nodiscard]] bool empty() const;
 
+    void notify_waiters();
     void wake();
 };
 ```
+
+`run_one_or_wait`'s optional `stop` flag joins its wait condition. That lets a
+caller waiting on something this scheduler knows nothing about be released
+without arming any state here, which is how the driving `alt::sync_wait` waits
+on its own completion flag.
+
+`notify_waiters` and `wake` are not the same thing, and the difference matters.
+`wake` is a latch: it arms a flag that stays set until a waiter consumes it, so
+it is the right tool for a caller ending a pump loop of their own. Because it
+persists, a `wake` nobody consumes is observable by the next call.
+`notify_waiters` arms nothing and only prompts a blocked waiter to re-test its
+condition, so it cannot be observed later. Use it when the condition being
+waited on lives outside this scheduler.
 
 Runs nothing until told to. This is the deterministic scheduler for tests:
 post work from any thread, then decide on the pumping thread exactly when

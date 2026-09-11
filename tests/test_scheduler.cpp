@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -15,7 +16,7 @@ namespace
 		int               tag;
 	};
 
-	void log_trampoline(void* state)
+	void log_trampoline(void* state) noexcept
 	{
 		auto* const call = static_cast<logged_call*>(state);
 		call->log->push_back(call->tag);
@@ -173,7 +174,7 @@ TEST(TrampolineScheduler, DefersAReentrantPostToTheOutermostInvocation)
 
 	outer_state state{.scheduler = &scheduler, .log = &log, .inner = &inner};
 
-	const auto outer_trampoline = [](void* raw) {
+	const auto outer_trampoline = [](void* raw) noexcept {
 		auto* const s = static_cast<outer_state*>(raw);
 		s->log->push_back(1);
 		s->scheduler->post(item_for(*s->inner));
@@ -202,4 +203,15 @@ TEST(SchedulerRef, ForwardsPostsToTheReferencedScheduler)
 	reference.post(item_for(call));
 	EXPECT_EQ(scheduler.run_all(), 1U);
 	EXPECT_EQ(log, std::vector<int>{5});
+}
+
+TEST(SchedulerConcepts, AWorkItemCallbackMayNotThrow)
+{
+	// work_item is an erased function pointer plus a void*, with no error channel.
+	// An exception leaving a work item has no defined destination: it would surface
+	// in whichever thread happened to be draining the queue, unrelated to whoever
+	// posted the item. The contract is therefore that callbacks do not throw, and
+	// the type enforces it rather than documenting it.
+	static_assert(std::is_assignable_v<decltype(alt::work_item::invoke)&, void (*)(void*) noexcept>);
+	static_assert(!std::is_assignable_v<decltype(alt::work_item::invoke)&, void (*)(void*)>);
 }
