@@ -46,11 +46,16 @@ deterministic single-threaded pump is the only way to pin down self-destruction
 semantics precisely, and a blocking wait is the only way for a test body to
 observe the result of an asynchronous chain.
 
-**Phase 3 introduces the first threading dependency.** The library currently
-has one compiled translation unit, `src/version.cpp`, and no threading. A thread
-pool means linking pthread and adding a real compiled component, which is why it
-is deferred past the headline feature. Phase 2 tests use bare `std::jthread`
-instead.
+**Phases 1 and 2 already introduced the threading dependency; phase 3 adds the
+first compiled component that needs it.** Phase 1's `scheduler.hpp` uses
+`std::mutex` and `std::condition_variable`, phase 2's `sync_wait.hpp` uses
+`std::binary_semaphore`, and `cancellable_task.hpp` uses `std::stop_source` and
+`std::stop_callback`, so the `alt` target links `Threads::Threads` publicly and
+the exported package config carries a `find_dependency(Threads)` from phase 2
+onward. What phase 3 adds is a real compiled translation unit with threads in it
+— the library still has only `src/version.cpp` — which is why the thread pool is
+deferred past the headline feature. Phase 2 tests use bare `std::jthread`
+instead of a pool.
 
 **Phase 5 contains the pieces a UI framework actually reaches for.** A
 completion source that turns a callback API into an awaitable is what lets a
