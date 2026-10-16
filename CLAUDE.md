@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.5.0`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.6.0`.
 
 ## Directory layout
 
@@ -43,6 +43,27 @@ Run these before committing. All must pass with zero errors.
 ```bash
 cmake --preset debug-asan && cmake --build --preset debug-asan
 ctest --preset debug-asan --output-on-failure
+```
+
+### ThreadSanitizer
+
+The coroutine components are the only concurrent code in the library, so this is
+the build that covers them. AddressSanitizer does not find data races.
+
+```bash
+cmake --preset debug-tsan && cmake --build --preset debug-tsan
+ctest --preset debug-tsan --output-on-failure
+```
+
+### Optimized test run
+
+One property cannot be checked in a debug build: `task<T>`'s constant stack use
+for deep chains needs the tail call GCC only emits from `-O2` upward, so the test
+for it skips in every `Debug` preset. This preset is where it actually runs.
+
+```bash
+cmake --preset release-tests && cmake --build --preset release-tests
+ctest --preset release-tests --output-on-failure
 ```
 
 ### clang-tidy
@@ -102,14 +123,14 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.5.0_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.6.0_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.5.0 REQUIRED)
+find_package(Alt 1.6.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 

@@ -61,6 +61,30 @@ jobs:
   # provided for local use by developers who have a properly instrumented
   # libc++ toolchain. See: https://clang.llvm.org/docs/MemorySanitizer.html
 
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset debug-tsan -DALT_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset debug-tsan
+      - name: Test
+        run: ctest --preset debug-tsan
+
+  release-tests:
+    name: Build & Test (optimized)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset release-tests -DALT_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset release-tests
+      - name: Test
+        run: ctest --preset release-tests
+
   clang-tidy:
     name: clang-tidy
     runs-on: ubuntu-latest

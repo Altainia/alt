@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Alt VERSION 1.5.0 LANGUAGES CXX)
+project(Alt VERSION 1.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,12 @@ include(cmake/sanitizers.cmake)
 include(cmake/coverage.cmake)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+
+# The coroutine headers are header-only but not thread-free: scheduler.hpp uses
+# std::mutex and std::condition_variable, sync_wait.hpp uses std::binary_semaphore,
+# and cancellable_task.hpp uses std::stop_source and std::stop_callback. Linking
+# Threads::Threads PUBLIC is what gets -pthread onto a consumer's link line.
+find_package(Threads REQUIRED)
 
 option(ALT_CLANG_TIDY "Run clang-tidy on all sources during build" OFF)
 option(ALT_CPPCHECK "Add a 'cppcheck' custom build target" OFF)
@@ -29,6 +35,8 @@ target_include_directories(alt
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+target_link_libraries(alt PUBLIC Threads::Threads)
 
 alt_add_warnings(alt)
 alt_add_sanitizers(alt)
