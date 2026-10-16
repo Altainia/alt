@@ -88,6 +88,44 @@ namespace
 		*static_cast<std::exception_ptr*>(state) = std::move(error);
 	}
 
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state, observed across a suspension.
+	bool ran_after_resume = false;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state, observed across a suspension.
+	bool child_ran_after_resume = false;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state, observed across a suspension.
+	bool root_ran_after_child = false;
+
+	// Parks on the scheduler, so a stop arrives while the task is suspended. The
+	// statement after the resume is the one issue #4 showed runs anyway.
+	alt::cancellable_task resumes_through_a_scheduler(alt::manual_scheduler* scheduler)
+	{
+		const frame_tracker t{1};
+		co_await alt::resume_on(*scheduler);
+		ran_after_resume = true;
+		co_await alt::cancellation_point{};
+		reached_end = true;
+	}
+
+	// Parks on a foreign awaitable, so the stop arrives while the chain is suspended
+	// inside the child. Its completion transfers back to the root, and that transfer
+	// is the resumption which has to observe the stop.
+	alt::task<void> parks_then_returns()
+	{
+		const frame_tracker t{2};
+		co_await park{};
+		child_ran_after_resume = true;
+	}
+
+	alt::cancellable_task root_awaiting_a_parking_child()
+	{
+		const frame_tracker t{1};
+		co_await parks_then_returns();
+		root_ran_after_child = true;
+		co_await alt::cancellation_point{};
+		reached_end = true;
+	}
 }
 
 class CancellableTaskTest: public ::testing::Test
@@ -96,9 +134,12 @@ protected:
 	void SetUp() override
 	{
 		reset_coroutine_test_state();
-		reached_end        = false;
-		middle_reached_end = false;
-		captured_error     = {};
+		reached_end            = false;
+		middle_reached_end     = false;
+		ran_after_resume       = false;
+		child_ran_after_resume = false;
+		root_ran_after_child   = false;
+		captured_error         = {};
 	}
 };
 
@@ -321,4 +362,96 @@ TEST_F(CancellableTaskTest, AnExternalStopConcurrentWithTeardownIsSafe)
 		handle.request_stop();
 		ASSERT_TRUE(handle.stop_requested()) << "attempt " << attempt;
 	}
+}
+
+TEST_F(CancellableTaskTest, ObservesCancellationWhenResumedThroughAScheduler)
+{
+	// Issue #4. A task suspended when the stop arrives used to resume and run body
+	// code until its next co_await. The resumption itself has to observe the stop,
+	// because suspended is the state this component exists to be cancelled in.
+	alt::manual_scheduler scheduler;
+
+	auto handle = alt::start(resumes_through_a_scheduler(&scheduler));
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();              // the window closes while the task is parked
+	EXPECT_EQ(scheduler.run_all(), 1U); // the awaited thing completes
+
+	EXPECT_FALSE(ran_after_resume);
+	EXPECT_FALSE(reached_end);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellableTaskTest, ObservesCancellationWhenAChildTaskCompletes)
+{
+	// The second resumption alt owns: a child task finishing and transferring back
+	// to its parent. Issue #4's gap applied here too.
+	auto handle = alt::start(root_awaiting_a_parking_child());
+	ASSERT_EQ(live_frames, 2);
+
+	handle.request_stop();
+	resume_parked(); // the child resumes and runs to its co_return
+
+	// The child's own resumption came from a foreign awaitable, which stays checked
+	// on entry only, so its body does run. That is the documented boundary.
+	EXPECT_TRUE(child_ran_after_resume);
+
+	// The transfer back to the root is alt's own, and must observe the stop.
+	EXPECT_FALSE(root_ran_after_child);
+	EXPECT_FALSE(reached_end);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellableTaskTest, ObservesCancellationWhenResumedOnAnotherThread)
+{
+	// The motivating scenario in full: the stop lands while the task is parked, and
+	// the resumption happens on a worker rather than on the thread that asked.
+	alt::manual_scheduler scheduler;
+
+	auto handle = alt::start(resumes_through_a_scheduler(&scheduler));
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();
+
+	std::jthread worker{[&scheduler] { scheduler.run_all(); }};
+	worker.join();
+
+	EXPECT_FALSE(ran_after_resume);
+	EXPECT_FALSE(reached_end);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellableTaskTest, ResumptionTeardownHonorsTheHomeScheduler)
+{
+	// Abandoning at a resumption goes through the same teardown as abandoning on
+	// entry, so a home scheduler still decides where the frames are destroyed.
+	alt::manual_scheduler work;
+	alt::manual_scheduler home;
+
+	auto handle = alt::start(resumes_through_a_scheduler(&work), {.home = alt::scheduler_ref{home}});
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();
+	EXPECT_EQ(work.run_all(), 1U); // the resumption observes the stop and posts
+
+	EXPECT_FALSE(ran_after_resume);
+	EXPECT_EQ(live_frames, 1); // posted, not yet destroyed
+
+	EXPECT_EQ(home.run_all(), 1U);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellableTaskTest, AnUncancelledResumptionProceedsNormally)
+{
+	// The check must not disturb the ordinary path: with no stop requested, the
+	// resumption resumes and the body runs to completion as before.
+	alt::manual_scheduler scheduler;
+
+	auto handle = alt::start(resumes_through_a_scheduler(&scheduler));
+	EXPECT_EQ(scheduler.run_all(), 1U);
+
+	EXPECT_TRUE(ran_after_resume);
+	EXPECT_TRUE(reached_end);
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_FALSE(handle.stop_requested());
 }

@@ -35,6 +35,13 @@ draining the queue, with no relationship to whoever posted the item, and would
 abandon anything that item had queued behind it. A callback that can fail has
 to handle that itself.
 
+`alt::resume_on` is also a cancellation observation point. When the awaiting
+coroutine belongs to an `alt::cancellable_task` chain and a stop has been
+requested by the time the scheduler gets round to the resumption, the chain is
+destroyed instead of resumed. There is no cost to this when no stop was
+requested, and none at all outside a cancellable chain, where there is no
+context to consult.
+
 One consequence is worth stating for `alt::resume_on`. Resuming any of this
 library's coroutines cannot throw, because every promise here stores an escaped
 exception rather than rethrowing it. A foreign coroutine type whose promise

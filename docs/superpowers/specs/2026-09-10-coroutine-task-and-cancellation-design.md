@@ -498,13 +498,15 @@ silently swallowing a failure.
 1. **No user code after observation.** Once cancellation is observed, no
    statement of any coroutine body in the chain executes. Only destructors of
    live locals and of coroutine parameters run.
-2. **Observation is at entry to a suspension point, never on resumption.** A
-   coroutine that never reaches another `co_await` runs to completion and is
-   unaffected. Long compute loops should `co_await alt::cancellation_point{}` to
-   create one. Note the sharper consequence: a task already suspended when the
-   stop arrives still resumes when the awaited thing completes, and any body
-   code between that resume and the next `co_await` runs. Safety therefore rests
-   on a caller convention, which is the gap reported in issue #4.
+2. **Observation is at entry to every suspension point, and at the resumptions
+   this library owns.** The entry check is the generic wrapper. The resumption
+   checks are `resume_on` returning from a scheduler and a child `task<T>`
+   completing and transferring to its parent; both tear the chain down rather
+   than resume. A foreign awaitable that resumes the frame itself is checked on
+   entry only, because intercepting a resumption requires knowing how that
+   resumption happens. A coroutine that never reaches another `co_await` runs to
+   completion regardless; `cancellation_point` exists to give one somewhere to
+   stop. Resolves issue #4, which reported the resumption gap.
 3. **Cancellation is not acknowledged.** `request_stop` returns immediately. The
    owner learns nothing about when the frames actually died, by design, because a
    waiting `request_stop` would deadlock whenever the task needs the calling

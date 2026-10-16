@@ -20,16 +20,15 @@ Point 6 is the guarantee: it is provided by the coroutine machinery itself
 and does not depend on whatever is being awaited cooperating with
 cancellation.
 
-Read step 5 and step 6 together, though, because there is a gap between them.
-Cancellation is observed on *entry* to a suspension point, never on
-resumption, so a task that is already suspended when `request_stop()` arrives
-still resumes when the thing it was waiting on completes. **Any body code
-between that resume and the next `co_await` runs, after the stop was
-requested.** The scenario above is safe only because the statement following
-its resume is itself a `co_await`. A body that touches window-owned state
-immediately after a resume will touch it after the window has gone, with no
-diagnostic. See [Cancellation is observed on entry, not on
-resumption](#cancellation-is-observed-on-entry-not-on-resumption).
+Step 5 is the interesting one. Cancellation is checked on entry to every
+suspension point, and also at the resumptions this library owns: a hop through
+`alt::resume_on`, and a child `alt::task` completing and handing control back
+to its parent. So the resume in step 5 does not happen at all if a stop was
+requested while the task sat there, and step 6's teardown takes its place.
+
+A foreign awaitable that resumes the frame itself is the exception, and it is
+checked on entry only. See [Foreign awaitables are checked on entry
+only](#foreign-awaitables-are-checked-on-entry-only).
 
 ```cpp
 #include <alt/cancellable_task.hpp>
@@ -245,36 +244,44 @@ this teardown work is still queued, leaks the entire chain silently: nothing
 about the deferred path ever raises an error for it, it simply never
 destroys the frames.
 
-## Cancellation is observed on entry, not on resumption
+## Foreign awaitables are checked on entry only
 
-The check lives in the wrapper's `await_ready` and `await_suspend`, both of
-which run on the way *into* a suspension point. By the time the awaited thing
-completes and resumes the frame, they have already run, so nothing re-examines
-the stop state before the body continues.
+Cancellation is checked in two places. On entry to every suspension point,
+which covers anything you can `co_await`. And at the resumptions this library
+owns, of which there are two: `alt::resume_on` returning from a scheduler, and
+a child `alt::task` completing and transferring back to its parent. Both of
+those observe the stop and tear the chain down instead of resuming.
 
-The consequence is sharpest in exactly the situation this component exists for.
-"The window closes while the coroutine is waiting" describes a task that is
-suspended, and suspended is the one state in which the current check cannot
-act:
+What is not covered is a foreign awaitable that resumes the frame directly,
+because intercepting a resumption means knowing how that resumption happens:
 
 ```cpp
+// A hand-written awaiter that hands the frame to a thread of its own.
+struct my_awaiter
+{
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h) { start_thread_that_resumes(h); }
+    void await_resume() const noexcept {}
+};
+
 alt::cancellable_task on_press(window* w)
 {
-    co_await alt::resume_on(pool);   // suspended here when the stop arrives
-    w->show(compute());              // runs anyway: the stop is not seen yet
-    co_await alt::resume_on(ui);     // first point that observes the stop
+    co_await my_awaiter{};   // a stop arriving here is not seen on the way back
+    w->show(result());       // so this runs
+    co_await alt::cancellation_point{};
 }
 ```
 
-So safety currently depends on a convention the caller has to keep: let a
-`co_await` be the first thing after any resume that precedes work touching
-cancellable state. That is a real caveat and not one the guarantee above
-removes.
+Swap `my_awaiter{}` for `alt::resume_on(pool)` and the stop is observed, the
+chain is destroyed, and `w->show(...)` never runs.
 
-If you cannot arrange that, the ways out are to re-check the state yourself
-after a resume, or to put a `co_await alt::cancellation_point{}` immediately
-after it, which both observes the stop and costs nothing when no stop was
-requested.
+For an awaitable you do not control, put a `co_await alt::cancellation_point{}`
+immediately after the resume. It observes the stop and costs one atomic load
+when there is nothing to observe.
+
+Note that this applies per frame. In a chain where a child is parked on a
+foreign awaitable, that child's own body resumes and runs; the transfer back to
+its parent is then intercepted, so the parent's body does not.
 
 ## A body with no further suspension point runs to completion
 
