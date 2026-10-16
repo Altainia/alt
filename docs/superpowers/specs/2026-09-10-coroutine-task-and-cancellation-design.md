@@ -498,9 +498,13 @@ silently swallowing a failure.
 1. **No user code after observation.** Once cancellation is observed, no
    statement of any coroutine body in the chain executes. Only destructors of
    live locals and of coroutine parameters run.
-2. **Observation is at entry to a suspension point.** A coroutine that never
-   reaches another `co_await` runs to completion and is unaffected. Long compute
-   loops should `co_await alt::cancellation_point{}` to create one.
+2. **Observation is at entry to a suspension point, never on resumption.** A
+   coroutine that never reaches another `co_await` runs to completion and is
+   unaffected. Long compute loops should `co_await alt::cancellation_point{}` to
+   create one. Note the sharper consequence: a task already suspended when the
+   stop arrives still resumes when the awaited thing completes, and any body
+   code between that resume and the next `co_await` runs. Safety therefore rests
+   on a caller convention, which is the gap reported in issue #4.
 3. **Cancellation is not acknowledged.** `request_stop` returns immediately. The
    owner learns nothing about when the frames actually died, by design, because a
    waiting `request_stop` would deadlock whenever the task needs the calling

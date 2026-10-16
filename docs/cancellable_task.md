@@ -13,12 +13,23 @@ reaches a suspension point. This component exists for one scenario:
 4. Meanwhile the window closes and requests cancellation.
 5. The calculation finishes and the coroutine resumes on the worker thread.
 6. At its next `co_await`, the coroutine machinery destroys the whole chain
-   instead of resuming. No user coroutine body code runs, so nothing touches
-   the dead window.
+   instead of resuming. From that point on nothing in the body runs, so
+   nothing touches the dead window.
 
 Point 6 is the guarantee: it is provided by the coroutine machinery itself
 and does not depend on whatever is being awaited cooperating with
 cancellation.
+
+Read step 5 and step 6 together, though, because there is a gap between them.
+Cancellation is observed on *entry* to a suspension point, never on
+resumption, so a task that is already suspended when `request_stop()` arrives
+still resumes when the thing it was waiting on completes. **Any body code
+between that resume and the next `co_await` runs, after the stop was
+requested.** The scenario above is safe only because the statement following
+its resume is itself a `co_await`. A body that touches window-owned state
+immediately after a resume will touch it after the window has gone, with no
+diagnostic. See [Cancellation is observed on entry, not on
+resumption](#cancellation-is-observed-on-entry-not-on-resumption).
 
 ```cpp
 #include <alt/cancellable_task.hpp>
@@ -233,6 +244,37 @@ A home scheduler that is supplied but never pumped, or one destroyed while
 this teardown work is still queued, leaks the entire chain silently: nothing
 about the deferred path ever raises an error for it, it simply never
 destroys the frames.
+
+## Cancellation is observed on entry, not on resumption
+
+The check lives in the wrapper's `await_ready` and `await_suspend`, both of
+which run on the way *into* a suspension point. By the time the awaited thing
+completes and resumes the frame, they have already run, so nothing re-examines
+the stop state before the body continues.
+
+The consequence is sharpest in exactly the situation this component exists for.
+"The window closes while the coroutine is waiting" describes a task that is
+suspended, and suspended is the one state in which the current check cannot
+act:
+
+```cpp
+alt::cancellable_task on_press(window* w)
+{
+    co_await alt::resume_on(pool);   // suspended here when the stop arrives
+    w->show(compute());              // runs anyway: the stop is not seen yet
+    co_await alt::resume_on(ui);     // first point that observes the stop
+}
+```
+
+So safety currently depends on a convention the caller has to keep: let a
+`co_await` be the first thing after any resume that precedes work touching
+cancellable state. That is a real caveat and not one the guarantee above
+removes.
+
+If you cannot arrange that, the ways out are to re-check the state yourself
+after a resume, or to put a `co_await alt::cancellation_point{}` immediately
+after it, which both observes the stop and costs nothing when no stop was
+requested.
 
 ## A body with no further suspension point runs to completion
 
