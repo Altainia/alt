@@ -2,7 +2,7 @@
 
 **Header:** `<alt/memory.hpp>`
 
-Secure memory handling. Provides a guaranteed-erasure memory-zero function, an allocator adaptor that zeroes memory before releasing it, and a `std::basic_string` partial specialization that closes the SSO (short-string optimisation) security gap.
+Secure memory handling. Provides a guaranteed-erasure memory-zero function, an allocator adaptor that zeroes memory before releasing it, and a `std::basic_string` partial specialization that closes the SSO (short-string optimization) security gap.
 
 ---
 
