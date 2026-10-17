@@ -151,7 +151,8 @@ public:
 
     bool run_one();
     bool run_one_or_wait(const std::atomic<bool>* stop = nullptr);
-    std::size_t run_all();
+    std::size_t drain();
+    [[deprecated]] std::size_t run_all();
 
     [[nodiscard]] bool empty() const;
 
@@ -164,6 +165,14 @@ public:
 caller waiting on something this scheduler knows nothing about be released
 without arming any state here, which is how the driving `alt::sync_wait` waits
 on its own completion flag.
+
+Unlike `alt::run_loop` and `alt::thread_pool`, **`~manual_scheduler` discards
+whatever is still queued** rather than draining it. That is the right default
+for a scheduler whose whole purpose is that nothing runs unless a test says so,
+but it is a leak waiting to happen when a `manual_scheduler` is named as a
+`start_options::home`: the teardown a cancelled chain posts there is a
+coroutine frame's destruction, and discarding it leaks the frame with no
+diagnostic. Drain it before it goes out of scope.
 
 `notify_waiters` and `wake` are not the same thing, and the difference matters.
 `wake` is a latch: it arms a flag that stays set until a waiter consumes it, so
@@ -185,8 +194,11 @@ each item runs. Thread-safe.
   driving `alt::sync_wait` overload passes its own completion flag as `stop`,
   which is how it learns the awaited work finished without needing any state
   here.
-- `run_all()` runs `run_one()` in a loop until the queue is empty and returns
-  how many items ran.
+- `drain()` runs `run_one()` in a loop until the queue is empty and returns how
+  many items ran. `alt::run_loop` and `alt::thread_pool` spell the same
+  operation the same way.
+- `run_all()` is the old name for `drain()` and forwards to it unchanged. It is
+  deprecated and will warn; prefer `drain()`.
 - `notify_waiters()` prompts a blocked waiter to re-test its condition and arms
   nothing.
 - `wake()` releases a thread blocked in `run_one_or_wait()` without queueing

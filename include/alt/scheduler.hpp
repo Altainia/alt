@@ -209,8 +209,13 @@ namespace alt
 			return true;
 		}
 
-		/** Runs queued items until the queue is empty. Returns how many ran. */
-		std::size_t run_all()
+		/**
+		 * @brief Runs queued items until the queue is empty. Returns how many ran.
+		 *
+		 * The name every scheduler in this library shares: alt::run_loop and
+		 * alt::thread_pool spell the same operation the same way.
+		 */
+		std::size_t drain()
 		{
 			std::size_t count = 0;
 			while(run_one())
@@ -218,6 +223,17 @@ namespace alt
 				++count;
 			}
 			return count;
+		}
+
+		/**
+		 * @brief Deprecated. Use drain(), which this forwards to unchanged.
+		 *
+		 * @deprecated Renamed to drain() so all three schedulers spell the operation
+		 *             the same way. Kept so existing callers keep compiling.
+		 */
+		[[deprecated("use drain(); run_all() is the old name for it")]] std::size_t run_all()
+		{
+			return drain();
 		}
 
 		/** True when nothing is queued. */

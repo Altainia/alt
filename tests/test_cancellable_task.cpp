@@ -235,7 +235,7 @@ TEST_F(CancellableTaskTest, HomeSchedulerDefersDestructionOffTheObservingThread)
 	resume_parked();
 
 	EXPECT_EQ(live_frames, 3); // posted, not destroyed
-	EXPECT_EQ(home.run_all(), 1U);
+	EXPECT_EQ(home.drain(), 1U);
 	EXPECT_EQ(live_frames, 0);
 	EXPECT_FALSE(reached_end);
 }
@@ -375,7 +375,7 @@ TEST_F(CancellableTaskTest, ObservesCancellationWhenResumedThroughAScheduler)
 	ASSERT_EQ(live_frames, 1);
 
 	handle.request_stop();              // the window closes while the task is parked
-	EXPECT_EQ(scheduler.run_all(), 1U); // the awaited thing completes
+	EXPECT_EQ(scheduler.drain(), 1U); // the awaited thing completes
 
 	EXPECT_FALSE(ran_after_resume);
 	EXPECT_FALSE(reached_end);
@@ -413,7 +413,7 @@ TEST_F(CancellableTaskTest, ObservesCancellationWhenResumedOnAnotherThread)
 
 	handle.request_stop();
 
-	std::jthread worker{[&scheduler] { scheduler.run_all(); }};
+	std::jthread worker{[&scheduler] { scheduler.drain(); }};
 	worker.join();
 
 	EXPECT_FALSE(ran_after_resume);
@@ -432,12 +432,12 @@ TEST_F(CancellableTaskTest, ResumptionTeardownHonorsTheHomeScheduler)
 	ASSERT_EQ(live_frames, 1);
 
 	handle.request_stop();
-	EXPECT_EQ(work.run_all(), 1U); // the resumption observes the stop and posts
+	EXPECT_EQ(work.drain(), 1U); // the resumption observes the stop and posts
 
 	EXPECT_FALSE(ran_after_resume);
 	EXPECT_EQ(live_frames, 1); // posted, not yet destroyed
 
-	EXPECT_EQ(home.run_all(), 1U);
+	EXPECT_EQ(home.drain(), 1U);
 	EXPECT_EQ(live_frames, 0);
 }
 
@@ -448,7 +448,7 @@ TEST_F(CancellableTaskTest, AnUncancelledResumptionProceedsNormally)
 	alt::manual_scheduler scheduler;
 
 	auto handle = alt::start(resumes_through_a_scheduler(&scheduler));
-	EXPECT_EQ(scheduler.run_all(), 1U);
+	EXPECT_EQ(scheduler.drain(), 1U);
 
 	EXPECT_TRUE(ran_after_resume);
 	EXPECT_TRUE(reached_end);
