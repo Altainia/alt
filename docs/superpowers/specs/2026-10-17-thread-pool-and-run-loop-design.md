@@ -62,6 +62,14 @@ int main()
 }
 ```
 
+> **Superseded during implementation.** That shutdown loop is unsound for a
+> `thread_pool`: a worker that is mid-item is invisible to `empty()` and may
+> still post after the loop has seen both queues empty. Only destruction
+> establishes quiescence, because it closes the queue with a draining close and
+> joins the workers. The shipped guidance is to declare the loop before the pool
+> so reverse-order destruction gives pool-then-loop. Authority:
+> `docs/thread_pool.md`, "Shutting down two schedulers that post to each other".
+
 And the same `run_loop` as a guest of a platform loop:
 
 ```cpp
@@ -229,6 +237,17 @@ and the `main()` sketch above must show it rather than relying on declaration
 order, which in that sketch destroys the loop first and would hit exactly this
 hazard.
 
+> **Superseded during implementation.** The drain-until-empty recipe was
+> dropped, and the conclusion of this section reversed: declaration order is the
+> remedy and the recipe is the hazard. "Every one reports an empty queue" is not
+> a quiescence test for a pool, because a worker mid-item is invisible to
+> `empty()` and may post afterwards, including back onto a `run_loop` already
+> drained. Destruction is the only quiescence point, since it closes the queue
+> draining and joins the workers. Both component pages state that instead, and
+> say to declare the loop before the pool. `drain()` remains public for what it
+> is: running queued items on the calling thread. Authority:
+> `docs/thread_pool.md`, "Shutting down two schedulers that post to each other".
+
 ### Both components are compiled, not header-only
 
 Neither has templates in its interface, so both get a `.hpp` declaration and a
@@ -324,7 +343,12 @@ coroutine resumed on the pool may post its own continuation there.
 
 1. **`run_loop` is serial across threads, and reentrant on one.** Two threads
    must not be inside its running members concurrently; that is a precondition
-   failure, asserted in debug builds. One thread nesting them is permitted and
+   failure, asserted in debug builds.
+   <!-- Superseded during implementation: the assert covers `run`,
+   `run_pending` and `run_one_or_wait` only. `drain()` and `run_one()` carry the
+   same precondition with nothing enforcing it, because they are the inner loop
+   of the guarded members and guarding them would double-count every entry.
+   Authority: `docs/run_loop.md`, "Serial across threads, reentrant on one". --> One thread nesting them is permitted and
    supported, because the pattern is legitimate: a work item that calls
    `sync_wait(awaitable, loop)` drives the loop from inside a `run()` already on
    the stack below it, which is how a modal flow in a UI framework is written.
@@ -370,6 +394,7 @@ coroutine resumed on the pool may post its own continuation there.
 | trying to move a created pool | ill-formed; the `expected` is non-movable because the pool is |
 | posting from a pool thread | supported |
 | two threads calling `run()` on one loop | precondition failure, asserted in debug |
+| two threads calling `drain()` or `run_one()` on one loop | **superseded:** the same precondition failure, but nothing asserts it; those two take no entry guard. Authority: `docs/run_loop.md` |
 | `on_wake` posting to the loop it belongs to | permitted; it is just another post |
 
 ## Testing strategy

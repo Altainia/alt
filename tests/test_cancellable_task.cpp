@@ -374,7 +374,7 @@ TEST_F(CancellableTaskTest, ObservesCancellationWhenResumedThroughAScheduler)
 	auto handle = alt::start(resumes_through_a_scheduler(&scheduler));
 	ASSERT_EQ(live_frames, 1);
 
-	handle.request_stop();              // the window closes while the task is parked
+	handle.request_stop();            // the window closes while the task is parked
 	EXPECT_EQ(scheduler.drain(), 1U); // the awaited thing completes
 
 	EXPECT_FALSE(ran_after_resume);

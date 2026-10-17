@@ -153,7 +153,7 @@ TEST_F(SchedulerIntegrationTest, AnUncancelledTaskRunsThroughBothSchedulers)
 	ASSERT_TRUE(made.has_value()) << made.error().message();
 	alt::thread_pool& pool = *made;
 
-	auto handle = alt::start(hops_pool_then_loop(&pool, &loop));
+	const auto handle = alt::start(hops_pool_then_loop(&pool, &loop));
 
 	// Queued behind the resumption the start above posted.
 	pool.post(alt::work_item{.invoke = &pass_a_pool_fence, .state = &fence});

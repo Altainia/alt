@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <alt/thread_pool.hpp>
+#include <utility> // std::in_place
 
 namespace alt
 {

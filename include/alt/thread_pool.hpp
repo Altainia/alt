@@ -78,7 +78,20 @@ namespace alt
 		/** Runs whatever is still queued, then joins. See the note above. */
 		~thread_pool();
 
-		/** Queues an item. Safe from any thread, including a pool thread. */
+		/**
+		 * @brief Queues an item. Safe from any thread, including a pool thread.
+		 *
+		 * **An item posted after the destructor has released the last worker is
+		 * stranded**: it sits in a queue nothing will ever run again, and no
+		 * diagnostic says so. The cost is not a lost callback but a lost coroutine
+		 * chain, because a stranded item may be a resumption or a cancelled chain's
+		 * teardown, and either leaks the whole chain's frames. The pool cannot reject
+		 * such a post, and must not: a worker running an item during the destructor's
+		 * drain-down may post, and the drain relies on that post being accepted. So
+		 * this is the caller's obligation. Stop admitting work before the pool is
+		 * destroyed, and see the page's shutdown section for two schedulers that post
+		 * to each other.
+		 */
 		void post(work_item w);
 
 		/**

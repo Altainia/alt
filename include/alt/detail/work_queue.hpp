@@ -33,12 +33,20 @@ namespace alt::detail
 	class work_queue
 	{
 	public:
-		work_queue()                             = default;
+		/** Constructs an empty, open queue with no waiters and no wake latched. */
+		work_queue() = default;
+
+		/**
+		 * Neither copyable nor movable: it owns a mutex and a condition variable, and
+		 * the schedulers built on it hand out references that outlive any one call.
+		 */
 		work_queue(const work_queue&)            = delete;
 		work_queue& operator=(const work_queue&) = delete;
 		work_queue(work_queue&&)                 = delete;
 		work_queue& operator=(work_queue&&)      = delete;
-		~work_queue()                            = default;
+
+		/** Discards whatever is still queued. Draining is the owning scheduler's job. */
+		~work_queue() = default;
 
 		/**
 		 * @brief Queues an item.
@@ -79,7 +87,7 @@ namespace alt::detail
 		 * optional stop flag became true, wake() released it, or the queue is closed
 		 * and empty. A caller that cares which can ask is_closed().
 		 *
-		 * The stop flag joins the wait condition rather than being signalled through
+		 * The stop flag joins the wait condition rather than being signaled through
 		 * this queue, so a caller waiting on something this queue knows nothing about
 		 * is released without any state being left behind here.
 		 */

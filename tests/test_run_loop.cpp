@@ -5,6 +5,7 @@
 #include <alt/sync_wait.hpp>
 #include <alt/task.hpp>
 #include <atomic>
+#include <latch>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -368,4 +369,33 @@ TEST(RunLoop, AnItemPostedDuringRunRunsInTheSameRun)
 	loop.run();
 
 	EXPECT_EQ(ran, 4); // the original plus its three reposts, all in one run()
+}
+
+TEST(RunLoop, RunOnOneThreadRunsWorkPostedFromAnother)
+{
+	// Owner mode's primary liveness property, which was covered only by composition:
+	// a run() blocked on an empty queue wakes for a post from another thread. The
+	// latch is declared before the loop, per the rule that what a work item points
+	// at must outlive it.
+	std::latch    done{3};
+	alt::run_loop loop;
+
+	std::jthread runner{[&loop] { loop.run(); }};
+
+	for(int i = 0; i < 3; ++i)
+	{
+		loop.post(alt::work_item{
+		  .invoke = [](void* state) noexcept { static_cast<std::latch*>(state)->count_down(); }, .state = &done});
+	}
+
+	// Deterministic without a sleep: the latch cannot reach zero unless the loop
+	// thread really ran all three. If a post could not wake a blocked run(), this
+	// waits forever rather than passing by luck, which is what the suite's test
+	// timeout turns into a named failure.
+	done.wait();
+
+	loop.stop();
+	runner.join();
+
+	EXPECT_TRUE(loop.empty());
 }

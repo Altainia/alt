@@ -1662,6 +1662,12 @@ namespace alt
 		 * reports empty, then destroy them.
 		 */
 		std::size_t drain();
+		// Superseded during implementation. The shipped comment says the opposite:
+		// drain() is not a shutdown protocol, because a worker mid-item is invisible
+		// to empty() and may still post, so drain() plus empty() cannot establish that
+		// a pool is quiescent. Only destruction can, since it joins the workers.
+		// Authority: docs/thread_pool.md, "Shutting down two schedulers that post to
+		// each other".
 
 		/** How many threads this pool started. Always at least one. */
 		[[nodiscard]] std::size_t thread_count() const noexcept;
@@ -1970,12 +1976,20 @@ TEST_F(SchedulerIntegrationTest, AnUncancelledTaskRunsThroughBothSchedulers)
 	}
 	EXPECT_EQ(live_frames, 0);
 }
+// Superseded during implementation: the alternating drain is unsound for a pool
+// and does not appear in the shipped test, which lets destruction establish
+// quiescence instead. Authority: docs/thread_pool.md's shutdown section.
 
 TEST_F(SchedulerIntegrationTest, QuiescingTwoCrossPostingSchedulersTearsTheChainDown)
 {
 	// The case no destructor can handle on its own: the chain is parked on the pool
 	// with the loop as its home, so the teardown is posted from a pool thread onto
 	// the loop. Alternating drain() until both are empty is the documented way out.
+	//
+	// Superseded during implementation: it is not. The shipped test relies on
+	// destruction order instead -- the pool is destroyed first, which joins its
+	// workers, and the loop is destroyed afterwards and drains what they posted.
+	// Authority: docs/thread_pool.md's shutdown section.
 	alt::run_loop loop;
 	std::latch    release{1};
 	pool_blocker  blocker{.release = &release};
@@ -1995,6 +2009,11 @@ TEST_F(SchedulerIntegrationTest, QuiescingTwoCrossPostingSchedulersTearsTheChain
 
 	// The pool thread observes the stop and posts the teardown onto the loop, so it
 	// is the loop's drain that frees the frame, not the pool's.
+	//
+	// Superseded during implementation: this spin does not appear in the shipped
+	// test, because a worker mid-item is invisible to empty() and may still post,
+	// so draining both in turn cannot establish quiescence. Destruction order does
+	// it. Authority: docs/thread_pool.md's shutdown section.
 	while(live_frames != 0)
 	{
 		pool.drain();
@@ -2083,6 +2102,8 @@ Same structure, and these hazards:
 - [ ] **Step 3: Write the cross-posting shutdown section**
 
 This goes on both pages, because it is the one hazard neither component can fix alone: two schedulers that post to each other cannot be shut down by destructors, since each drains only its own queue and draining one can enqueue onto the other after it is gone. Give the alternating-`drain()` loop as the remedy, and say that a cancelled chain with one as its home is exactly how the situation arises.
+
+> **Superseded during implementation.** The alternating-`drain()` loop is not the remedy; the shipped pages warn against it. It cannot establish quiescence for a `thread_pool`, because a worker mid-item is invisible to `empty()` and may post after both queues have been seen empty. Only destruction establishes quiescence, since it closes the queue draining and then joins the workers. What both pages give as the remedy is destruction order: declare the loop before the pool, so reverse-order destruction gives pool-then-loop. Authority: `docs/thread_pool.md`, "Shutting down two schedulers that post to each other".
 
 - [ ] **Step 4: Point the scheduler page at the real schedulers, and update the README**
 

@@ -124,6 +124,16 @@ alt::run_loop loop{alt::run_loop_options{
 
 // Later, in the host loop's handler for that message:
 const std::size_t ran = loop.run_pending();
+
+// Then re-arm the host, because the wake hook will not. run_pending() is
+// bounded, and on_wake only fires on an empty-to-non-empty transition, so a
+// post that lands while the queue is still non-empty fires nothing. Without
+// this check that item sits queued with no nudge pending, and the loop stalls
+// until some unrelated host event happens to arrive.
+if(!loop.empty())
+{
+    // post the same message to the host loop that on_wake would have posted
+}
 ```
 
 The hook knows nothing about the loop and the loop knows nothing about the
@@ -137,8 +147,12 @@ and may not throw, for the same reason a `work_item` may not.
 `on_wake` fires when a post makes the queue go from empty to non-empty, not on
 every post. A host that expects one nudge per post will under-wake, and one
 nudge must therefore be enough to drain everything queued behind it. A
-handler that calls `run_pending()` must also notice when work remains, because
-that call is bounded (next section). Per-post delivery would cost a platform
+handler that calls `run_pending()` must also check `empty()` afterwards and
+re-arm the host itself when work remains, because that call is bounded (next
+section). Skipping that check is not under-waking, it is a **stall**: a
+cross-thread post that lands after `run_pending()` took its length snapshot,
+while the queue is still non-empty, fires no hook, so the item waits with no
+nudge pending until some unrelated host event arrives. Per-post delivery would cost a platform
 wakeup for every coroutine resumption, and would make a hook that posts to its
 own loop recurse without end.
 
