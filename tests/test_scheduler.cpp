@@ -83,12 +83,12 @@ TEST(ManualScheduler, RunAllStillWorksAsTheDeprecatedNameForDrain)
 	scheduler.post(item_for(first));
 	scheduler.post(item_for(second));
 
-#if defined(__GNUC__)
+#ifdef __GNUC__
 #	pragma GCC diagnostic push
 #	pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
 	EXPECT_EQ(scheduler.run_all(), 2U);
-#if defined(__GNUC__)
+#ifdef __GNUC__
 #	pragma GCC diagnostic pop
 #endif
 
