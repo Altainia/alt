@@ -96,6 +96,47 @@ TEST(WorkQueue, WakeIsConsumedByOneWaiter)
 	q.close(); // releases the waiter so the thread can join
 }
 
+TEST(WorkQueue, TheWakeIsConsumedEvenOnThePathThatHandsOutAnItem)
+{
+	// The reason this header exists, pinned here rather than only through
+	// manual_scheduler: the latch is consumed on *every* exit from pop_or_wait,
+	// including the one that returns an item. Leaving it armed on that path would
+	// make the next call return false on a stale signal, with nothing queued and no
+	// wake outstanding.
+	queue q;
+
+	q.push(tagged{.tag = 1});
+	q.wake(); // a queued item and a wake pending at the same moment
+
+	tagged popped{};
+	ASSERT_TRUE(q.pop_or_wait(popped, nullptr));
+	EXPECT_EQ(popped.tag, 1);
+
+	// The latch must be gone, so this waiter has to block for a real post.
+	std::atomic<bool> returned{false};
+	std::atomic<int>  got{0};
+	std::jthread      waiter{[&] {
+    tagged taken{};
+    if(q.pop_or_wait(taken, nullptr))
+    {
+      got.store(taken.tag, std::memory_order_release);
+    }
+    returned.store(true, std::memory_order_release);
+  }};
+
+	// A sleep is the only way to observe "still parked", as in the test above. The
+	// assertion can only fail in the direction that means the latch survived the
+	// item hand-off, so it will not flake red.
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	EXPECT_FALSE(returned.load(std::memory_order_acquire));
+
+	q.push(tagged{.tag = 2});
+	waiter.join();
+
+	EXPECT_TRUE(returned.load(std::memory_order_acquire));
+	EXPECT_EQ(got.load(std::memory_order_acquire), 2);
+}
+
 TEST(WorkQueue, AStopFlagReleasesAWaiterAndArmsNothing)
 {
 	queue             q;
@@ -114,7 +155,22 @@ TEST(WorkQueue, AStopFlagReleasesAWaiterAndArmsNothing)
 	waiter.join();
 
 	EXPECT_TRUE(returned.load(std::memory_order_acquire));
-	EXPECT_FALSE(q.is_closed()); // notify armed nothing
+
+	// "notify armed nothing" is the claim, and is_closed() cannot test it: notify()
+	// does not touch m_closed under any mutation, so that assertion held
+	// vacuously. The property that bites is that no signal was left behind for a
+	// later waiter to consume, so a following pop_or_wait still blocks.
+	std::atomic<bool> second_returned{false};
+	std::jthread      second{[&] {
+    tagged ignored{};
+    q.pop_or_wait(ignored, nullptr);
+    second_returned.store(true, std::memory_order_release);
+  }};
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	EXPECT_FALSE(second_returned.load(std::memory_order_acquire));
+
+	q.close(); // releases the waiter so the thread can join
 }
 
 TEST(WorkQueue, CloseReleasesEveryWaiterAndStaysReleased)
