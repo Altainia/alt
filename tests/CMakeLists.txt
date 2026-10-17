@@ -48,6 +48,7 @@ add_executable(alt_tests
     test_scheduler.cpp
     test_work_queue.cpp
     test_run_loop.cpp
+    test_thread_pool.cpp
     test_cancellation.cpp
     test_task.cpp
     test_sync_wait.cpp
