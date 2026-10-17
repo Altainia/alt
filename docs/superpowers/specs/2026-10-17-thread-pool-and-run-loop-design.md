@@ -124,7 +124,6 @@ Things that would make this a failure even if it worked:
 |---|---|---|
 | `post` | both | queues an item; callable from any thread |
 | `drain()` | both | runs everything queued, returns how many items ran |
-| `abandon()` | both | stops accepting, discards the queue, waits for in-flight items |
 | `run()` | `run_loop` | drains, blocking when idle, until `stop()` |
 | `stop()` | `run_loop` | makes `run()` return after the current item |
 | `run_pending()` | `run_loop` | drains a bounded batch without blocking, returns the count |
@@ -145,7 +144,7 @@ resumption and teardown, which is this phase's stated anti-goal; and a driving
 since only a work item can set the flag it waits on.
 
 `thread_pool` has no `run()` and therefore no `stop()`: its lifecycle is
-construct, post, destroy, with `drain()` and `abandon()` as the explicit controls.
+construct, post, destroy, with `drain()` as the explicit control.
 `run_loop` has no public `wake()`; `stop()` covers ending a loop and
 `notify_waiters()` covers nudging a blocked waiter.
 
@@ -185,7 +184,7 @@ problem that composition already solves. This is a decision taken here, not a
 user request, and the counter-case is a consumer who wants one pool sized to the
 machine with mixed work in it; they are asked to make two smaller ones instead.
 
-### Destruction drains; abandoning is explicit
+### Destruction drains, and that is the whole shutdown story
 
 `~thread_pool` and `~run_loop` run everything already queued, then stop.
 
@@ -203,10 +202,14 @@ item that posts more work extends it, and a resumption that blocks forever hangs
 it. That is the right trade because the failure is loud, where the leak is
 invisible.
 
-For shutdown under duress there is an explicit escape: `abandon()` stops
-accepting work, discards what is queued, and waits only for items currently
-executing. Never the default, and documented as leaking any coroutine frames
-whose resumptions were discarded.
+There is deliberately no way to discard queued work. An earlier draft had an
+`abandon()` for shutdown under duress, and it was cut: nothing has asked for it,
+it was the only member whose documented behavior was "this leaks coroutine
+frames", and it brought with it a second shutdown path, an interaction with the
+post guarantee, and its own tests. Draining is now the single story. Should a
+consumer genuinely need to walk away from queued work rather than wait for it,
+adding that back is purely additive and can be specified then, against a real
+case rather than an imagined one.
 
 ### Two cross-posting schedulers cannot be shut down by destructors alone
 
@@ -332,10 +335,10 @@ coroutine resumed on the pool may post its own continuation there.
    immediately rather than blocking; this is what makes a shutdown race between
    the two safe. `stop()` is also idempotent.
 3. **`post` after `stop()` is queued and runs if anything drains it**, including
-   the destructor. `post` after `abandon()` is accepted and never runs, because
-   `abandon()` stops accepting; that is not an error, since a coroutine
+   the destructor. There is no state in which a post is rejected: a coroutine
    completing concurrently with shutdown cannot reasonably be asked to check
-   first, and it is the leak the `abandon()` documentation has to name.
+   first, and with no way to discard a queue there is nothing for a rejection to
+   protect.
 4. **Neither component is copyable or movable.** Both own threads or a thread's
    loop, and references to them are held by `scheduler_ref` and by awaiters
    inside suspended coroutine frames.
@@ -361,7 +364,6 @@ coroutine resumed on the pool may post its own continuation there.
 | a work item posting during `run()` | runs in the same `run()` |
 | `~thread_pool` with queued work | drains it, then joins |
 | `~thread_pool` with a work item that posts more work | drains that too; shutdown is as long as the work |
-| `abandon()` with queued coroutine resumptions | discarded; those frames leak, and this is documented |
 | `thread_pool::create(0)` | `hardware_concurrency()` threads, clamped to at least one |
 | `hardware_concurrency()` returning zero | clamped to one thread |
 | a thread failing to start partway through creation | threads already created are joined, the error is returned, no pool exists |
@@ -394,12 +396,11 @@ phase, not a nicety.
   as its home, quiesced by alternating `drain()` until both are empty, asserting
   the teardown ran and no frame leaked. This is the case destructors alone cannot
   handle.
-- **`thread_pool`:** every posted item runs; posting from a pool thread; drain on
-  destruction, asserted by counting completions after the destructor returns;
-  `abandon()` discarding queued work while finishing in-flight work; thread count
-  clamped at one for both zero and a zero `hardware_concurrency`; the factory's
-  error path, asserted with a `static_assert` that the pool is neither copyable
-  nor movable and that the returned `expected` is not movable either.
+- **`thread_pool`:** every posted item runs; posting from a pool thread; drain
+  on destruction, asserted by counting completions after the destructor returns;
+  thread count clamped at one for both a requested zero and a zero
+  `hardware_concurrency`; and a `static_assert` that the pool is neither
+  copyable nor movable and that the returned `expected` is not movable either.
 - **Integration:** a `cancellable_task` that hops to the pool and back to the
   loop, cancelled while parked on each, asserting the resumption check from the
   issue #4 fix still holds through real schedulers rather than the test ones.
