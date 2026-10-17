@@ -9,6 +9,12 @@ concrete schedulers and the awaitable that hops a coroutine onto one.
 #include <alt/scheduler.hpp>
 ```
 
+The two schedulers on this page, `trampoline_scheduler` and `manual_scheduler`,
+are a call-stack guard and a hand-pumped test scheduler. The ones a program
+actually runs on are [`alt::run_loop`](run_loop.md) and
+[`alt::thread_pool`](thread_pool.md). All of these are built on one internal
+queue.
+
 ## `work_item` and the `scheduler` concept
 
 ```cpp
