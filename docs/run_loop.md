@@ -83,15 +83,31 @@ on an internal condition variable when there are none, until another thread
 calls `stop()`.
 
 ```cpp
+void say(void*) noexcept
+{
+    std::puts("ran on the loop thread");
+}
+
+void stop_loop(void* state) noexcept
+{
+    static_cast<alt::run_loop*>(state)->stop();
+}
+
 alt::run_loop loop;
 std::thread   worker{[&loop] { loop.run(); }};
 
-loop.post({.invoke = [](void*) noexcept { std::puts("ran on the loop thread"); },
-           .state  = nullptr});
+loop.post({.invoke = &say, .state = nullptr});
+loop.post({.invoke = &stop_loop, .state = &loop});   // queued behind say, so say has run
 
-loop.stop();   // run() returns after the current item
-worker.join();
+worker.join();   // run() returned after stop_loop ran
 ```
+
+The stop is posted as an item rather than called from the main thread, on
+purpose. `run()` checks for a stop before it takes the next item, so a
+`loop.stop()` from the main thread right after the first `post` could land
+before the loop thread had run anything, and the item would then run in the
+loop's destructor, on the main thread. Queued in order, the stop item cannot run
+until `say` has.
 
 Declare the loop before the thread, as above, so that the loop outlives it.
 
@@ -122,8 +138,9 @@ and may not throw, for the same reason a `work_item` may not.
 every post. A host that expects one nudge per post will under-wake, and one
 nudge must therefore be enough to drain everything queued behind it. A
 handler that calls `run_pending()` must also notice when work remains, because
-that call is bounded (next section). Per-post delivery would cost a platform wakeup for every coroutine resumption, and would make a
-hook that posts to its own loop recurse without end.
+that call is bounded (next section). Per-post delivery would cost a platform
+wakeup for every coroutine resumption, and would make a hook that posts to its
+own loop recurse without end.
 
 ### `run_pending()` is bounded
 
@@ -148,8 +165,12 @@ with no diagnostic.
 
 Two threads must not be inside the loop's running members (`run`, `drain`,
 `run_pending`, `run_one`, `run_one_or_wait`) at once. That is a precondition,
-asserted in debug builds. `post()` is the exception: it is safe from any
-thread, and is how work reaches the loop.
+and only part of it is checked: debug builds assert it in `run`, `run_pending`
+and `run_one_or_wait`. `drain()` and `run_one()` carry the same precondition
+with nothing to enforce it, so calling either from a second thread while
+another thread is inside the loop is silently undefined behavior in every build.
+`post()` is the exception: it is safe from any thread, and is how work reaches
+the loop.
 
 One thread nesting those members is supported, because that is how a modal flow
 is written: a work item calls `sync_wait(awaitable, loop)`, which drives the
@@ -242,10 +263,10 @@ That stops being true as soon as another scheduler posts to the loop. A
 may post to it after any drain. Two schedulers that post to each other cannot be
 shut down by their destructors alone, and no sequence of `drain()` calls
 establishes quiescence between them. A cancelled chain whose home scheduler is
-one of them is exactly how the situation arises. The remedy is to destroy the pool before the loop, which means declaring the
-loop first, and to stop any chains that hop in both directions. The pool's
-destruction joins its workers, so nothing can post to the loop afterwards, and
-the loop's destructor then drains whatever the pool left behind. The full
-reasoning, and the caveat that the library does not report when a cancelled
-chain's teardown has finished, are in
+one of them is exactly how the situation arises. The remedy is to destroy the
+pool before the loop, which means declaring the loop first, and to stop any
+chains that hop in both directions. The pool's destruction joins its workers, so
+nothing can post to the loop afterwards, and the loop's destructor then drains
+whatever the pool left behind. The full reasoning, and the caveat that the
+library does not report when a cancelled chain's teardown has finished, are in
 [thread_pool](thread_pool.md#shutting-down-two-schedulers-that-post-to-each-other).

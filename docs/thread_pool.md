@@ -208,8 +208,9 @@ The remedy rests on destruction order, and it is sound because of two facts:
 So destroy the pool first, then the loop. That is a declaration-order
 requirement: **declare the loop before the pool**, so that reverse-order
 destruction gives pool-then-loop. It is the same rule as
-[declaring what work items point at before the pool](#declare-what-work-items-point-at-before-the-pool),
-applied to two schedulers. Getting it backwards destroys the loop first, and the
+[declaring what work items point at before the
+pool](#declare-what-work-items-point-at-before-the-pool), applied to two
+schedulers. Getting it backwards destroys the loop first, and the
 pool's drain-down then posts into a destroyed loop, which is a use-after-free
 and not merely stale work.
 
