@@ -207,11 +207,102 @@ namespace alt::detail
 		cancellation_context* m_context;
 	};
 
+	/** True for alt::detail::resume_on_awaiter, whose resumption the cancellation layer intercepts. */
+	template<typename T>
+	inline constexpr bool is_resume_on_awaiter = false;
+
+	template<typename S>
+	inline constexpr bool is_resume_on_awaiter<resume_on_awaiter<S>> = true;
+
+	/**
+	 * @brief A resume_on that observes the stop state when the scheduler resumes it.
+	 *
+	 * The generic wrapper below can only check on the way into a suspension point.
+	 * That leaves the state this component exists to be cancelled in, suspended,
+	 * unprotected: a task parked here would resume and run body code until its next
+	 * co_await. See issue #4.
+	 *
+	 * Intercepting a resumption requires knowing how the resumption happens, so this
+	 * cannot be done generically. It is done for the resumptions alt owns, of which
+	 * this is one, and foreign awaitables remain checked on entry only.
+	 *
+	 * The posted work item carries this awaiter rather than the frame handle, because
+	 * it needs both the handle and the context at resumption time. The awaiter lives
+	 * in the coroutine frame, which stays alive while suspended, so that is safe.
+	 */
+	template<typename S>
+	class checked_resume_on
+	{
+	public:
+		checked_resume_on(S& scheduler, cancellation_context* context) noexcept:
+		  m_scheduler(std::addressof(scheduler)),
+		  m_context(context)
+		{}
+
+		bool await_ready() const noexcept
+		{
+			return false;
+		}
+
+		void await_suspend(std::coroutine_handle<> h)
+		{
+			// On entry, as before: nothing is started for a chain already cancelled.
+			if(m_context != nullptr && m_context->stop_requested())
+			{
+				abandon_chain(*m_context);
+				return;
+			}
+
+			m_handle = h;
+
+			// The post may run on another thread and resume or abandon before this call
+			// returns, destroying this awaiter along with the frame. It must be the last
+			// statement, and nothing may be read from *this afterwards.
+			m_scheduler->post(alt::work_item{.invoke = &resume_or_abandon, .state = this});
+		}
+
+		void await_resume() const noexcept
+		{}
+
+	private:
+		static void resume_or_abandon(void* state) noexcept
+		{
+			auto* const self = static_cast<checked_resume_on*>(state);
+
+			// Copied out before anything is destroyed, for the same reason
+			// abandon_chain copies: the teardown frees the frame this awaiter lives in.
+			cancellation_context* const   context = self->m_context;
+			const std::coroutine_handle<> handle  = self->m_handle;
+
+			if(context != nullptr && context->stop_requested())
+			{
+				abandon_chain(*context);
+				return;
+			}
+
+			handle.resume();
+		}
+
+		S*                      m_scheduler;
+		std::coroutine_handle<> m_handle;
+		cancellation_context*   m_context;
+	};
+
 	/** Wraps any awaitable in the cancellation check. A null context disables it. */
 	template<typename A>
 	auto make_cancellation_checked(A&& a, cancellation_context* context)
 	{
-		return cancellation_checked_awaitable<A>{std::forward<A>(a), context};
+		if constexpr(is_resume_on_awaiter<std::remove_cvref_t<A>>)
+		{
+			// Rebuilt rather than wrapped, so the stop state is also checked when the
+			// scheduler resumes the frame rather than only on the way in.
+			using scheduler_type = typename std::remove_cvref_t<A>::scheduler_type;
+			return checked_resume_on<scheduler_type>{a.scheduler(), context};
+		}
+		else
+		{
+			return cancellation_checked_awaitable<A>{std::forward<A>(a), context};
+		}
 	}
 
 }

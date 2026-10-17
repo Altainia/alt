@@ -304,8 +304,24 @@ namespace alt
 		class resume_on_awaiter
 		{
 		public:
+			using scheduler_type = S;
+
 			explicit resume_on_awaiter(S& s) noexcept: m_scheduler(std::addressof(s))
 			{}
+
+			/**
+			 * The scheduler this will resume on.
+			 *
+			 * The cancellation layer uses this to rebuild the awaiter as one that also
+			 * checks the stop state when the scheduler resumes it. It cannot simply wrap
+			 * this awaiter for that, because interception has to happen at the
+			 * resumption, and this header cannot see a cancellation context: the
+			 * cancellation header includes this one, not the other way round.
+			 */
+			[[nodiscard]] S& scheduler() const noexcept
+			{
+				return *m_scheduler;
+			}
 
 			bool await_ready() const noexcept
 			{

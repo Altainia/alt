@@ -13,12 +13,22 @@ reaches a suspension point. This component exists for one scenario:
 4. Meanwhile the window closes and requests cancellation.
 5. The calculation finishes and the coroutine resumes on the worker thread.
 6. At its next `co_await`, the coroutine machinery destroys the whole chain
-   instead of resuming. No user coroutine body code runs, so nothing touches
-   the dead window.
+   instead of resuming. From that point on nothing in the body runs, so
+   nothing touches the dead window.
 
 Point 6 is the guarantee: it is provided by the coroutine machinery itself
 and does not depend on whatever is being awaited cooperating with
 cancellation.
+
+Step 5 is the interesting one. Cancellation is checked on entry to every
+suspension point, and also at the resumptions this library owns: a hop through
+`alt::resume_on`, and a child `alt::task` completing and handing control back
+to its parent. So the resume in step 5 does not happen at all if a stop was
+requested while the task sat there, and step 6's teardown takes its place.
+
+A foreign awaitable that resumes the frame itself is the exception, and it is
+checked on entry only. See [Foreign awaitables are checked on entry
+only](#foreign-awaitables-are-checked-on-entry-only).
 
 ```cpp
 #include <alt/cancellable_task.hpp>
@@ -233,6 +243,45 @@ A home scheduler that is supplied but never pumped, or one destroyed while
 this teardown work is still queued, leaks the entire chain silently: nothing
 about the deferred path ever raises an error for it, it simply never
 destroys the frames.
+
+## Foreign awaitables are checked on entry only
+
+Cancellation is checked in two places. On entry to every suspension point,
+which covers anything you can `co_await`. And at the resumptions this library
+owns, of which there are two: `alt::resume_on` returning from a scheduler, and
+a child `alt::task` completing and transferring back to its parent. Both of
+those observe the stop and tear the chain down instead of resuming.
+
+What is not covered is a foreign awaitable that resumes the frame directly,
+because intercepting a resumption means knowing how that resumption happens:
+
+```cpp
+// A hand-written awaiter that hands the frame to a thread of its own.
+struct my_awaiter
+{
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h) { start_thread_that_resumes(h); }
+    void await_resume() const noexcept {}
+};
+
+alt::cancellable_task on_press(window* w)
+{
+    co_await my_awaiter{};   // a stop arriving here is not seen on the way back
+    w->show(result());       // so this runs
+    co_await alt::cancellation_point{};
+}
+```
+
+Swap `my_awaiter{}` for `alt::resume_on(pool)` and the stop is observed, the
+chain is destroyed, and `w->show(...)` never runs.
+
+For an awaitable you do not control, put a `co_await alt::cancellation_point{}`
+immediately after the resume. It observes the stop and costs one atomic load
+when there is nothing to observe.
+
+Note that this applies per frame. In a chain where a child is parked on a
+foreign awaitable, that child's own body resumes and runs; the transfer back to
+its parent is then intercepted, so the parent's body does not.
 
 ## A body with no further suspension point runs to completion
 

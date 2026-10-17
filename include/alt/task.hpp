@@ -39,6 +39,22 @@ namespace alt
 
 				[[nodiscard]] std::coroutine_handle<> await_suspend(std::coroutine_handle<> /*current*/) const noexcept
 				{
+					// Transferring back to the continuation is a resumption alt owns, so it
+					// observes the stop. Without this a cancelled chain would resume its
+					// parent on completion, and the parent's body would run until its own
+					// next co_await. See issue #4.
+					//
+					// DELICATE, in the same way abandon_chain is: the teardown destroys this
+					// frame, whose await_suspend is on the stack. Read what is needed first
+					// and touch nothing through self afterwards.
+					cancellation_context* const context = self->cancellation_context_pointer();
+
+					if(context != nullptr && context->stop_requested())
+					{
+						abandon_chain(*context);
+						return std::noop_coroutine();
+					}
+
 					return self->m_continuation ? self->m_continuation : std::noop_coroutine();
 				}
 
