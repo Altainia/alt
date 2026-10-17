@@ -4,6 +4,6 @@ namespace alt
 {
 	std::string_view version() noexcept
 	{
-		return "1.6.0";
+		return "1.7.0";
 	}
 } // namespace alt
