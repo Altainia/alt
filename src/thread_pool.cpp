@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <alt/thread_pool.hpp>
-#include <utility>
 
 namespace alt
 {
@@ -20,6 +19,12 @@ namespace alt
 		catch(const std::system_error& failure)
 		{
 			return std::unexpected(failure.code());
+		}
+		catch(...)
+		{
+			// std::thread may also fail with std::bad_alloc for its internal state. That
+			// is the same recoverable "could not start" condition, so report it.
+			return std::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
 		}
 	}
 

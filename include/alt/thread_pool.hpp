@@ -84,9 +84,9 @@ namespace alt
 		/**
 		 * @brief Runs queued items on the calling thread. Returns how many ran.
 		 *
-		 * For quiescing a set of schedulers that post to each other, which no
-		 * destructor can do alone: call drain() on each in turn until every one
-		 * reports empty, then destroy them.
+		 * This is not a shutdown protocol. A worker mid-item is invisible to empty()
+		 * and may still post, so drain() plus empty() cannot establish that a pool is
+		 * quiescent. Only destruction can, because it joins the workers.
 		 */
 		std::size_t drain();
 

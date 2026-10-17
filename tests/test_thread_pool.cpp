@@ -77,11 +77,14 @@ TEST(ThreadPool, AnExplicitThreadCountIsHonored)
 
 TEST(ThreadPool, RunsEveryPostedItem)
 {
+	// Declared before the pool: the pool's destructor joins workers that may still
+	// touch it, so it must be destroyed first.
+	tally seen;
+
 	auto made = alt::thread_pool::create(4);
 	ASSERT_TRUE(made.has_value()) << made.error().message();
 	alt::thread_pool& pool = *made;
 
-	tally seen;
 	for(int i = 0; i < 200; ++i)
 	{
 		pool.post(item_for(seen));
@@ -119,11 +122,14 @@ TEST(ThreadPool, AWorkItemMayPostToItsOwnPool)
 	// continuation there.
 	tally seen;
 
+	// Declared before the pool so the draining destructor runs while it is alive.
+	reposter r{.seen = &seen};
+
 	{
 		auto made = alt::thread_pool::create(2);
 		ASSERT_TRUE(made.has_value()) << made.error().message();
 
-		reposter r{.pool = &*made, .seen = &seen};
+		r.pool = &*made;
 		made->post(alt::work_item{.invoke = &repost, .state = &r});
 	}
 
@@ -131,21 +137,58 @@ TEST(ThreadPool, AWorkItemMayPostToItsOwnPool)
 	EXPECT_EQ(seen.runs.load(std::memory_order_acquire), 2);
 }
 
+namespace
+{
+	struct gate_and_probe
+	{
+		std::atomic<bool>            started{false};
+		std::atomic<bool>            release{false};
+		std::atomic<int>             probe_runs{0};
+		std::atomic<std::thread::id> probe_thread;
+	};
+
+	void hold_worker(void* state) noexcept
+	{
+		auto* const g = static_cast<gate_and_probe*>(state);
+		g->started.store(true, std::memory_order_release);
+		while(!g->release.load(std::memory_order_acquire))
+		{
+			std::this_thread::yield();
+		}
+	}
+
+	void record_thread(void* state) noexcept
+	{
+		auto* const g = static_cast<gate_and_probe*>(state);
+		g->probe_thread.store(std::this_thread::get_id(), std::memory_order_release);
+		g->probe_runs.fetch_add(1, std::memory_order_release);
+	}
+}
+
 TEST(ThreadPool, DrainRunsQueuedWorkOnTheCallingThread)
 {
-	// What a consumer uses to quiesce a pool and a loop that post to each other,
-	// which no destructor can do on its own.
+	// Deterministic: the pool's only worker is held inside a gate item, so the probe
+	// item can only be run by whoever calls drain().
+	gate_and_probe g;
+
 	auto made = alt::thread_pool::create(1);
 	ASSERT_TRUE(made.has_value()) << made.error().message();
 
-	tally seen;
-	made->post(item_for(seen));
-
-	while(seen.runs.load(std::memory_order_acquire) == 0)
+	made->post(alt::work_item{.invoke = &hold_worker, .state = &g});
+	while(!g.started.load(std::memory_order_acquire))
 	{
-		made->drain();
+		std::this_thread::yield();
 	}
-	EXPECT_GE(seen.runs.load(std::memory_order_acquire), 1);
+
+	made->post(alt::work_item{.invoke = &record_thread, .state = &g});
+	EXPECT_FALSE(made->empty());
+
+	EXPECT_EQ(made->drain(), 1U);
+	EXPECT_EQ(g.probe_runs.load(std::memory_order_acquire), 1);
+	EXPECT_EQ(g.probe_thread.load(std::memory_order_acquire), std::this_thread::get_id());
+	EXPECT_TRUE(made->empty());
+
+	g.release.store(true, std::memory_order_release);
 }
 
 TEST(ThreadPool, DestroyingAnIdlePoolReturns)
