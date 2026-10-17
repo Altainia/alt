@@ -46,6 +46,7 @@ add_executable(alt_tests
     test_awaitable.cpp
     test_coroutine.cpp
     test_scheduler.cpp
+    test_work_queue.cpp
     test_cancellation.cpp
     test_task.cpp
     test_sync_wait.cpp
