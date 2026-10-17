@@ -225,6 +225,7 @@ TEST(WorkQueue, CloseReleasesEveryWaiterAndStaysReleased)
 	queue                     q;
 	std::atomic<int>          returned{0};
 	std::vector<std::jthread> waiters;
+	waiters.reserve(4);
 
 	for(int i = 0; i < 4; ++i)
 	{
@@ -771,7 +772,7 @@ namespace
 	struct wake_counter
 	{
 		std::atomic<int>         calls{0};
-		std::atomic<std::thread::id> last{};
+		std::atomic<std::thread::id> last;
 	};
 
 	void count_wake(void* state) noexcept
@@ -981,7 +982,20 @@ TEST(RunLoop, OneThreadMayDriveTheLoopFromInsideARunItem)
 
 	loop.post(alt::work_item{.invoke = [](void* state) noexcept {
 								 auto* const nn = static_cast<nested*>(state);
-								 *nn->inner     = alt::sync_wait(hops(*nn->loop), *nn->loop);
+
+								 // A work item may not throw and sync_wait can, so driving the
+								 // loop from inside one means catching. Without this the lambda
+								 // is noexcept with a throwing call in it, and an exception from
+								 // the awaited work would terminate the process.
+								 try
+								 {
+									 *nn->inner = alt::sync_wait(hops(*nn->loop), *nn->loop);
+								 }
+								 catch(...)
+								 {
+									 *nn->inner = -1;
+								 }
+
 								 nn->loop->stop();
 							 },
 							 .state = &n});
@@ -1009,7 +1023,7 @@ TEST(RunLoop, AWakeHookThatPostsToItsOwnLoopDoesNotRecurse)
 									  h->calls.fetch_add(1, std::memory_order_release);
 									  h->loop->post(alt::work_item{.invoke = [](void*) noexcept {}, .state = nullptr});
 								  },
-								  .state = &hook}};
+								  .state = &hook}}};
 
 	hook.loop = &loop;
 
@@ -2052,6 +2066,7 @@ Cover what it is, both modes with a worked example each, the full public API, an
 | The wake hook is edge-triggered | A host that expects a nudge per post will under-wake. Say it fires on the empty-to-non-empty transition. |
 | Serial across threads, reentrant on one | Two threads inside it is a precondition failure; one thread nesting is supported. Both halves matter, because a UI consumer will write the nesting case. |
 | The loop must outlive every suspension targeting it | Inherited from `scheduler_ref`, but this is where a caller treats a loop as a local. |
+| Driving the loop from inside a work item means catching | A work item callback may not throw and `sync_wait` can, so an exception from the awaited work would terminate the process. Found by clang-tidy on the nesting test during execution, not anticipated in the design. Show the `try`/`catch` in the nesting example. |
 
 - [ ] **Step 2: Write `docs/thread_pool.md`**
 

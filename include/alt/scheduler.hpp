@@ -129,6 +129,7 @@ namespace alt
 	{
 	public:
 		/** Runs w now, or queues it if this thread is already draining. */
+		// NOLINTNEXTLINE(readability-convert-member-functions-to-static): making this static relocates the diagnostic to every call site, as readability-static-accessed-through-instance, including in consumers' files where no suppression of ours can reach it. Newly visible because phase 3's compiled sources are analyzed under the root config, where tests/.clang-tidy's disables do not apply.
 		void post(work_item w) const
 		{
 			auto& state = detail::this_thread_trampoline();
@@ -284,7 +285,7 @@ namespace alt
 				return *m_scheduler;
 			}
 
-			bool await_ready() const noexcept
+			[[nodiscard]] bool await_ready() const noexcept
 			{
 				return false;
 			}

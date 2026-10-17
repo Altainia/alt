@@ -124,6 +124,7 @@ TEST(WorkQueue, CloseReleasesEveryWaiterAndStaysReleased)
 	queue                     q;
 	std::atomic<int>          returned{0};
 	std::vector<std::jthread> waiters;
+	waiters.reserve(4);
 
 	for(int i = 0; i < 4; ++i)
 	{
