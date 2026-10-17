@@ -4,7 +4,7 @@
 #include <alt/scheduler.hpp>
 #include <atomic>
 #include <cstddef>
-#include <thread>
+#include <cstdint>
 
 namespace alt
 {
@@ -58,6 +58,7 @@ namespace alt
 	class run_loop
 	{
 	public:
+		/** Constructs an idle loop with no host wake hook. */
 		run_loop() = default;
 
 		/** Constructs a loop with a host wake hook. */
@@ -74,7 +75,12 @@ namespace alt
 		/** Queues an item and nudges the host if a hook was supplied. Any thread. */
 		void post(work_item w);
 
-		/** Runs queued items until the queue is empty. Returns how many ran. */
+		/**
+		 * @brief Runs queued items until the queue is empty. Returns how many ran.
+		 *
+		 * Carries the serial precondition without enforcing it: this is the inner loop
+		 * of the guarded running members, so it takes no entry guard.
+		 */
 		std::size_t drain();
 
 		/** Drains, blocking when idle, until stop(). */
@@ -94,7 +100,11 @@ namespace alt
 		 */
 		std::size_t run_pending();
 
-		/** Runs the oldest queued item. False when the queue was empty. */
+		/**
+		 * @brief Runs the oldest queued item. False when the queue was empty.
+		 *
+		 * As with drain(), the serial precondition applies but is not enforced here.
+		 */
 		bool run_one();
 
 		/** Blocks until an item can be run, then runs it. See alt::manual_scheduler. */
@@ -107,7 +117,23 @@ namespace alt
 		[[nodiscard]] bool empty() const;
 
 	private:
-		/** Debug-only guard for the serial precondition. Permits nesting on one thread. */
+		/**
+		 * @brief Guards the serial precondition, permitting nesting on one thread.
+		 *
+		 * The owning thread's identity and the nesting depth live together in one
+		 * atomic word, and an entry is a single compare-exchange on it. That is what
+		 * makes the check exact in both directions rather than best-effort: there is
+		 * no window in which two threads can both see an unowned loop and both claim
+		 * it, and the last exit clears owner and depth together, so a legal sequential
+		 * hand-off can never see a stale owner at depth zero.
+		 *
+		 * The diagnostic is the assert, so it is debug-only. The packed word is
+		 * maintained in every build, because the exit path needs the depth.
+		 *
+		 * One residual: thread identities come from a process-wide 32-bit counter, so
+		 * two live threads could share an identity only once 2^32 threads have been
+		 * created in the process.
+		 */
 		class entry_guard
 		{
 		public:
@@ -120,13 +146,19 @@ namespace alt
 
 		private:
 			run_loop* m_loop;
+
+			// False when the entry was a precondition violation, so the exit path knows
+			// not to decrement a depth belonging to the thread that really owns the loop.
+			bool m_entered = false;
 		};
 
 		detail::work_queue<work_item> m_queue;
 		run_loop_options              m_options{};
 		std::atomic<bool>             m_stopped{false};
-		std::atomic<std::thread::id>  m_owner;
-		std::atomic<int>              m_depth{0};
+
+		// The owning thread's identity in the high half, the nesting depth in the low
+		// half. Zero means unowned. See entry_guard.
+		std::atomic<std::uint64_t> m_entry_state{0};
 	};
 
 }
