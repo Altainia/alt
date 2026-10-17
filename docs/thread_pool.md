@@ -195,11 +195,41 @@ other, destructors alone cannot shut them down either: each drains only its own
 queue, and draining one can enqueue onto the other after it is gone. A cancelled
 chain with one of them as its home is exactly how this arises.
 
-The remedy is to stop the traffic, not to drain the schedulers. Request
-cancellation on the chains that hop between them and wait until their teardown
-has been observed, so that nothing is still crossing, then destroy the pool,
-which is the quiescence point, and then the loop. Do not rely on `drain()` in a
-loop for this.
+The remedy rests on destruction order, and it is sound because of two facts:
+
+- `~thread_pool` closes the queue with a draining close and joins the workers.
+  Once it returns, no worker is running, so nothing can post to the loop any
+  more. That is why the pool is the quiescence point.
+- `~run_loop` drains rather than discards, because queued items may be coroutine
+  resumptions or a cancelled chain's teardown posted there as its home. So
+  whatever the pool posted on its way down still runs when the loop is destroyed
+  afterwards.
+
+So destroy the pool first, then the loop. That is a declaration-order
+requirement: **declare the loop before the pool**, so that reverse-order
+destruction gives pool-then-loop. It is the same rule as
+[declaring what work items point at before the pool](#declare-what-work-items-point-at-before-the-pool),
+applied to two schedulers. Getting it backwards destroys the loop first, and the
+pool's drain-down then posts into a destroyed loop, which is a use-after-free
+and not merely stale work.
+
+```cpp
+alt::run_loop loop;                        // declared first, destroyed last
+auto          made = alt::thread_pool::create(2);
+```
+
+This holds provided the items left on the loop do not post back to the pool,
+which will already be gone by then. If chains hop in both directions, stop them
+from hopping first: call `request_stop()` on their `cancellation_handle`s, which
+makes each chain tear itself down at its next suspension point instead of
+continuing. Be aware that the library does not report when that teardown has
+finished. `stop_requested()` says only that the request was made. A caller who
+needs to observe completion must supply the mechanism, for example a counter
+the coroutine decrements from a destructor of one of its locals as the frame
+dies. `tests/test_scheduler_integration.cpp` does exactly this, with a
+`frame_tracker` local whose destructor decrements a live-frame count and a
+`teardown_recorder` local that notes the destroying thread. Do not rely on
+`drain()` in a loop for this.
 
 `drain()` is useful for what it is: running queued items on the calling thread,
 for instance to help finish work before a pool is destroyed.

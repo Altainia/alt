@@ -242,9 +242,10 @@ That stops being true as soon as another scheduler posts to the loop. A
 may post to it after any drain. Two schedulers that post to each other cannot be
 shut down by their destructors alone, and no sequence of `drain()` calls
 establishes quiescence between them. A cancelled chain whose home scheduler is
-one of them is exactly how the situation arises. The remedy is to stop the
-work, not to drain the schedulers: request cancellation on the chains and wait
-for their completion to be observed, so that nothing keeps hopping between the
-two, and only then destroy them. The pool's destruction is the one real
-quiescence point, as
-[thread_pool](thread_pool.md#shutting-down-two-schedulers-that-post-to-each-other) explains.
+one of them is exactly how the situation arises. The remedy is to destroy the pool before the loop, which means declaring the
+loop first, and to stop any chains that hop in both directions. The pool's
+destruction joins its workers, so nothing can post to the loop afterwards, and
+the loop's destructor then drains whatever the pool left behind. The full
+reasoning, and the caveat that the library does not report when a cancelled
+chain's teardown has finished, are in
+[thread_pool](thread_pool.md#shutting-down-two-schedulers-that-post-to-each-other).
