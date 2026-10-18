@@ -107,7 +107,7 @@ auto e   = static_cast<Permission>(p);               // enum (undefined if multi
 auto v   = p.value();                                 // same as value_type cast, non-explicit
 ```
 
-`from_value` constructs a `flags` directly from a raw integer (useful when deserialising):
+`from_value` constructs a `flags` directly from a raw integer (useful when deserializing):
 
 ```cpp
 Permissions p = Permissions::from_value(0x03u);  // Read | Write
