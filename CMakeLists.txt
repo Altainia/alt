@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Alt VERSION 1.6.0 LANGUAGES CXX)
+project(Alt VERSION 1.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -56,6 +56,36 @@ if(ALT_CPPCHECK)
             --suppress=missingIncludeSystem
             --suppress=unmatchedSuppression
             --suppress=unusedFunction
+            # False positive, and newly surfaced rather than newly introduced:
+            # cppcheck only analyzes src/*.cpp, and until phase 3 added compiled
+            # translation units nothing it analyzed reached scope.hpp. The scope
+            # guards' function-try-block constructors call f() in the handler, which
+            # is what P0052r10 specifies when storing the exit function throws. They
+            # have not moved from f: that overload is selected only when the
+            # construction is not nothrow, and the helper copies in that case.
+            # cppcheck sees neither the requires-clause nor the helper's if constexpr.
+            --suppress=accessForwarded:*/alt/scope.hpp
+            # Also newly surfaced by phase 3's compiled sources. The coroutine await
+            # protocol is made of non-static member functions, and await_ready and
+            # await_resume are frequently empty, so this style check fires across the
+            # awaiter types. Making them static is the wrong fix: the compiler calls
+            # them through an instance from the consuming coroutine's own body, so the
+            # diagnostic relocates to every consumer's file where no suppression of
+            # ours can reach it. The same trade was already settled this way for
+            # clang-tidy's readability-convert-member-functions-to-static, and for
+            # trampoline_scheduler::post, whose NOLINTNEXTLINE in scheduler.hpp makes
+            # the identical argument about call sites in consumers' files.
+            #
+            # Listed header by header rather than as */alt/*.hpp, so the blast radius
+            # is the set of headers the argument above actually covers: the ones that
+            # define the await protocol. A finding in any other header is information,
+            # not noise, and should be fixed rather than hidden.
+            --suppress=functionStatic:*/alt/awaitable.hpp
+            --suppress=functionStatic:*/alt/cancellable_task.hpp
+            --suppress=functionStatic:*/alt/scheduler.hpp
+            --suppress=functionStatic:*/alt/sync_wait.hpp
+            --suppress=functionStatic:*/alt/task.hpp
+            --suppress=functionStatic:*/alt/detail/cancellation.hpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

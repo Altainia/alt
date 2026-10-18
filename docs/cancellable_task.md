@@ -99,10 +99,10 @@ int main()
 
     running.request_stop();     // the window "closes"
 
-    worker_pool.run_all();      // crunch() finishes; on_button_pressed hits its
+    worker_pool.drain();        // crunch() finishes; on_button_pressed hits its
                                  // next suspension point and the chain is torn
                                  // down instead of resuming
-    w.ui_scheduler().run_all(); // runs the posted teardown; show() never fires
+    w.ui_scheduler().drain();   // runs the posted teardown; show() never fires
 }
 ```
 

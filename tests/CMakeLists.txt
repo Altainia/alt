@@ -46,10 +46,14 @@ add_executable(alt_tests
     test_awaitable.cpp
     test_coroutine.cpp
     test_scheduler.cpp
+    test_work_queue.cpp
+    test_run_loop.cpp
+    test_thread_pool.cpp
     test_cancellation.cpp
     test_task.cpp
     test_sync_wait.cpp
     test_cancellable_task.cpp
+    test_scheduler_integration.cpp
 )
 
 target_link_libraries(alt_tests
@@ -69,4 +73,19 @@ if(ALT_CLANG_TIDY)
 endif()
 
 include(GoogleTest)
-gtest_discover_tests(alt_tests DISCOVERY_MODE PRE_TEST)
+
+# The backstop is ctest's 1500s default without this. Several concurrency tests
+# legitimately wait on a count or a latch rather than polling with a timeout, so a
+# regression in the property they pin makes them hang instead of fail. A modest
+# timeout turns a 25-minute silent stall into a prompt, named failure.
+#
+# Headroom is deliberate and large. The slowest test in the suite is
+# sha2.hashes_the_one_million_character_vector at 0.79s under ThreadSanitizer, the
+# slowest preset; every concurrency test is at or under 0.08s there, and the
+# longest deliberate sleep in the suite is 50ms. 60s is roughly 75x the slowest
+# legitimate test, so it cannot fire on a slow machine, and it is short enough to
+# report a hang while the build is still being watched.
+gtest_discover_tests(alt_tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES TIMEOUT 60
+)

@@ -1,15 +1,14 @@
 #pragma once
 
+#include <alt/detail/work_queue.hpp>
 #include <alt/scope.hpp>
 #include <atomic>
 #include <cassert>
 #include <concepts>
-#include <condition_variable>
 #include <coroutine>
 #include <cstddef>
 #include <deque>
 #include <memory>
-#include <mutex>
 #include <utility>
 
 namespace alt
@@ -130,6 +129,7 @@ namespace alt
 	{
 	public:
 		/** Runs w now, or queues it if this thread is already draining. */
+		// NOLINTNEXTLINE(readability-convert-member-functions-to-static): making this static relocates the diagnostic to every call site, as readability-static-accessed-through-instance, including in consumers' files where no suppression of ours can reach it. Newly visible because phase 3's compiled sources are analyzed under the root config, where tests/.clang-tidy's disables do not apply.
 		void post(work_item w) const
 		{
 			auto& state = detail::this_thread_trampoline();
@@ -161,9 +161,10 @@ namespace alt
 	/**
 	 * @brief A scheduler that runs nothing until it is pumped by hand.
 	 *
-	 * The deterministic scheduler for tests: post work, then decide exactly when
-	 * it runs. Thread-safe, so a worker thread may post to a scheduler another
-	 * thread pumps.
+	 * The deterministic scheduler for tests: post work, then decide exactly when it
+	 * runs. Thread-safe, so a worker thread may post to a scheduler another thread
+	 * pumps. For a scheduler a program would actually run on, see alt::run_loop and
+	 * alt::thread_pool, which are built on the same queue.
 	 */
 	class manual_scheduler
 	{
@@ -171,25 +172,16 @@ namespace alt
 		/** Queues w. Safe to call from any thread. */
 		void post(work_item w)
 		{
-			{
-				const std::scoped_lock lock{m_mutex};
-				m_queue.push_back(w);
-			}
-			m_signal.notify_one();
+			m_queue.push(w);
 		}
 
 		/** Runs the oldest queued item. Returns false when the queue was empty. */
 		bool run_one()
 		{
 			work_item next{};
+			if(!m_queue.try_pop(next))
 			{
-				const std::scoped_lock lock{m_mutex};
-				if(m_queue.empty())
-				{
-					return false;
-				}
-				next = m_queue.front();
-				m_queue.pop_front();
+				return false;
 			}
 			next.invoke(next.state);
 			return true;
@@ -199,41 +191,31 @@ namespace alt
 		 * @brief Blocks until an item can be run, then runs it.
 		 *
 		 * An optional stop flag joins the wait condition, so a caller waiting on
-		 * something this scheduler knows nothing about can be released without
-		 * arming any state here. That is what the driving alt::sync_wait uses, and
-		 * it is why that overload leaves nothing behind in a scheduler the caller
-		 * goes on using.
+		 * something this scheduler knows nothing about can be released without arming
+		 * any state here. That is what the driving alt::sync_wait uses, and it is why
+		 * that overload leaves nothing behind in a scheduler the caller goes on using.
 		 *
-		 * Returns false when wake() released the wait instead, which is how a
-		 * driving alt::sync_wait learns that the work it was waiting on finished.
+		 * Returns false when the wait ended for another reason: the stop flag became
+		 * true, or wake() released it with nothing queued.
 		 */
 		bool run_one_or_wait(const std::atomic<bool>* stop = nullptr)
 		{
 			work_item next{};
+			if(!m_queue.pop_or_wait(next, stop))
 			{
-				std::unique_lock lock{m_mutex};
-				m_signal.wait(lock, [this, stop] {
-					return !m_queue.empty() || m_woken || (stop != nullptr && stop->load(std::memory_order_acquire));
-				});
-
-				// Consume the wake on every path. Leaving it set after running a queued
-				// item would make a later call return false on a stale signal, which a
-				// driving sync_wait would read as completion.
-				m_woken = false;
-
-				if(m_queue.empty())
-				{
-					return false;
-				}
-				next = m_queue.front();
-				m_queue.pop_front();
+				return false;
 			}
 			next.invoke(next.state);
 			return true;
 		}
 
-		/** Runs queued items until the queue is empty. Returns how many ran. */
-		std::size_t run_all()
+		/**
+		 * @brief Runs queued items until the queue is empty. Returns how many ran.
+		 *
+		 * The name every scheduler in this library shares: alt::run_loop and
+		 * alt::thread_pool spell the same operation the same way.
+		 */
+		std::size_t drain()
 		{
 			std::size_t count = 0;
 			while(run_one())
@@ -243,47 +225,43 @@ namespace alt
 			return count;
 		}
 
+		/**
+		 * @brief Deprecated. Use drain(), which this forwards to unchanged.
+		 *
+		 * @deprecated Renamed to drain() so all three schedulers spell the operation
+		 *             the same way. Kept so existing callers keep compiling.
+		 */
+		[[deprecated("use drain(); run_all() is the old name for it")]] std::size_t run_all()
+		{
+			return drain();
+		}
+
 		/** True when nothing is queued. */
 		[[nodiscard]] bool empty() const
 		{
-			const std::scoped_lock lock{m_mutex};
 			return m_queue.empty();
 		}
 
 		/**
 		 * @brief Prompts a blocked run_one_or_wait to re-evaluate its condition.
 		 *
-		 * Arms nothing, so unlike wake() it cannot be observed by a later call.
-		 * Use it when the condition a waiter is waiting on lives outside this
-		 * scheduler, which is the case for the driving alt::sync_wait.
+		 * Arms nothing, so unlike wake() it cannot be observed by a later call. Use it
+		 * when the condition a waiter is waiting on lives outside this scheduler,
+		 * which is the case for the driving alt::sync_wait.
 		 */
 		void notify_waiters()
 		{
-			// Acquiring the mutex is what closes the lost-wakeup window. A waiter that
-			// has already evaluated its condition holds the mutex until it is genuinely
-			// blocked inside wait(), so a notification cannot arrive before it parks and
-			// then be missed.
-			{
-				const std::scoped_lock lock{m_mutex};
-			}
-			m_signal.notify_all();
+			m_queue.notify();
 		}
 
 		/** Releases a thread blocked in run_one_or_wait without queueing work. */
 		void wake()
 		{
-			{
-				const std::scoped_lock lock{m_mutex};
-				m_woken = true;
-			}
-			m_signal.notify_all();
+			m_queue.wake();
 		}
 
 	private:
-		mutable std::mutex      m_mutex;
-		std::condition_variable m_signal;
-		std::deque<work_item>   m_queue;
-		bool                    m_woken = false;
+		detail::work_queue<work_item> m_queue;
 	};
 
 	namespace detail
@@ -323,7 +301,7 @@ namespace alt
 				return *m_scheduler;
 			}
 
-			bool await_ready() const noexcept
+			[[nodiscard]] bool await_ready() const noexcept
 			{
 				return false;
 			}

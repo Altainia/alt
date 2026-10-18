@@ -118,11 +118,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.6.0_amd64.deb` in the project root:
+Produces `altlib_1.7.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.6.0_amd64.deb
+sudo dpkg -i altlib_1.7.0_amd64.deb
 ```
 
 ## Using in your project
@@ -130,7 +130,7 @@ sudo dpkg -i altlib_1.6.0_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.6.0 REQUIRED)
+find_package(Alt 1.7.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
@@ -165,5 +165,7 @@ Then include headers as needed:
 | `<alt/awaitable.hpp>` | Awaitable concepts and traits: `awaiter`, `awaitable`, `awaitable_of`, `await_result_t`, `get_awaiter`, `as_expected` | [docs/awaitable.md](docs/awaitable.md) |
 | `<alt/task.hpp>` | Lazy, move-only coroutine result: `task<T>` | [docs/task.md](docs/task.md) |
 | `<alt/scheduler.hpp>` | Scheduling primitive and schedulers: `work_item`, `scheduler`, `drivable_scheduler`, `scheduler_ref`, `trampoline_scheduler`, `manual_scheduler`, `resume_on` | [docs/scheduler.md](docs/scheduler.md) |
+| `<alt/run_loop.hpp>` | Serial executor for an owned thread or a platform loop: `run_loop`, `run_loop_options` | [docs/run_loop.md](docs/run_loop.md) |
+| `<alt/thread_pool.hpp>` | Fixed-size thread pool built by a factory returning `std::expected`: `thread_pool` | [docs/thread_pool.md](docs/thread_pool.md) |
 | `<alt/sync_wait.hpp>` | Blocking and driving entry points for running an awaitable to completion: `sync_wait` | [docs/sync_wait.md](docs/sync_wait.md) |
 | `<alt/cancellable_task.hpp>` | Self-owning, cancellable root coroutine: `cancellable_task`, `cancellation_handle`, `start`, `cancellation_point` | [docs/cancellable_task.md](docs/cancellable_task.md) |

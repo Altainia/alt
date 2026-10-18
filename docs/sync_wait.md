@@ -66,7 +66,7 @@ left armed in the scheduler afterwards.
 **The blocking overload deadlocks on any awaitable that needs the calling
 thread to pump a scheduler for it to make progress.** `alt::manual_scheduler`
 runs nothing until something calls `run_one()`, `run_one_or_wait()`, or
-`run_all()` on it — if the calling thread is the only thread that will ever
+`drain()` on it — if the calling thread is the only thread that will ever
 do that, and it has instead called the blocking `sync_wait(a)` and parked,
 the work sits in the queue forever and the semaphore never releases.
 

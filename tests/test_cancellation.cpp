@@ -217,7 +217,7 @@ TEST_F(CancellationTest, HomeSchedulerDefersDestructionUntilItIsPumped)
 	EXPECT_EQ(live_frames, 1);
 	EXPECT_FALSE(home.empty());
 
-	EXPECT_EQ(home.run_all(), 1U);
+	EXPECT_EQ(home.drain(), 1U);
 	EXPECT_EQ(live_frames, 0);
 	EXPECT_FALSE(body_ran_past_cancellation);
 }

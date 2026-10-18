@@ -64,8 +64,36 @@ TEST(ManualScheduler, RunsInPostOrder)
 	scheduler.post(item_for(second));
 	scheduler.post(item_for(third));
 
-	EXPECT_EQ(scheduler.run_all(), 3U);
+	EXPECT_EQ(scheduler.drain(), 3U);
 	EXPECT_EQ(log, (std::vector<int>{1, 2, 3}));
+}
+
+TEST(ManualScheduler, RunAllStillWorksAsTheDeprecatedNameForDrain)
+{
+	// The one site that still calls run_all(), so the compatibility alias keeps its
+	// coverage after the rename. The deprecation warning is the point of the test,
+	// which is why it is suppressed here and nowhere else: this build treats
+	// warnings as errors, so without the suppression the alias could not be tested
+	// at all.
+	std::vector<int>      log;
+	logged_call           first{.log = &log, .tag = 1};
+	logged_call           second{.log = &log, .tag = 2};
+	alt::manual_scheduler scheduler;
+
+	scheduler.post(item_for(first));
+	scheduler.post(item_for(second));
+
+#ifdef __GNUC__
+#	pragma GCC diagnostic push
+#	pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+	EXPECT_EQ(scheduler.run_all(), 2U);
+#ifdef __GNUC__
+#	pragma GCC diagnostic pop
+#endif
+
+	EXPECT_EQ(log, (std::vector<int>{1, 2}));
+	EXPECT_TRUE(scheduler.empty());
 }
 
 TEST(ManualScheduler, AcceptsPostsFromAnotherThread)
@@ -77,7 +105,7 @@ TEST(ManualScheduler, AcceptsPostsFromAnotherThread)
 	std::thread poster{[&] { scheduler.post(item_for(call)); }};
 	poster.join();
 
-	EXPECT_EQ(scheduler.run_all(), 1U);
+	EXPECT_EQ(scheduler.drain(), 1U);
 	EXPECT_EQ(log, std::vector<int>{9});
 }
 
@@ -201,7 +229,7 @@ TEST(SchedulerRef, ForwardsPostsToTheReferencedScheduler)
 	EXPECT_TRUE(static_cast<bool>(reference));
 
 	reference.post(item_for(call));
-	EXPECT_EQ(scheduler.run_all(), 1U);
+	EXPECT_EQ(scheduler.drain(), 1U);
 	EXPECT_EQ(log, std::vector<int>{5});
 }
 
