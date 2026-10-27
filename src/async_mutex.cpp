@@ -218,6 +218,16 @@ namespace alt
 		// Saved and restored rather than simply set, so that a waiter which locks and
 		// unlocks a *different* mutex inside its critical section drains that one
 		// without disturbing this drain's record of its own.
+		//
+		// Guarded by AQueuedLockerStillGetsInWhenAWaiterDrainsASecondMutexAfterReleasing,
+		// which is the order that needs it: this mutex released first, so that the
+		// nested release has recorded the lock coming back, and the other mutex's drain
+		// running on top of that record afterwards. Lose the restore of handed_back and
+		// that sequence breaks this loop with the lock in transit and never handed on,
+		// leaving a stranded waiter beside an m_held stuck true -- a deadlock for every
+		// later locker too, and with no diagnostic. ...BeforeReleasing covers the other
+		// order, which cannot reach that defect because the nested release comes last;
+		// both tests record the measurements.
 		async_mutex* const outer_mutex       = std::exchange(state.draining, this);
 		const bool         outer_handed_back = std::exchange(state.handed_back, false);
 

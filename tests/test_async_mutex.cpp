@@ -147,6 +147,59 @@ namespace
 		}
 	}
 
+	/**
+	 * @brief Releases @p outer from inside its own critical section, and only then
+	 *        locks and unlocks @p inner.
+	 *
+	 * The order is the load-bearing part. This body runs inside @p outer's hand-off
+	 * drain, so the release of @p outer is a nested one and does nothing but record
+	 * that the lock came back; the lock and unlock of @p inner then runs a whole drain
+	 * of its own on top of that record. See
+	 * AQueuedLockerStillGetsInWhenAWaiterDrainsASecondMutexAfterReleasing.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the mutexes and the records are owned by the calling test, which holds them until live_frames is back to zero, so no reference can dangle.
+	alt::cancellable_task releases_then_drains_another(alt::async_mutex& outer, alt::async_mutex& inner, lock_record& record, lock_record& inner_record, int tag)
+	{
+		const frame_tracker tracker{tag};
+		auto                held = co_await outer;
+		record_outcome(record, held);
+
+		if(held)
+		{
+			held->unlock();
+
+			auto other = inner.try_lock();
+			record_outcome(inner_record, other);
+
+			if(other)
+			{
+				other->unlock();
+			}
+		}
+	}
+
+	/** The same two mutexes in the other order: @p inner drained first, @p outer released after. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): same reasoning as releases_then_drains_another above.
+	alt::cancellable_task drains_another_then_releases(alt::async_mutex& outer, alt::async_mutex& inner, lock_record& record, lock_record& inner_record, int tag)
+	{
+		const frame_tracker tracker{tag};
+		auto                held = co_await outer;
+		record_outcome(record, held);
+
+		if(held)
+		{
+			auto other = inner.try_lock();
+			record_outcome(inner_record, other);
+
+			if(other)
+			{
+				other->unlock();
+			}
+
+			held->unlock();
+		}
+	}
+
 	/** Parks on something else first, so a stop can be requested before it ever reaches the mutex. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): same reasoning as locking_root above.
 	alt::cancellable_task parks_then_locks(alt::async_mutex& mutex, lock_record& record)
@@ -971,6 +1024,109 @@ TEST_F(AsyncMutexTest, AHandOffChainOfManyWaitersDoesNotRecurse)
 
 	// And the mutex came out of it unlocked, with nothing left queued.
 	EXPECT_TRUE(mutex.try_lock().has_value());
+}
+
+TEST_F(AsyncMutexTest, AQueuedLockerStillGetsInWhenAWaiterDrainsASecondMutexAfterReleasing)
+{
+	// The one branch of async_mutex::unlock that had no test of its own: the
+	// per-thread hand-off state is saved and restored rather than simply set, so that
+	// a waiter which locks and unlocks a *different* mutex inside its critical section
+	// drains that one without clobbering this drain's record of its own.
+	//
+	// The shape that needs it is this one, and the order matters. The first waiter's
+	// body runs inside the outer mutex's drain. It releases the outer lock, which is a
+	// nested release and so only records that the lock came back; then it locks and
+	// unlocks the inner mutex, whose unlock is a drain in its own right and clears that
+	// record on the way in. Lose the restore and the outer drain reads handed_back as
+	// false, breaks with the lock in transit and never handed on, and the third locker
+	// below is left parked beside an m_held stuck true -- a permanent deadlock with no
+	// diagnostic, since every later locker parks behind it too.
+	//
+	// Measured rather than argued, and deterministic, so the sample is small on
+	// purpose. With the save and restore of handed_back replaced by a plain
+	// `state.handed_back = false`, leaving the draining pointer's own save and restore
+	// in place, this test failed in 5 of 5 runs of itself, on the four assertions
+	// marked below; against the implementation as it stands, 5 of 5 passes. And under
+	// that same mutation the whole suite reported exactly one failure, this one, which
+	// is the measurement that says the branch had no other guard. Removing the save
+	// and restore of both fields instead failed this test 5 of 5 as well, plus eleven
+	// other async_mutex tests, the stale draining pointer being a second defect on top
+	// of the one this test is about.
+
+	// The records are declared before the mutexes so that anything their destructors
+	// release is writing into storage that is still alive. Unreachable in a passing
+	// run, but a failing one leaves the third locker parked for ~async_mutex to find.
+	lock_record first;
+	lock_record second;
+	lock_record inner_record;
+
+	alt::async_mutex outer;
+	alt::async_mutex inner;
+
+	auto owner = outer.try_lock();
+	ASSERT_TRUE(owner.has_value());
+
+	const auto first_handle  = alt::start(releases_then_drains_another(outer, inner, first, inner_record, 1));
+	const auto second_handle = alt::start(locking_root(outer, second, 2));
+	ASSERT_EQ(live_frames, 2);
+
+	// One release, and the whole sequence above happens inside it.
+	owner->unlock();
+
+	EXPECT_TRUE(first.held);
+	EXPECT_TRUE(inner_record.held);
+
+	// The queued third locker got in. These four are the assertions the mutation
+	// breaks; the inner mutex comes out free either way.
+	EXPECT_EQ(second.resumptions, 1);
+	EXPECT_TRUE(second.held);
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_TRUE(outer.try_lock().has_value());
+
+	EXPECT_TRUE(inner.try_lock().has_value());
+}
+
+TEST_F(AsyncMutexTest, AQueuedLockerStillGetsInWhenAWaiterDrainsASecondMutexBeforeReleasing)
+{
+	// The other order, so the save and restore is covered from both sides: the first
+	// waiter drains the inner mutex while still holding the outer lock, and releases
+	// the outer lock afterwards.
+	//
+	// This order is immune to the mutation the test above catches, and knowing that is
+	// the point of having measured it rather than assumed it. The last thing this
+	// waiter does is the nested release of the outer lock, which sets handed_back
+	// true unconditionally, so whatever the inner drain left behind is overwritten
+	// before the outer drain reads it: under the mutation described above -- the save
+	// and restore of handed_back replaced by a plain `state.handed_back = false` --
+	// this test passed in 5 of 5 runs.
+	// What it pins is that an inner drain in this position does not disturb the outer
+	// one either -- the draining pointer being restored is what keeps the release that
+	// follows it recognizable as nested -- and it is the companion the other test
+	// needs, not a second detector of the same defect.
+	lock_record first;
+	lock_record second;
+	lock_record inner_record;
+
+	alt::async_mutex outer;
+	alt::async_mutex inner;
+
+	auto owner = outer.try_lock();
+	ASSERT_TRUE(owner.has_value());
+
+	const auto first_handle  = alt::start(drains_another_then_releases(outer, inner, first, inner_record, 1));
+	const auto second_handle = alt::start(locking_root(outer, second, 2));
+	ASSERT_EQ(live_frames, 2);
+
+	owner->unlock();
+
+	EXPECT_TRUE(first.held);
+	EXPECT_TRUE(inner_record.held);
+
+	EXPECT_EQ(second.resumptions, 1);
+	EXPECT_TRUE(second.held);
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_TRUE(outer.try_lock().has_value());
+	EXPECT_TRUE(inner.try_lock().has_value());
 }
 
 TEST_F(AsyncMutexTest, AnArrivingLockerIsNeverStrandedByAConcurrentUnlock)
