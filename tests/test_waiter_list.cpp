@@ -245,6 +245,10 @@ TEST(WaiterList, ClaimElectsExactlyOneWinner)
 	// that window is only nanoseconds wide, so the test is built to hit it: the two
 	// threads rendezvous immediately before every single claim, and every repeat
 	// contends a fresh batch of nodes rather than just one.
+	//
+	// No repeat calls alt_test::reset_coroutine_test_state(): the nodes here are bare
+	// waiter_nodes with no coroutine behind them, so there is none of that state to
+	// clear.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		waiter_list                                   list;
@@ -627,6 +631,10 @@ TEST(WaiterList, AConcurrentSatisfierAndStopDoNotBothResume)
 	// of those assertions from run to run -- a resumption count of five, or a node
 	// left claimed and never resumed because a double unlink corrupted the links --
 	// so it is the set of them that does the catching, not any one line.
+	//
+	// No repeat calls alt_test::reset_coroutine_test_state(): the nodes here are bare
+	// waiter_nodes with no coroutine behind them, so there is none of that state to
+	// clear.
 	constexpr std::size_t node_count = 4;
 
 	for(int repeat = 0; repeat < race_repeats; ++repeat)

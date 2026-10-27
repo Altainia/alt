@@ -66,6 +66,14 @@ namespace alt
 	 * destroying this semaphore instead releases them all, which is the supported
 	 * teardown.
 	 *
+	 * A waiter that teardown released may not await this semaphore again. That is
+	 * unsupported on all four primitives in this family, by choice rather than by
+	 * necessity: the destructor releases its waiters itself, ahead of m_waiters' own
+	 * destructor, which does keep the ordinary case from leaking a re-awaiting waiter
+	 * -- but that is a defensive measure rather than a promise, and no depth of
+	 * re-await is promised. alt::async_mutex's destructor records the reason the
+	 * family settled on promising nothing.
+	 *
 	 * Destroying the semaphore from a resumed waiter's body is allowed, including
 	 * from a waiter release() resumed, and release() says what it does to keep that
 	 * true. With one qualification a waiter cannot check for itself: one release()

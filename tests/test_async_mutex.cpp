@@ -1004,6 +1004,10 @@ TEST_F(AsyncMutexTest, AnArrivingLockerIsNeverStrandedByAConcurrentUnlock)
 	// rounds a repeat it was 18 of 20, which is what set stranding_race_rounds.
 	// Against the implementation as it stands, 0 of 20. Every figure is from one loop
 	// over the same binary, read from its exit status.
+	//
+	// No repeat calls reset_coroutine_test_state(): the arriving locker is resumed on
+	// whichever of the two threads wins it, so it tracks no frame, and the round
+	// handshake hands over everything the assertions read.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		ASSERT_NO_FATAL_FAILURE(run_one_stranding_race(repeat));
@@ -1024,6 +1028,10 @@ TEST_F(AsyncMutexTest, AStopAndAnUnlockDoNotBothResumeAndTheLockIsNotLost)
 	// release won the node, the waiter entered the critical section and left it, so
 	// the lock is free. If the stop won, the release found nothing to hand the lock to
 	// and freed it. A lock that reached neither is one no later locker could ever take.
+	//
+	// The per-repeat helper calls reset_coroutine_test_state() because it asserts
+	// live_frames: the fixture zeroes it once in SetUp, so without the reset every
+	// repeat after the first would be reading the sum of the ones before it.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		ASSERT_NO_FATAL_FAILURE(run_one_stop_versus_unlock_race(repeat));
@@ -1053,6 +1061,10 @@ TEST_F(AsyncMutexTest, EveryLockerEntersTheCriticalSectionWhenArrivalsAndUnlocks
 	// out wrong and a data race ThreadSanitizer reports if two coroutines are ever in
 	// there at once. entered is atomic because it is the counter the test reads to
 	// find a locker that never got in.
+	//
+	// No repeat calls reset_coroutine_test_state(): these lockers are resumed on
+	// several threads at once, so they track no frame, and nothing in the loop reads
+	// the state it would clear.
 	constexpr std::size_t lockers = 8;
 
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
@@ -1092,6 +1104,10 @@ TEST_F(AsyncMutexTest, NoLockIsLostWhenAStopAndAnUnlockRaceAnArrivingLocker)
 	// moment the link's condition runs rather than before its target has looked at the
 	// mutex at all. See match_an_arriving_lockers_bookkeeping for the figures that
 	// shape came from.
+	//
+	// No repeat calls reset_coroutine_test_state(): these lockers are resumed on
+	// several threads at once, so they track no frame, and nothing in the loop reads
+	// the state it would clear.
 	constexpr std::size_t lockers  = 4;
 	constexpr std::size_t stoppers = 2;
 

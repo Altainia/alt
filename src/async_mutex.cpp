@@ -81,8 +81,10 @@ namespace alt
 		// waiter may await the primitive again and that re-await has to land in a list
 		// that has not finished its walk.
 		//
-		// For a mutex that re-await is *chosen* to be unsupported, and the distinction
-		// matters because nothing forces it. This destructor is one detach_all and one
+		// That re-await is *chosen* to be unsupported -- here and on the other three,
+		// where the explicit release is likewise a defense against the unsupported case
+		// leaking rather than a promise that it works -- and the distinction matters
+		// because nothing forces it. This destructor is one detach_all and one
 		// resume_claimed: it never calls unlock(), so no waiter it releases builds a
 		// guard and none of them re-enters the hand-off loop. The iterative drain has
 		// no say here at all.
@@ -94,7 +96,8 @@ namespace alt
 		// lock, and inside its own destructor body every member of this object is still
 		// alive and member calls on it are perfectly well defined. So the ordinary case
 		// is benign -- the re-await parks in a list that is still whole and ~waiter_list
-		// releases it a second time, which is exactly async_semaphore's supported shape.
+		// releases it a second time, which is exactly the shape the other three fall
+		// into and likewise do not promise.
 		//
 		// The objection is what the shape rests on. It is benign only while this mutex
 		// is destroyed *locked*, and a mutex destroyed unlocked with waiters still

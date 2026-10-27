@@ -213,6 +213,17 @@ hand on. The released body resumes, with the error in hand, and runs to its next
 suspension point, where [the ordinary cascade](cancellable_task.md) tears the
 chain down.
 
+That body runs **on whichever thread observed the stop** — the thread that
+called `request_stop()`, synchronously inside that call — and a `home` scheduler
+on the chain does not change that: `start_options::home` governs only where the
+frames are destroyed, not where a released waiter's body runs. So a released
+continuation that touches thread-affine state must `co_await alt::resume_on(...)`
+before touching it, exactly as it must after an ordinary hand-off. For a window
+closing on the UI thread this is the hazard that bites: the body resumes inside
+the close, on the closing thread, with the window already going away.
+[`cancellable_task`](cancellable_task.md) states the same narrowing from the
+cancellation side.
+
 Cancellation reaches a waiter only inside a chain rooted at an
 [`alt::cancellable_task`](cancellable_task.md), through the stop callback the
 awaiter registers on that chain's token. Awaited from a plain `alt::task` run by
@@ -280,6 +291,55 @@ releases the lock. Note what that implies about where the next waiter runs: the
 next critical section starts inside that teardown, on whichever thread performed
 it — or on the chain's `home` scheduler, if it was given one.
 
+Which puts a sharper edge on the leak that
+[`cancellable_task`](cancellable_task.md#frames-are-destroyed-on-the-thread-that-observed-cancellation-unless-a-home-scheduler-is-given)
+describes. A `home` that is supplied but never pumped, or destroyed with the
+teardown still queued, does not merely leak the chain's frames: the guard is one
+of those frames' locals, so the mutex is left **locked forever**, and every
+coroutine that reaches for it afterwards parks behind a lock nothing will ever
+release.
+
+### `async_mutex` is not recursive, and a second acquisition deadlocks
+
+Awaiting the mutex from inside a critical section that already holds it — a
+helper that takes the same lock being the usual way to get there — is a
+**permanent deadlock** rather than a re-entry. `async_mutex` is no more
+recursive than `std::mutex`, which carries the same precondition, and nothing
+here detects the mistake:
+
+```cpp
+alt::task<void> append_locked(alt::async_mutex& mutex, log_file& file)
+{
+    if(const auto held = co_await mutex)   // WRONG when the caller already holds it
+    {
+        file.write("...");
+    }
+}
+
+alt::task<void> write_batch(alt::async_mutex& mutex, log_file& file)
+{
+    if(const auto held = co_await mutex)
+    {
+        co_await append_locked(mutex, file);   // hangs here, and forever
+    }
+}
+```
+
+The second await finds the lock held and parks, and the only party that could
+release it is the coroutine that has just parked: its guard is a live local in
+the suspended frame, which nothing will now reach. That is worse than one hung
+coroutine. The lock stays marked held for the rest of the program, so **every
+later locker hangs too** — and if the parked coroutine had itself been resumed
+by a release, that release's hand-off drain stops there as well, having seen the
+lock never come back. There is no diagnostic and no timeout; the symptom is a
+silent hang.
+
+So a helper that runs inside a critical section takes the guard, or a reference
+to the state the lock protects, as a parameter instead of taking the lock
+itself. Where the helper really must acquire, the caller `unlock()`s before the
+nested call and re-acquires afterwards — accepting that it goes to the back of
+the queue, as any other re-acquisition does.
+
 ### A waiter resumed by a release may not destroy the mutex
 
 This one is forced, not chosen, and it is where `async_mutex` parts company with
@@ -301,17 +361,25 @@ call into this mutex.
 ### A waiter released by the destructor may not await the mutex again
 
 This one is chosen, and the distinction matters because nothing forces it. The
-destructor is one detach and one walk of the released waiters; it never calls
-`unlock()`, so no waiter it releases builds a guard and none of them re-enters
-the hand-off loop. The ordinary case is benign, and a re-await during
-destruction is both supported and tested for `async_semaphore`.
+rule is the same on all four primitives in this family — none of them promises
+anything about a re-await from inside a waiter its destructor released — and
+each of the four destructors releases its waiters itself, before its
+`waiter_list` member's own destructor runs. That explicit release is a defensive
+measure, and it is why the ordinary case does not leak a re-awaiting waiter: the
+re-await lands in a list that is still whole and the member's destructor
+releases that round too. It is not a guarantee anyone may lean on, and no depth
+of re-await is promised anywhere.
 
-What it buys is not having to promise something this type has nothing to promise
-it with. A mutex destroyed *unlocked* with waiters still parked is not reachable
-through the public interface today and is not ruled out by anything in the type
-either; there, a re-await would be handed the lock inside the destructor body,
-and nothing stops that guard being moved out to outlive the body — a guard with
-no mutex left to hand the lock back to. So the rule stands: a waiter released by
+For this mutex there is a second reason on top of the family's, and it is why
+the family settled where it did. The destructor is one detach and one walk of
+the released waiters; it never calls `unlock()`, so no waiter it releases builds
+a guard and none of them re-enters the hand-off loop. What a re-await would
+require promising is something this type has nothing to promise it with. A mutex
+destroyed *unlocked* with waiters still parked is not reachable through the
+public interface today and is not ruled out by anything in the type either;
+there, a re-await would be handed the lock inside the destructor body, and
+nothing stops that guard being moved out to outlive the body — a guard with no
+mutex left to hand the lock back to. So the rule stands: a waiter released by
 `~async_mutex` must not come back.
 
 ### Destruction releases the waiters, and runs their bodies

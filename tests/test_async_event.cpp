@@ -430,6 +430,10 @@ TEST_F(AsyncEventTest, AStopAndASetDoNotBothResume)
 	// race only one party ever wins exercises half of what it claims to. Counting the
 	// winner over three runs of the 100 repeats below gave 15, 41 and 13 sets against
 	// 85, 59 and 87 stops.
+	//
+	// reset_coroutine_test_state() is called per repeat because this loop asserts
+	// live_frames: the fixture zeroes it once in SetUp, so without the reset every
+	// repeat after the first would be reading the sum of the ones before it.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		reset_coroutine_test_state();
@@ -526,6 +530,9 @@ TEST_F(AsyncEventTest, AConcurrentSetIsNeverMissedByAnArrivingWaiter)
 	// deterministically instead, and they are the guards. What this one adds is
 	// ThreadSanitizer over a set() that really is concurrent with a waiter arriving,
 	// which no deterministic test can give.
+	//
+	// reset_coroutine_test_state() is called per repeat for the reason the test above
+	// gives: this loop asserts live_frames, which SetUp zeroes only once.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		reset_coroutine_test_state();
@@ -578,12 +585,17 @@ TEST_F(AsyncEventTest, AWaiterThatReAwaitsWhileTheEventIsBeingDestroyedIsStillRe
 {
 	// Why the event releases its waiters itself instead of leaving it to the
 	// waiter_list member's own destructor, which does the same thing one step later.
-	// A released waiter's continuation may await this event again, and it is
-	// perfectly entitled to: the event still exists while its destructor body runs.
-	// That re-await parks in a list that is still whole, and the member's destructor
-	// then releases it. Leave the release to that member instead and the re-await
-	// lands in a list whose walk is already finished, parking the waiter on an event
-	// that will never release anything again.
+	// A released waiter's continuation may reach for this event again, and the event
+	// still exists while its destructor body runs: that re-await parks in a list that
+	// is still whole, and the member's destructor then releases it. Leave the release
+	// to that member instead and the re-await lands in a list whose walk is already
+	// finished, parking the waiter on an event that will never release anything again.
+	//
+	// What this pins is that defensive behavior, not a promise about it. The
+	// documentation says a waiter released by the destructor must not await the event
+	// again -- unsupported on all four primitives -- so do not delete this test on the
+	// strength of that sentence. It guards the explicit release, which is what keeps
+	// the unsupported case from leaking rather than something a caller may rely on.
 	wait_record first;
 	wait_record second;
 

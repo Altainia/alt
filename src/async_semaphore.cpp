@@ -16,13 +16,18 @@ namespace alt
 	{
 		// Released here rather than left to m_waiters' own destructor, for the reason
 		// async_event's destructor gives: a released waiter may await this semaphore
-		// again, and that re-await must land in a list that has not finished its walk.
+		// again, and that re-await has to land in a list that has not finished its walk.
+		//
+		// Defensive rather than promised, exactly as it is there. Awaiting a primitive
+		// from inside a waiter its destructor released is unsupported on all four of
+		// them, so this call buys that the unsupported case leaks nothing rather than
+		// that any depth of it works.
 		//
 		// Like release(), this resumes a multi-node chain, so resume_claimed's chain rule
 		// binds here: a waiter released by this destructor may not destroy another waiter
 		// still queued behind it. That is sound for the same reason it is sound in
-		// async_latch, whose count_down records the argument and the condition under
-		// which it must be revisited.
+		// async_latch, whose class documentation records the argument and the condition
+		// under which it must be revisited.
 		detail::resume_claimed(m_waiters.detach_all(), false);
 	}
 

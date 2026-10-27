@@ -160,6 +160,17 @@ cascade](cancellable_task.md) tears the chain down. Code between the `co_await`
 and that suspension point really does run, which is why the result has to be
 checked rather than assumed.
 
+It also runs **on whichever thread observed the stop** — the thread that called
+`request_stop()`, synchronously inside that call — and a `home` scheduler on the
+chain does not change that: `start_options::home` governs only where the frames
+are destroyed, not where a released waiter's body runs. So a released
+continuation that touches thread-affine state must `co_await alt::resume_on(...)`
+before touching it, exactly as it must after the `count_down()` that reaches
+zero. For a window closing on the UI thread this is the hazard that bites: the
+body resumes inside the close, on the closing thread, with the window already
+going away. [`cancellable_task`](cancellable_task.md) states the same narrowing
+from the cancellation side.
+
 Cancellation reaches a waiter only inside a chain rooted at an
 [`alt::cancellable_task`](cancellable_task.md), through the stop callback the
 awaiter registers on that chain's token. Awaited from a plain `alt::task` run by
@@ -228,6 +239,21 @@ it is equally invisible to the sanitizers. AddressSanitizer poisons a stack slot
 only after every destructor in the scope has run, so when both objects share a
 scope the first form passes every sanitizer run and is still a use-after-free.
 The only defense is the declaration order.
+
+### A waiter released by the destructor may not await the latch again
+
+Awaiting the latch from inside a waiter the destructor released is
+**unsupported**, as it is on all four primitives in this family. That is a
+choice rather than something the code forces. Each destructor releases its
+waiters itself, before its `waiter_list` member's own destructor runs, so a
+re-await does in fact land in a list that is still whole and is released a
+second time by that member — but that explicit release is a defensive measure,
+it is what keeps the ordinary case from leaking a re-awaiting waiter rather than
+a guarantee anyone may lean on, and no depth of re-await is promised. Tests pin
+the behavior so it cannot regress silently; the documentation promises nothing
+about it. [`async_mutex`](async_mutex.md#a-waiter-released-by-the-destructor-may-not-await-the-mutex-again)
+does not have even the benign case, and states the reason the family settled on
+promising nothing.
 
 ### Destroying a latch while another thread is satisfying it is undefined
 

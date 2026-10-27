@@ -395,6 +395,11 @@ TEST_F(AsyncLatchTest, AWaiterThatReAwaitsWhileTheLatchIsBeingDestroyedIsStillRe
 	// As async_event's test of the same name: the re-await parks in a list that is
 	// still whole, and the member's destructor releases it, but only because the
 	// latch's own destructor released the first round itself.
+	//
+	// And as there, what this pins is the defensive behavior rather than a promise.
+	// Awaiting the latch from inside a waiter its destructor released is unsupported;
+	// this test guards the explicit release that keeps the unsupported case from
+	// leaking, so do not delete it on the strength of the documentation saying so.
 	wait_record first;
 	wait_record second;
 
@@ -477,6 +482,10 @@ TEST_F(AsyncLatchTest, ConcurrentCountDownsReleaseTheWaiterExactlyOnce)
 	// Several threads each lower the count by one, rendezvousing first so that they
 	// reach the compare-exchange together. A decrement lost to a race leaves the
 	// count above zero, and the waiter is never released.
+	//
+	// The per-round helper calls reset_coroutine_test_state() because it asserts
+	// live_frames, which SetUp zeroes only once: without the reset every round after
+	// the first would be reading the sum of the ones before it.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		SCOPED_TRACE(repeat);
@@ -496,6 +505,9 @@ TEST_F(AsyncLatchTest, AStopAndTheFinalCountDownDoNotBothResume)
 	// resume it. The rendezvous is what makes it contended: both threads block on one
 	// counter and the second arrival releases both, so the detach and the stop
 	// callback's claim reach the same state word together.
+	//
+	// reset_coroutine_test_state() is called per repeat because this loop asserts
+	// live_frames, which SetUp zeroes only once.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		reset_coroutine_test_state();
@@ -533,6 +545,9 @@ TEST_F(AsyncLatchTest, AConcurrentReleaseIsNeverMissedByAnArrivingWaiter)
 	// that really is concurrent with a waiter arriving. The latch is inspected before
 	// it leaves scope because its destructor would release a lost waiter and hide the
 	// defect.
+	//
+	// reset_coroutine_test_state() is called per repeat because this loop asserts
+	// live_frames, which SetUp zeroes only once.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		reset_coroutine_test_state();

@@ -547,6 +547,12 @@ TEST_F(AsyncSemaphoreTest, AWaiterThatReAwaitsWhileTheSemaphoreIsBeingDestroyedI
 	// As async_event's and async_latch's tests of the same name: the re-await parks in a
 	// list that is still whole, and the member's destructor releases it, but only
 	// because the semaphore's own destructor released the first round itself.
+	//
+	// And as there, what this pins is the defensive behavior rather than a promise.
+	// Awaiting the semaphore from inside a waiter its destructor released is
+	// unsupported; this test guards the explicit release that keeps the unsupported
+	// case from leaking, so do not delete it on the strength of the documentation
+	// saying so.
 	wait_record first;
 	wait_record second;
 
@@ -708,6 +714,10 @@ TEST_F(AsyncSemaphoreTest, AConcurrentReleaseIsNeverMissedByAnArrivingWaiter)
 	// gaps and the links are scheduled against each other instead of started
 	// together. Both measurements are from the same loop over the same binary, read
 	// from its exit status.
+	//
+	// reset_coroutine_test_state() is called per repeat because this loop asserts
+	// live_frames: the fixture zeroes it once in SetUp, so without the reset every
+	// repeat after the first would be reading the sum of the ones before it.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		reset_coroutine_test_state();
@@ -745,6 +755,9 @@ TEST_F(AsyncSemaphoreTest, AStopAndAReleaseDoNotBothResumeAndThePermitIsNotLost)
 	// the release won the node the waiter holds the permit and the count is empty, and
 	// if the stop won it the release found nothing to hand the permit to and left it in
 	// the count. A permit that reached neither would be one the semaphore had destroyed.
+	//
+	// reset_coroutine_test_state() is called per repeat because this loop asserts
+	// live_frames, which SetUp zeroes only once.
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
 		reset_coroutine_test_state();
@@ -798,7 +811,9 @@ TEST_F(AsyncSemaphoreTest, EveryPermitReachesAWaiterWhenReleasesAndArrivalsConte
 	// These waiters are resumed on four threads at once, which is why they record into
 	// atomics and track no frame: live_frames and wait_record are unsynchronized, so a
 	// waiter touching them off-thread would be a data race in the test rather than a
-	// finding about the library.
+	// finding about the library. Which is also why no repeat calls
+	// reset_coroutine_test_state(): these waiters write none of the state it clears,
+	// and nothing in the loop reads it.
 	constexpr std::size_t acquirers = 4;
 	constexpr std::size_t parties   = acquirers * 2;
 
@@ -879,6 +894,10 @@ TEST_F(AsyncSemaphoreTest, NoPermitIsLostWhenAStopAndAReleaseBothRaceAnArrivingW
 	// in 20 of 20 runs. Both figures are against the pre-fix await_suspend, from one
 	// loop over the same binary, read from its exit status; against the fix as it
 	// stands, 0 of 20.
+	//
+	// No repeat calls reset_coroutine_test_state(): these acquirers are resumed on
+	// several threads at once, so they record into atomics and track no frame, and
+	// nothing in the loop reads the state it would clear.
 	constexpr std::size_t acquirers = 4;
 	constexpr std::size_t releasers = 4;
 	constexpr std::size_t stoppers  = 2;
@@ -935,6 +954,9 @@ TEST_F(AsyncSemaphoreTest, ConcurrentTryAcquiresHandOutEachPermitOnce)
 	// try_acquire so that they hit the count in the same instant. Exactly two may win: a
 	// try_acquire written as a load, a test and a store would let more than one caller
 	// see the same permit and drive the count below zero.
+	//
+	// No repeat calls reset_coroutine_test_state(): no coroutine takes part here, so
+	// there is none of that state to clear.
 	constexpr int parties = 4;
 	constexpr int permits = 2;
 

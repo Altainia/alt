@@ -209,7 +209,8 @@ namespace alt::detail
 			}
 
 			// Written here rather than after the link, which may not be followed by a
-			// read of *this at all. See rule 3 above.
+			// read of *this at all. See rule 3 above. What makes this plain store safe
+			// to read on another thread is the list's mutex: see m_parked.
 			m_parked = true;
 
 			// Set by the condition itself, under the list's mutex, so that the two
@@ -311,7 +312,20 @@ namespace alt::detail
 		 */
 		std::optional<std::stop_callback<waiter_stop_release>> m_stop;
 
-		/** Whether the node was linked, and so whether its resumer wrote the verdict. */
+		/**
+		 * Whether the node was linked, and so whether its resumer wrote the verdict.
+		 *
+		 * A plain bool, read in await_resume on whichever thread resumed this waiter,
+		 * which is not necessarily the thread that wrote it. Rule 3 says why the write
+		 * precedes the link; what makes the read safe elsewhere is the list's mutex.
+		 * The store is sequenced before link() acquires that mutex, and every party
+		 * that can resume this node -- a satisfier's detach, or a stop callback's claim
+		 * -- acquires the same mutex before it touches the node at all, so it reads this
+		 * field's final value, and the resumption it then performs is on its own thread.
+		 * There is no path by which a waiter is resumed without its resumer having gone
+		 * through that mutex first, which is the same argument waiter_list::try_claim
+		 * makes for the node's handle and links.
+		 */
 		bool m_parked = false;
 
 		/** Whether a stop callback won this waiter before it could park. */

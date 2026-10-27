@@ -41,6 +41,14 @@ namespace alt
 	 * the node it is parked on lives in that frame; destroying this latch instead
 	 * releases them all, which is the supported teardown.
 	 *
+	 * A waiter that teardown released may not await this latch again. That is
+	 * unsupported on all four primitives in this family, by choice rather than by
+	 * necessity: the destructor releases its waiters itself, ahead of m_waiters' own
+	 * destructor, which does keep the ordinary case from leaking a re-awaiting waiter
+	 * -- but that is a defensive measure rather than a promise, and no depth of
+	 * re-await is promised. alt::async_mutex's destructor records the reason the
+	 * family settled on promising nothing.
+	 *
 	 * Destroying the latch itself from a resumed waiter's body is a different thing
 	 * and is allowed: the releasing count_down() publishes the zero and takes the
 	 * queue first, and the resumption is the last thing it does, so nothing is left to
@@ -58,9 +66,13 @@ namespace alt
 	 * That first rule is why count_down() can resume its waiters from one multi-node
 	 * chain (detach_all) instead of one detach_one at a time: nothing in the library
 	 * lets one waiter own a sibling's frame, because there is no when_all or race
-	 * combinator and a task is lazy and owns only the child it awaits. Revisit the
-	 * day such a combinator lands: async_event and async_latch would then both need
-	 * detach_one.
+	 * combinator and a task is lazy and owns only the child it awaits. Revisit the day
+	 * such a combinator lands: every multi-node resumption in the library would need
+	 * the same revisit, which is async_event::set, this count_down,
+	 * async_semaphore::release -- which wins its waiters one detach_one at a time but
+	 * resumes them as one chain -- and all four destructors. Resuming one node per
+	 * detach, and not holding the next node across a resumption, is what each of them
+	 * would have to change to.
 	 */
 	class async_latch
 	{

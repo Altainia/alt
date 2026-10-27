@@ -40,6 +40,14 @@ namespace alt
 	 * destroying this event instead releases them all, which is the supported
 	 * teardown.
 	 *
+	 * A waiter that teardown released may not await this event again. That is
+	 * unsupported on all four primitives in this family, by choice rather than by
+	 * necessity: the destructor releases its waiters itself, ahead of m_waiters' own
+	 * destructor, which does keep the ordinary case from leaking a re-awaiting waiter
+	 * -- but that is a defensive measure rather than a promise, and no depth of
+	 * re-await is promised. alt::async_mutex's destructor records the reason the
+	 * family settled on promising nothing.
+	 *
 	 * Destroying the event itself from a resumed waiter's body is a different thing
 	 * and is allowed: set() marks the event set and takes the queue in one critical
 	 * section, and the resumption is the last thing it does, so nothing is left to be

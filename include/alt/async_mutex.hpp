@@ -115,6 +115,18 @@ namespace alt
 	 *         // the critical section
 	 *     }
 	 *
+	 * Not recursive, and the same precondition std::mutex carries: awaiting this
+	 * mutex from inside a critical section that already holds it is a permanent
+	 * deadlock, not a re-entry. The second await finds m_held true and parks, and the
+	 * only party that could release the lock is the coroutine that has just parked --
+	 * its guard being a live local in the suspended frame. The lock then stays marked
+	 * held for the rest of the program, so every later locker parks behind it too, and
+	 * a release whose hand-off drain resumed that waiter stops there as well, having
+	 * seen the lock never come back. Nothing detects it and nothing times out; the
+	 * symptom is a silent hang. The usual way in is a helper that takes the same lock,
+	 * so a helper meant to run inside a critical section takes the guard, or the state
+	 * the lock protects, as a parameter rather than acquiring for itself.
+	 *
 	 * Fairness, as far as it goes: a release hands the lock directly to the oldest
 	 * parked waiter rather than dropping it and letting everyone re-contend, so a
 	 * waiter that has parked cannot be overtaken by a later arrival. What is not
@@ -148,11 +160,13 @@ namespace alt
 	 * waiter's frame and nothing withdraws it from the queue, and a coroutine parked
 	 * here may not have its frame destroyed from outside, for the same reason.
 	 * Destroying this mutex instead releases them all, which is the supported
-	 * teardown -- and a waiter released that way must not await this mutex again,
-	 * unlike async_semaphore's, where a re-await during destruction is both supported
-	 * and tested. That is a choice rather than a consequence of anything else here:
-	 * the ordinary case is benign, and the destructor says what the choice buys, which
-	 * is not having to promise that a re-await is never handed the lock inside the
+	 * teardown -- and a waiter released that way must not await this mutex again.
+	 * That rule is the same on all four primitives in this family, and on none of
+	 * them is it forced: each destructor releases its waiters itself, ahead of its
+	 * waiter_list member's own destructor, which keeps the ordinary case from leaking
+	 * a re-awaiting waiter but is a defensive measure rather than a promise. This
+	 * mutex is the one with a second reason on top of that, and the destructor states
+	 * it: not having to promise that a re-await is never handed the lock inside the
 	 * destructor body and does not carry the guard out of it.
 	 *
 	 * The third is this mutex's own, and it is where it parts company with

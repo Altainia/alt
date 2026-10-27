@@ -154,6 +154,17 @@ cascade](cancellable_task.md) tears the chain down. Code between the `co_await`
 and that suspension point really does run, which is why the result has to be
 checked rather than assumed.
 
+It also runs **on whichever thread observed the stop** — the thread that called
+`request_stop()`, synchronously inside that call — and a `home` scheduler on the
+chain does not change that: `start_options::home` governs only where the frames
+are destroyed, not where a released waiter's body runs. So a released
+continuation that touches thread-affine state must `co_await alt::resume_on(...)`
+before touching it, exactly as it must after an ordinary `set()`. For a window
+closing on the UI thread this is the hazard that bites: the body resumes inside
+the close, on the closing thread, with the window already going away.
+[`cancellable_task`](cancellable_task.md) states the same narrowing from the
+cancellation side.
+
 Cancellation reaches a waiter only inside a chain rooted at an
 [`alt::cancellable_task`](cancellable_task.md), through the stop callback the
 awaiter registers on that chain's token. Awaited from a plain `alt::task` run by
@@ -223,6 +234,21 @@ only after every destructor in the scope has run, so when both objects share a
 scope the first form passes every sanitizer run and is still a use-after-free.
 The only defense is the declaration order.
 
+### A waiter released by the destructor may not await the event again
+
+Awaiting the event from inside a waiter the destructor released is
+**unsupported**, as it is on all four primitives in this family. That is a
+choice rather than something the code forces. Each destructor releases its
+waiters itself, before its `waiter_list` member's own destructor runs, so a
+re-await does in fact land in a list that is still whole and is released a
+second time by that member — but that explicit release is a defensive measure,
+it is what keeps the ordinary case from leaking a re-awaiting waiter rather than
+a guarantee anyone may lean on, and no depth of re-await is promised. Tests pin
+the behavior so it cannot regress silently; the documentation promises nothing
+about it. [`async_mutex`](async_mutex.md#a-waiter-released-by-the-destructor-may-not-await-the-mutex-again)
+does not have even the benign case, and states the reason the family settled on
+promising nothing.
+
 ### Destroying an event while another thread is satisfying it is undefined
 
 Destruction is the one operation that is not thread-safe. Destroying an
@@ -249,9 +275,10 @@ takes the whole queue before it resumes anyone, so a frame destroyed from inside
 one resumption may be one that same `set()` is already committed to resuming.
 
 Destroying the *event* from a waiter's body is a different thing and is allowed:
-`set()` takes the queue, marks the event set and only then resumes, and the
-resumption is the last thing it does, so there is nothing left for it to read
-afterwards. One qualification comes with that, and no waiter can check it for
+`set()` marks the event set and takes the queue — in that order, the store being
+the action it performs under the list's mutex and the walk coming after it — and
+only then resumes, the resumption being the last thing it does, so there is
+nothing left for it to read afterwards. One qualification comes with that, and no waiter can check it for
 itself. A single `set()` may have won several waiters and is committed to
 resuming all of them, so the siblings that follow the one which destroyed the
 event are still resumed — correctly, each having been won before anything ran —
