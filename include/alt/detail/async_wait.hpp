@@ -74,8 +74,16 @@ namespace alt::detail
 	 * when they are satisfied. Derived supplies two members:
 	 *
 	 * - `bool ready() const` — whether the wait is already over, so no suspension is
-	 *   needed. Also consulted a second time under the list's mutex, as the
-	 *   condition on the link, so it must take no lock and resume nothing.
+	 *   needed. Also consulted a second time under the list's mutex, as the condition
+	 *   on the link, so it must take no lock of its own, must not call back into the
+	 *   list, and must resume nothing. That middle clause is the one that bites: a
+	 *   fair semaphore's natural `m_count > 0 && list().empty()` self-deadlocks on the
+	 *   non-recursive mutex link() is already holding.
+	 *
+	 *   It is consulted at most twice per wait, and the second call happens only if
+	 *   the first returned false, so a condition that consumes something — a
+	 *   semaphore permit, a mutex — succeeds at most once per wait and may consume on
+	 *   either call.
 	 * - `waiter_list& list()` — the queue to park in.
 	 *
 	 * Every wait reports std::expected<void, std::error_code>: a value when the

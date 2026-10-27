@@ -10,10 +10,16 @@ namespace alt
 
 	async_event::~async_event()
 	{
-		// Released explicitly rather than left to m_waiters' own destructor, so that
-		// the release happens here, where the released-not-satisfied contract is
-		// documented, and cannot be lost to a later change in the member order or in
-		// waiter_list's backstop. The list's destructor then finds nothing to do.
+		// Released here rather than left to m_waiters' own destructor, which would do
+		// the same thing one step later, because one step later is too late for a
+		// waiter that awaits this event again from inside the walk. Its continuation
+		// may perfectly well do that: the event still exists while this body runs, so
+		// the re-await parks in a list that is still whole, and the member's destructor
+		// then releases that round. So the list's destructor may well have waiters
+		// left; AWaiterThatReAwaitsWhileTheEventIsBeingDestroyedIsStillReleased is the
+		// case where it has exactly one. Leave the release to the member instead and
+		// that re-await lands in a list whose walk has already finished, parked on an
+		// event that will never walk again.
 		detail::resume_claimed(m_waiters.detach_all(), false);
 	}
 
@@ -21,23 +27,22 @@ namespace alt
 	{
 		// DELICATE. Read this before changing it.
 		//
-		// Three statements, and the order of all three is load-bearing.
+		// Two statements, and only the boundary between them is load-bearing.
 		//
-		// The store comes first, because a waiter that arrives from here on must not
-		// park: the detach below has already walked the list and would not see it.
-		// What makes that watertight is where the waiter reads this flag a second
-		// time, as the condition on its link, under the same mutex detach_all takes.
-		// Either the waiter's link runs first, and this detach finds its node, or
-		// this detach runs first, and the waiter's link sees the flag set and refuses
-		// to park. Store after detach instead and that reasoning collapses: a waiter
-		// could read the flag unset under the mutex, link, and never be resumed.
-		m_set.store(true, std::memory_order_release);
+		// Marking the event set and taking its waiting queue are one critical section,
+		// not two steps whose order has to be argued about. A waiter decides whether to
+		// park by reading this same flag as the condition on its link, under this same
+		// mutex, so it either links before this section and is detached by it, or links
+		// after it and finds the event already set and does not park at all. There is
+		// no third interleaving, and that is the point: an earlier version of this
+		// function published the flag and then detached, which was correct only because
+		// the two statements were in that order. They are no longer in any order.
+		detail::waiter_node* const chain = m_waiters.detach_all([this] { m_set.store(true, std::memory_order_release); });
 
-		detail::waiter_node* const chain = m_waiters.detach_all();
-
-		// Last, and outside the list's mutex, because resuming a waiter runs its body:
-		// it may re-await this event, destroy it outright, or take whatever lock it
-		// likes. Nothing may be read from *this after this call for the same reason.
+		// The resumption is outside the mutex, and last, because resuming a waiter runs
+		// its body: it may re-await this event, destroy it outright, or take whatever
+		// lock it likes. Nothing may be read from *this after this call, for the same
+		// reason.
 		detail::resume_claimed(chain, true);
 	}
 

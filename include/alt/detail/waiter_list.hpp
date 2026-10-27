@@ -144,7 +144,9 @@ namespace alt::detail
 	 * task holding a sibling that is waiting on the same primitive; a primitive that
 	 * can do that must resume its waiters one detach at a time rather than from one
 	 * multi-node chain. A chain of one, from waiter_list::claim or
-	 * waiter_list::detach_one, cannot hit this at all.
+	 * waiter_list::detach_one, cannot hit this hazard at all, which is not the same as
+	 * making such destruction safe; waiter_list::detach_all says what it does and does
+	 * not achieve.
 	 *
 	 * Marked noexcept deliberately. A waiter's resumption throwing past this walk
 	 * would abandon the rest of the chain suspended forever, so terminating is
@@ -245,7 +247,9 @@ namespace alt::detail
 		 * waiter released by this destructor may not destroy another waiter still
 		 * queued behind it in the same chain. A primitive whose waiters can destroy
 		 * one another must therefore drain its list with detach_one before it reaches
-		 * this destructor, rather than leaving the release to the backstop.
+		 * this destructor, rather than leaving the release to the backstop -- and read
+		 * detach_all first, because draining one at a time removes this walk's hazard
+		 * without making a destroyed waiter's node safe to leave behind.
 		 */
 		~waiter_list()
 		{
@@ -392,10 +396,39 @@ namespace alt::detail
 		}
 
 		/**
+		 * @brief Claims and detaches every node this caller can win, with the caller's
+		 *        own state change made in the same critical section.
+		 *
+		 * The counterpart of link()'s condition, and the other half of what makes a
+		 * primitive's state and its waiting queue one decision rather than two. A
+		 * satisfier that publishes its state and then walks the list leaves a window
+		 * between the two steps: a waiter that read the old state can link after the
+		 * walk has gone past, and nothing will ever walk the list again on its behalf.
+		 * Doing both here closes that by construction rather than by statement order,
+		 * because no waiter can take the mutex in between. Which is also why the
+		 * action's position inside the section does not matter: there is no
+		 * interleaving left to reason about.
+		 *
+		 * @param under_lock Run with the mutex held. It must not take a lock, call back
+		 *        into this list, or resume anything, and it must not throw: this
+		 *        function is noexcept, so an exception terminates. Publishing the
+		 *        primitive's own atomic flag is the intended shape.
+		 *
+		 * @return As the overload below.
+		 */
+		template<typename Action>
+		waiter_node* detach_all(Action under_lock) noexcept
+		{
+			const std::scoped_lock lock{m_mutex};
+			under_lock();
+			return detach_all_locked();
+		}
+
+		/**
 		 * @brief Claims and detaches every node this caller can win.
 		 *
-		 * What a satisfier that releases everyone calls: an event being set, a latch
-		 * reaching zero, a primitive being destroyed.
+		 * What a satisfier that releases everyone and has no state of its own to
+		 * publish calls, which in practice means a primitive being destroyed.
 		 *
 		 * A node another party has already claimed but not yet unlinked is left where
 		 * it is, because that party owns it and will unlink it when it takes the
@@ -405,19 +438,108 @@ namespace alt::detail
 		 * @return The oldest node won, linked to the rest through @c next, or null.
 		 *         Every node in the chain is @c claimed and off the list. Passing a
 		 *         multi-node chain to resume_claimed carries that function's rule with
-		 *         it: no waiter's resumption may destroy a later node in the chain. A
-		 *         primitive whose waiters can destroy one another must release them
-		 *         with detach_one instead, one chain of one at a time. That works for a
-		 *         reason worth making explicit: a node still on the list can be
-		 *         withdrawn by its own owner's claim, so a waiter about to be destroyed
-		 *         can still be taken off the list first, while a node already sitting
-		 *         in a chain is beyond rescue: nothing can take it back out before the
-		 *         walk reaches it.
+		 *         it: no waiter's resumption may destroy a later node in the chain.
+		 *         detach_one leaves that rule with nothing to bite on, because a chain
+		 *         of one holds no pointer into another waiter's frame across a
+		 *         resumption, so a primitive whose waiters can destroy one another
+		 *         should release them one at a time.
+		 *
+		 *         What detach_one does not do is make that destruction safe. Nothing
+		 *         withdraws a parked node from the list -- no awaiter has a destructor
+		 *         that does it -- so a waiter whose frame is destroyed while it is
+		 *         still linked leaves a dangling node here for the next detach to walk
+		 *         into. Making that shape safe needs an awaiter that withdraws its own
+		 *         node, which nothing in the library has today. Until one does, both
+		 *         rules sit with the primitive's users: a resumed waiter may not
+		 *         destroy another waiter of the same primitive, and a parked waiter's
+		 *         frame may not be destroyed at all.
 		 */
 		waiter_node* detach_all() noexcept
 		{
 			const std::scoped_lock lock{m_mutex};
+			return detach_all_locked();
+		}
 
+		/**
+		 * @brief Claims and detaches the oldest node this caller can win, telling the
+		 *        caller's own state change whether it found anyone.
+		 *
+		 * What a satisfier that hands what it has to one waiter calls, and the shape
+		 * that keeps it from losing one. A semaphore written as
+		 *
+		 *     if(waiter_node* const won = list.detach_one()) { resume_claimed(won, true); }
+		 *     else { ++m_count; }
+		 *
+		 * has a lost wakeup that link()'s condition cannot save, because the waiter's
+		 * condition can read the count as zero under this mutex in the gap between the
+		 * detach that found nothing and the increment, and park on a permit that has
+		 * already been given away. Deciding both inside this one critical section is
+		 * the fix.
+		 *
+		 * @param under_lock Run with the mutex held, after the detach attempt, with
+		 *        true when a node was detached. Same restrictions as detach_all's: no
+		 *        lock, no reentry into this list, no resumption, no exception. The node
+		 *        itself is deliberately not passed, because resuming under the mutex is
+		 *        the one thing that must not happen here.
+		 *
+		 * @return As the overload below.
+		 */
+		template<typename Action>
+		waiter_node* detach_one(Action under_lock) noexcept
+		{
+			const std::scoped_lock lock{m_mutex};
+			waiter_node* const     detached = detach_one_locked();
+			under_lock(detached != nullptr);
+			return detached;
+		}
+
+		/**
+		 * @brief Claims and detaches the oldest node this caller can win.
+		 *
+		 * Nodes another party has already claimed are skipped rather than stopping the
+		 * search, so a waiter being cancelled does not hide the waiters behind it.
+		 *
+		 * @return A chain of exactly one @c claimed, unlinked node, or null when the
+		 *         list holds nothing this caller can win.
+		 */
+		waiter_node* detach_one() noexcept
+		{
+			const std::scoped_lock lock{m_mutex};
+			return detach_one_locked();
+		}
+
+		/**
+		 * How many nodes are linked. This counts a node that is already claimed but
+		 * whose winner has not yet reached the mutex, so it is an upper bound on how
+		 * many waiters are still winnable, not an exact count of them.
+		 */
+		[[nodiscard]] std::size_t size() const
+		{
+			const std::scoped_lock lock{m_mutex};
+			return m_size;
+		}
+
+		/**
+		 * True when no node is linked. This carries the same caveat as size(): a node
+		 * whose claim another party has won but not yet unlinked still counts as
+		 * linked, so a false result does not promise that detach_one() will return
+		 * anything.
+		 *
+		 * A caller releasing one waiter must therefore act on what detach_one()
+		 * returns, not on this. Testing this first and assuming a waiter will be there
+		 * drops the release on exactly that interleaving, which for a semaphore means
+		 * a permit that is never handed to anyone.
+		 */
+		[[nodiscard]] bool empty() const
+		{
+			const std::scoped_lock lock{m_mutex};
+			return m_size == 0;
+		}
+
+	private:
+		/** The walk itself. The mutex must be held. */
+		waiter_node* detach_all_locked() noexcept
+		{
 			waiter_node* chain_head = nullptr;
 			waiter_node* chain_tail = nullptr;
 			waiter_node* node       = m_head;
@@ -451,21 +573,9 @@ namespace alt::detail
 			return chain_head;
 		}
 
-		/**
-		 * @brief Claims and detaches the oldest node this caller can win.
-		 *
-		 * What a satisfier that releases one waiter calls: a semaphore being released,
-		 * a mutex being unlocked. Nodes another party has already claimed are skipped
-		 * rather than stopping the search, so a waiter being cancelled does not hide
-		 * the waiters behind it.
-		 *
-		 * @return A chain of exactly one @c claimed, unlinked node, or null when the
-		 *         list holds nothing this caller can win.
-		 */
-		waiter_node* detach_one() noexcept
+		/** The search itself. The mutex must be held. */
+		waiter_node* detach_one_locked() noexcept
 		{
-			const std::scoped_lock lock{m_mutex};
-
 			for(waiter_node* node = m_head; node != nullptr; node = node->next)
 			{
 				if(try_claim(*node))
@@ -478,35 +588,6 @@ namespace alt::detail
 			return nullptr;
 		}
 
-		/**
-		 * How many nodes are linked. This counts a node that is already claimed but
-		 * whose winner has not yet reached the mutex, so it is an upper bound on how
-		 * many waiters are still winnable, not an exact count of them.
-		 */
-		[[nodiscard]] std::size_t size() const
-		{
-			const std::scoped_lock lock{m_mutex};
-			return m_size;
-		}
-
-		/**
-		 * True when no node is linked. This carries the same caveat as size(): a node
-		 * whose claim another party has won but not yet unlinked still counts as
-		 * linked, so a false result does not promise that detach_one() will return
-		 * anything.
-		 *
-		 * A caller releasing one waiter must therefore act on what detach_one()
-		 * returns, not on this. Testing this first and assuming a waiter will be there
-		 * drops the release on exactly that interleaving, which for a semaphore means
-		 * a permit that is never handed to anyone.
-		 */
-		[[nodiscard]] bool empty() const
-		{
-			const std::scoped_lock lock{m_mutex};
-			return m_size == 0;
-		}
-
-	private:
 		/**
 		 * The election itself, in one place so there is exactly one copy of it.
 		 *

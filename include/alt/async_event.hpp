@@ -94,7 +94,9 @@ namespace alt
 
 			/**
 			 * Whether the wait is already over. Also the condition the link is made
-			 * under, so it reads one atomic and takes no lock.
+			 * under, with the list's mutex held, so it reads one atomic: no lock of its
+			 * own, no call back into the list, nothing resumed. See
+			 * detail::wait_awaiter for the whole of that contract.
 			 */
 			[[nodiscard]] bool ready() const noexcept
 			{

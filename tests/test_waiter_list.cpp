@@ -108,6 +108,18 @@ namespace
 		ASSERT_TRUE(list.link(*node));
 	}
 
+	/**
+	 * What a semaphore does with its permit once detach_one has reported: nothing
+	 * when it was handed to a waiter, back into the count when it was not.
+	 */
+	void count_back_unless_handed_over(bool detached, int& counted_back)
+	{
+		if(!detached)
+		{
+			++counted_back;
+		}
+	}
+
 	/** Counts the nodes a detached chain holds, without resuming any of them. */
 	std::size_t chain_length(const waiter_node* chain)
 	{
@@ -392,6 +404,80 @@ TEST(WaiterList, DetachingSkipsANodeAnotherPartyHasAlreadyClaimed)
 	EXPECT_EQ(list.detach_all(), nullptr);
 	EXPECT_EQ(list.size(), 1U);
 	EXPECT_FALSE(list.empty());
+}
+
+TEST(WaiterList, DetachAllRunsTheCallersActionEvenWithNobodyWaiting)
+{
+	// A satisfier's state change and its walk are one critical section, and that
+	// state change is not conditional on finding anyone: an event with no waiters
+	// still has to become set, or the next waiter to arrive parks forever.
+	waiter_list list;
+	int         actions = 0;
+
+	const auto mark_satisfied = [&] { ++actions; };
+
+	// Hoisted out of the assertion macros throughout: a lambda argument inside one
+	// counts against the test body's cognitive complexity for no reader's benefit.
+	const waiter_node* const nothing_waiting = list.detach_all(mark_satisfied);
+	EXPECT_EQ(nothing_waiting, nullptr);
+	EXPECT_EQ(actions, 1);
+
+	waiter_node node{.handle = std::noop_coroutine()};
+	ASSERT_TRUE(list.link(node));
+
+	const waiter_node* const detached = list.detach_all(mark_satisfied);
+	EXPECT_EQ(detached, &node);
+	EXPECT_EQ(actions, 2);
+	EXPECT_EQ(list.size(), 0U);
+}
+
+TEST(WaiterList, DetachOneTellsTheCallersActionWhenItFoundNobody)
+{
+	// The semaphore's shape: the permit goes to a waiter if there was one and back
+	// into the count if there was not, and that decision has to be made in the same
+	// critical section as the search, or a waiter can park on a permit that has
+	// already been given away.
+	waiter_list list;
+	int         counted_back = 0;
+
+	const auto take_back_unless_handed_over = [&](bool detached) { count_back_unless_handed_over(detached, counted_back); };
+
+	// Results are hoisted out of the assertion macros throughout: a lambda argument
+	// inside one counts against the test body's cognitive complexity for no reader's
+	// benefit.
+	const waiter_node* const from_an_empty_list = list.detach_one(take_back_unless_handed_over);
+	EXPECT_EQ(from_an_empty_list, nullptr);
+	EXPECT_EQ(counted_back, 1);
+
+	waiter_node taken{.handle = std::noop_coroutine()};
+	ASSERT_TRUE(list.link(taken));
+	taken.state.store(waiter_state::claimed, std::memory_order_release);
+
+	// Linked, but already won by another party, so there is still nobody this caller
+	// can hand anything to. This is the interleaving size() and empty() cannot see,
+	// and the reason the answer comes from the search itself rather than from a count.
+	const waiter_node* const from_a_list_of_one_already_won = list.detach_one(take_back_unless_handed_over);
+	EXPECT_EQ(from_a_list_of_one_already_won, nullptr);
+	EXPECT_EQ(counted_back, 2);
+	EXPECT_EQ(list.size(), 1U);
+}
+
+TEST(WaiterList, DetachOneTellsTheCallersActionWhenItHandedTheWaiterOver)
+{
+	waiter_list list;
+	int         counted_back = 0;
+
+	const auto take_back_unless_handed_over = [&](bool detached) { count_back_unless_handed_over(detached, counted_back); };
+
+	waiter_node available{.handle = std::noop_coroutine()};
+	ASSERT_TRUE(list.link(available));
+
+	const waiter_node* const handed_over = list.detach_one(take_back_unless_handed_over);
+	EXPECT_EQ(handed_over, &available);
+
+	// Nothing counted back, because the waiter got it.
+	EXPECT_EQ(counted_back, 0);
+	EXPECT_EQ(list.size(), 0U);
 }
 
 TEST(WaiterList, ResumeClaimedWritesSatisfiedAndMarksDone)

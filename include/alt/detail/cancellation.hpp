@@ -169,7 +169,22 @@ namespace alt::detail
 			return m_inner.await_suspend(h);
 		}
 
-		decltype(auto) await_resume()
+		/**
+		 * Marked [[nodiscard]] to carry the inner awaiter's own, which this wrapper
+		 * would otherwise swallow: every await inside an alt::task goes through here,
+		 * so without it co_await on something whose result must be checked, such as an
+		 * alt async primitive's satisfied-or-released std::expected, is discarded in
+		 * silence. Harmless for the void-returning awaiters, which have no result to
+		 * discard.
+		 *
+		 * Which compilers act on it was measured rather than assumed. Clang 21.1 warns
+		 * both through this wrapper and without it. GCC 15.2 warns in neither case: it
+		 * does not apply -Wunused-result to a co_await expression at all, even when the
+		 * awaiter's own await_resume carries the attribute. So this is what makes the
+		 * clang-tidy and Clang builds catch a dropped result, and nothing catches it
+		 * under GCC today.
+		 */
+		[[nodiscard]] decltype(auto) await_resume()
 		{
 			return m_inner.await_resume();
 		}
