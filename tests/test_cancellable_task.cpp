@@ -327,9 +327,10 @@ TEST_F(CancellableTaskTest, AnExternalStopConcurrentWithTeardownIsSafe)
 	// against every interleaving. The sharpest one, a forwarder dereferencing the
 	// promise's own source mid-destruction, was only a couple of destructor calls
 	// wide, and this test was measured against a deliberately reordered member block
-	// and passed, so it would not have caught that defect. That is why the hazard was
-	// removed structurally, by giving the forwarder a reference-counted copy rather
-	// than a pointer into the frame, instead of being left to a test to catch.
+	// and passed, so it would not have caught that defect. That hazard is now gone
+	// structurally: detail::stop_forwarder holds a reference-counted copy of the
+	// source rather than a pointer into the frame, so no member ordering can
+	// reintroduce it. This test covers the overlap that remains, not that one.
 	for(int attempt = 0; attempt < 100; ++attempt)
 	{
 		reset_coroutine_test_state();
