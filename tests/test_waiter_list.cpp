@@ -208,6 +208,33 @@ namespace
 		return resumed;
 	}
 
+	/**
+	 * The stop side of the satisfier-versus-stop race: the head node first, then
+	 * every node in order.
+	 *
+	 * The head is deliberately first and alone, because it is the only node whose
+	 * claim is genuinely co-resident with a concurrent detach_all's claim of it:
+	 * detach_all walks from the head too, so both sides touch that one node's state
+	 * word in their first instruction after the rendezvous. Everything after that
+	 * has drifted. The second pass over the whole batch re-attempts the head, which
+	 * loses, and picks up the nodes behind it.
+	 *
+	 * @return How many waiters this side resumed.
+	 */
+	template<std::size_t Count>
+	std::size_t claim_the_head_then_the_rest(waiter_list& list, std::array<waiter_node, Count>& nodes)
+	{
+		std::size_t resumed = 0;
+
+		if(list.claim(nodes.front()))
+		{
+			resume_claimed(&nodes.front(), false);
+			++resumed;
+		}
+
+		return resumed + claim_and_resume_each(list, nodes);
+	}
+
 	/** Checks that every node in a batch ended up done. */
 	template<std::size_t Count>
 	void expect_every_node_done(const std::array<waiter_node, Count>& nodes)
@@ -468,10 +495,19 @@ TEST(WaiterList, DestroyingTheListWithLinkedNodesLeavesNoneLinked)
 
 TEST(WaiterList, AConcurrentSatisfierAndStopDoNotBothResume)
 {
-	// A satisfier detaching the whole list while a stop callback claims nodes one
-	// at a time. Every node must be resumed exactly once in total, by whichever of
-	// the two won it: twice would run a destroyed frame, and never would leave a
+	// A satisfier detaching the whole list while a stop callback claims nodes one at
+	// a time. Every node must be resumed exactly once in total, by whichever of the
+	// two won it: twice would run a destroyed frame, and never would leave a
 	// coroutine suspended forever.
+	//
+	// The rendezvous alone is not enough to make this a guard. Released together,
+	// the two sides immediately do different-length work and drift apart, so only
+	// their first instructions are co-resident. That is why the stop side claims the
+	// head node first and nothing before it: detach_all walks from the head too, so
+	// both sides reach for that one node's state word at the same moment, and a
+	// claim that was not a single atomic election would be caught there. The nodes
+	// behind the head are covered by the exactly-once invariant and by
+	// ThreadSanitizer, not by a tight window.
 	constexpr std::size_t node_count = 4;
 
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
@@ -491,7 +527,7 @@ TEST(WaiterList, AConcurrentSatisfierAndStopDoNotBothResume)
 
 			std::jthread stopper{[&] {
 				rendezvous(arrived, 2);
-				resumptions.fetch_add(claim_and_resume_each(list, nodes), std::memory_order_relaxed);
+				resumptions.fetch_add(claim_the_head_then_the_rest(list, nodes), std::memory_order_relaxed);
 			}};
 		}
 

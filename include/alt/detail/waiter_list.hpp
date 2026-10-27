@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <coroutine>
 #include <cstddef>
 #include <mutex>
@@ -96,13 +97,27 @@ namespace alt::detail
 	 * published as finished to anyone still watching it, so no field of the node is
 	 * read after it.
 	 *
+	 * The copy only protects the node being resumed. The rule the rest of the chain
+	 * needs is the caller's to keep: no resumption may destroy a *later* node in the
+	 * same chain. @c following is a raw pointer into the next waiter's frame, held
+	 * live across the resume and dereferenced after it, so a waiter whose
+	 * continuation frees another waiter still queued behind it in this chain leaves
+	 * this walk reading freed storage. The shape to watch for is a resumed
+	 * continuation that destroys something owning another waiter's frame, such as a
+	 * task holding a sibling that is waiting on the same primitive; a primitive that
+	 * can do that must resume its waiters one detach at a time rather than from one
+	 * multi-node chain. A chain of one, from waiter_list::claim or
+	 * waiter_list::detach_one, cannot hit this at all.
+	 *
 	 * Marked noexcept deliberately. A waiter's resumption throwing past this walk
 	 * would abandon the rest of the chain suspended forever, so terminating is
 	 * preferable to leaking the remaining waiters.
 	 *
-	 * Every node in the chain must carry a resumable handle. Resuming an empty one
-	 * is undefined behavior and this walk cannot check for it, because a waiter that
-	 * was never given a handle is indistinguishable from one that was.
+	 * Every node in the chain must carry a resumable handle, because resuming an
+	 * empty one is undefined behavior. waiter_list::link asserts that, which puts
+	 * the check at the point where the mistake is made rather than here, where the
+	 * node has already been detached and its owner has nothing left to do but
+	 * resume it.
 	 *
 	 * @param chain     The first node of a chain linked through @c next, or null.
 	 * @param satisfied What to record in each node before resuming it.
@@ -204,10 +219,18 @@ namespace alt::detail
 		 * are fair without doing anything to be fair.
 		 *
 		 * The node must be @c linked, must not already be on a list, and must carry a
-		 * resumable handle.
+		 * resumable handle. The handle is asserted, because a node is winnable the
+		 * instant it is linked and from then on nobody downstream can tell an empty
+		 * handle from a resumable one.
 		 */
 		void link(waiter_node& node)
 		{
+			// The cheapest place to catch the most likely mistake above this header:
+			// linking a waiter before its handle has been stored. Checked here rather
+			// than in resume_claimed, where the node is already detached and in flight
+			// and whoever owns it has nothing left to do but resume it.
+			assert(node.handle && "linking an alt waiter with no handle to resume");
+
 			const std::scoped_lock lock{m_mutex};
 
 			node.prev = m_tail;
@@ -267,7 +290,11 @@ namespace alt::detail
 		 * non-zero on return.
 		 *
 		 * @return The oldest node won, linked to the rest through @c next, or null.
-		 *         Every node in the chain is @c claimed and off the list.
+		 *         Every node in the chain is @c claimed and off the list. Passing a
+		 *         multi-node chain to resume_claimed carries that function's rule with
+		 *         it: no waiter's resumption may destroy a later node in the chain. A
+		 *         primitive whose waiters can destroy one another must release them
+		 *         with detach_one instead, one chain of one at a time.
 		 */
 		waiter_node* detach_all() noexcept
 		{
@@ -344,7 +371,17 @@ namespace alt::detail
 			return m_size;
 		}
 
-		/** True when no node is linked. */
+		/**
+		 * True when no node is linked. This carries the same caveat as size(): a node
+		 * whose claim another party has won but not yet unlinked still counts as
+		 * linked, so a false result does not promise that detach_one() will return
+		 * anything.
+		 *
+		 * A caller releasing one waiter must therefore act on what detach_one()
+		 * returns, not on this. Testing this first and assuming a waiter will be there
+		 * drops the release on exactly that interleaving, which for a semaphore means
+		 * a permit that is never handed to anyone.
+		 */
 		[[nodiscard]] bool empty() const
 		{
 			const std::scoped_lock lock{m_mutex};
@@ -359,6 +396,14 @@ namespace alt::detail
 		 * winner's later writes to the node cannot be hoisted above it, and a party
 		 * that observes someone else's claim also observes whatever that claimer
 		 * published before claiming.
+		 *
+		 * What this word does not do is hand over the node's contents. A waiter's
+		 * handle and links are written before link() takes m_mutex, and every reader
+		 * of them reaches them through that same mutex: claim()'s winner locks before
+		 * it unlinks, and a detached chain was assembled under the lock before anyone
+		 * walked it. The handle handoff is therefore synchronized by m_mutex, not by
+		 * this CAS, so winning the election alone does not entitle a caller to read
+		 * the node's handle.
 		 */
 		static bool try_claim(waiter_node& node) noexcept
 		{
