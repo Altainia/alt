@@ -11,6 +11,45 @@
 #include <stop_token>
 #include <system_error>
 
+namespace alt
+{
+
+	/**
+	 * @brief What an alt async wait reports: satisfied, or released before it was.
+	 *
+	 * The result of awaiting an alt::async_event, an alt::async_latch or an
+	 * alt::async_semaphore. It holds a value when the primitive satisfied the wait,
+	 * and an error when the wait ended without that: the awaiting chain was
+	 * cancelled, or the primitive was destroyed with the waiter still parked.
+	 *
+	 * That error is always std::errc::operation_canceled, whichever primitive
+	 * reported it and whichever of the two reasons it was, and the way to name it is
+	 * the standard library's own idiom -- compare the std::error_code against the
+	 * condition rather than build a second code to match it:
+	 *
+	 *     const alt::wait_result result = co_await event;
+	 *
+	 *     if(!result && result.error() == std::errc::operation_canceled)
+	 *     {
+	 *         // released rather than satisfied
+	 *     }
+	 *
+	 * Since that is the only error any of these waits can report, a bare @c !result
+	 * is usually the whole of the check; the comparison is for a caller that has
+	 * folded several kinds of failure into one error_code of its own.
+	 *
+	 * alt::async_mutex does not yield this type, being the one primitive in the
+	 * family whose satisfied wait has something to hand back: it yields
+	 * std::expected<alt::async_mutex_lock, std::error_code>. The error half is the
+	 * same error, named the same way.
+	 *
+	 * Declared in <alt/detail/async_wait.hpp>, which every one of those primitives'
+	 * headers includes, so including the primitive is enough to name this.
+	 */
+	using wait_result = std::expected<void, std::error_code>;
+
+}
+
 namespace alt::detail
 {
 
@@ -20,13 +59,14 @@ namespace alt::detail
 		{ p.cancellation_context_pointer() } -> std::same_as<cancellation_context*>;
 	};
 
-	/** What every alt async wait reports: satisfied, or released before it was. */
-	using wait_result = std::expected<void, std::error_code>;
-
 	/**
 	 * The error a released wait reports. One function, so every primitive in the
-	 * library releases its waiters with the same code and a caller can compare
-	 * against it without knowing which primitive it came from.
+	 * library releases its waiters with the same code.
+	 *
+	 * Internal, and deliberately not the public way to name that error: a caller
+	 * compares against std::errc::operation_canceled instead, which is what
+	 * alt::wait_result documents and what the standard library's own error_code
+	 * comparisons look like. This exists so there is one place the code is built.
 	 */
 	[[nodiscard]] inline std::error_code wait_released_error() noexcept
 	{
@@ -88,10 +128,12 @@ namespace alt::detail
 	 *   already consumed, which is what await_suspend's rule 4 exists to guarantee.
 	 * - `waiter_list& list()` — the queue to park in.
 	 *
-	 * Every wait reports std::expected<void, std::error_code>: a value when the
-	 * primitive satisfied it, and std::errc::operation_canceled when it was
-	 * released without that happening, by a cancellation or by the primitive being
-	 * destroyed.
+	 * Every wait reports alt::wait_result: a value when the primitive satisfied it,
+	 * and std::errc::operation_canceled when it was released without that happening,
+	 * by a cancellation or by the primitive being destroyed. A derived awaiter whose
+	 * satisfied wait has something to hand back -- alt::async_mutex, with its guard --
+	 * hides this await_resume rather than extending it, and still takes the verdict
+	 * from the one below.
 	 *
 	 * Exactly one party resumes a waiter, on every path. Which one is settled by
 	 * waiter_list's claim election rather than by anything here.

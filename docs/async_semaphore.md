@@ -40,7 +40,7 @@ public:
 - The constructor takes the starting permit count, so the first `initial`
   acquisitions do not suspend. **The count must not be negative**; a debug build
   asserts it, and a release build does not check.
-- `co_await semaphore` yields `std::expected<void, std::error_code>`: a value
+- `co_await semaphore` yields [`alt::wait_result`](#the-result-of-a-wait): a value
   when the wait came away with a permit, and `std::errc::operation_canceled`
   when the wait ended without one. A wait that ends that way has consumed
   nothing, so the count is exactly what it would have been had the wait never
@@ -68,6 +68,50 @@ one takes it.
 
 `async_semaphore` is neither copyable nor movable. The awaiters inside suspended
 coroutine frames hold pointers to it, and no copy or move could fix those up.
+
+## The result of a wait
+
+```cpp
+namespace alt
+{
+    using wait_result = std::expected<void, std::error_code>;
+}
+```
+
+`alt::wait_result` is what `co_await semaphore` yields, and it is the same type
+for [`alt::async_event`](async_event.md) and
+[`alt::async_latch`](async_latch.md). It is declared in
+`<alt/detail/async_wait.hpp>`, which every one of those headers includes, so
+including this component is enough to name it — which is what a helper of your
+own that takes or returns a wait outcome should do, rather than spelling the
+`std::expected` out again:
+
+```cpp
+alt::wait_result record_and_forward(alt::wait_result result);
+```
+
+The error is always `std::errc::operation_canceled`, from all three primitives
+and for either reason a wait can be released, and it is named the way the
+standard library names an `errc` — by comparing the `std::error_code` against
+the condition rather than building a second code to match it:
+
+```cpp
+const alt::wait_result result = co_await semaphore;
+
+if(!result && result.error() == std::errc::operation_canceled)
+{
+    // released rather than holding a permit
+}
+```
+
+Since that is the only error any of these waits can report, a bare `!result` is
+usually the whole of the check; the comparison is for a caller that has folded
+several kinds of failure into one `std::error_code` of its own.
+
+[`alt::async_mutex`](async_mutex.md) is the one primitive in this family that
+does **not** yield this type. A satisfied acquisition has a guard to hand back,
+so its wait yields `std::expected<alt::async_mutex_lock, std::error_code>`. The
+error half is the same error, named the same way.
 
 ## Bounding concurrency
 

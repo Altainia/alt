@@ -16,10 +16,9 @@ namespace alt
 	 * zero does not suspend. The latch does not reset: once at zero it stays there,
 	 * which is what makes it safe to await from a coroutine that arrives late.
 	 *
-	 * Awaiting yields std::expected<void, std::error_code>. It holds a value when
-	 * the count reached zero, and std::errc::operation_canceled when the wait ended
-	 * without that: the awaiting chain was cancelled, or this latch was destroyed
-	 * with waiters still parked.
+	 * Awaiting yields alt::wait_result. It holds a value when the count reached zero,
+	 * and std::errc::operation_canceled when the wait ended without that: the awaiting
+	 * chain was cancelled, or this latch was destroyed with waiters still parked.
 	 *
 	 * Every member but the destructor is safe to call from any thread, and
 	 * concurrently: of several threads counting down at once, exactly one is the call

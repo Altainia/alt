@@ -16,10 +16,10 @@ namespace alt
 	 * to parked waiters before the count. try_acquire() is the same acquisition
 	 * without the suspension, for a caller that would rather do something else.
 	 *
-	 * Awaiting yields std::expected<void, std::error_code>. It holds a value when
-	 * the wait came away with a permit, and std::errc::operation_canceled when the
-	 * wait ended without one: the awaiting chain was cancelled, or this semaphore was
-	 * destroyed with waiters still parked. A wait that ends that way has consumed
+	 * Awaiting yields alt::wait_result. It holds a value when the wait came away with
+	 * a permit, and std::errc::operation_canceled when the wait ended without one: the
+	 * awaiting chain was cancelled, or this semaphore was destroyed with waiters still
+	 * parked. A wait that ends that way has consumed
 	 * nothing, so the count is exactly what it would have been had the wait never
 	 * happened.
 	 *

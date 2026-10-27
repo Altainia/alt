@@ -283,7 +283,7 @@ namespace alt
 			 */
 			[[nodiscard]] std::expected<async_mutex_lock, std::error_code> await_resume() const noexcept
 			{
-				const detail::wait_result result = detail::wait_awaiter<mutex_awaiter>::await_resume();
+				const wait_result result = detail::wait_awaiter<mutex_awaiter>::await_resume();
 
 				if(!result)
 				{

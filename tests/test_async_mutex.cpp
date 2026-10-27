@@ -77,11 +77,15 @@ namespace
 	 */
 	constexpr std::uintptr_t stack_growth_allowance = 4096U;
 
-	/** The error every released wait reports. */
-	const std::error_code released_error = std::make_error_code(std::errc::operation_canceled);
+	/**
+	 * The condition every released wait reports, named the way a caller names it:
+	 * compared against as a std::errc rather than built into a second
+	 * std::error_code to match. See alt::wait_result.
+	 */
+	constexpr std::errc released_error = std::errc::operation_canceled;
 
-	/** The error a try_lock that found the mutex held reports. */
-	const std::error_code busy_error = std::make_error_code(std::errc::device_or_resource_busy);
+	/** The condition a try_lock that found the mutex held reports. */
+	constexpr std::errc busy_error = std::errc::device_or_resource_busy;
 
 	/** What one waiter coroutine recorded about its wait, for the test to inspect. */
 	struct lock_record

@@ -23,7 +23,7 @@ using namespace alt_test;
 // awaiter still accepts an erased std::coroutine_handle<> and therefore works in
 // a coroutine that relays no cancellation context at all.
 static_assert(alt::awaitable<alt::async_semaphore&>);
-static_assert(std::is_same_v<alt::await_result_t<alt::async_semaphore&>, std::expected<void, std::error_code>>);
+static_assert(std::is_same_v<alt::await_result_t<alt::async_semaphore&>, alt::wait_result>);
 
 // A semaphore is referred to by the awaiters inside suspended coroutine frames, so
 // it can be neither copied nor moved.
@@ -35,8 +35,12 @@ namespace
 	/** How many times the contended tests repeat their race. */
 	constexpr int race_repeats = 100;
 
-	/** The error every released wait reports. */
-	const std::error_code released_error = std::make_error_code(std::errc::operation_canceled);
+	/**
+	 * The condition every released wait reports, named the way a caller names it:
+	 * compared against as a std::errc rather than built into a second
+	 * std::error_code to match. See alt::wait_result.
+	 */
+	constexpr std::errc released_error = std::errc::operation_canceled;
 
 	/** What one waiter coroutine recorded about its wait, for the test to inspect. */
 	struct wait_record
@@ -52,7 +56,7 @@ namespace
 	};
 
 	/** Records one wait's outcome. Shared by every waiter coroutine below. */
-	void record_outcome(wait_record& record, const std::expected<void, std::error_code>& result)
+	void record_outcome(wait_record& record, const alt::wait_result& result)
 	{
 		++record.resumptions;
 		record.satisfied = result.has_value();

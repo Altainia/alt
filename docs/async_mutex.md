@@ -61,7 +61,12 @@ public:
   other constructor.
 - `co_await mutex` yields `std::expected<async_mutex_lock, std::error_code>`:
   the guard that owns the lock, or `std::errc::operation_canceled` when the wait
-  ended without it. It costs no suspension at all if the lock was free.
+  ended without it. It costs no suspension at all if the lock was free. This is
+  the one primitive in the family that does **not** yield
+  [`alt::wait_result`](async_event.md#the-result-of-a-wait), because a satisfied
+  acquisition has a guard to hand back; the error half is the same error, named
+  the same way — compare the `std::error_code` against the `std::errc` rather
+  than build a second code to match it.
 - `try_lock()` is the same acquisition without the suspension. It yields the
   guard when the lock was taken, and `std::errc::device_or_resource_busy` when
   another party holds it, which takes nothing and leaves the lock exactly where

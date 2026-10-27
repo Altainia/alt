@@ -16,10 +16,10 @@ namespace alt
 	 * result that is already available must not be missed by whoever asks for it
 	 * second.
 	 *
-	 * Awaiting yields std::expected<void, std::error_code>. It holds a value when
-	 * the event released the wait, and std::errc::operation_canceled when the wait
-	 * ended without that: the awaiting chain was cancelled, or this event was
-	 * destroyed with waiters still parked.
+	 * Awaiting yields alt::wait_result. It holds a value when the event released the
+	 * wait, and std::errc::operation_canceled when the wait ended without that: the
+	 * awaiting chain was cancelled, or this event was destroyed with waiters still
+	 * parked.
 	 *
 	 * Every member but the destructor is safe to call from any thread, and
 	 * concurrently: two threads setting it resume each parked waiter once between
