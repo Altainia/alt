@@ -126,6 +126,18 @@ namespace
 	}
 
 	/**
+	 * Does roughly the bookkeeping an arriving waiter does between its ready check and
+	 * its link -- one std::stop_callback registered and destroyed -- so that a stop
+	 * requested after it lands near the moment that waiter's link condition runs
+	 * instead of well before the waiter has looked at the primitive at all. Both sides
+	 * scale with the same work, so this is not a calibration against a wall clock.
+	 */
+	inline void match_an_arriving_waiters_bookkeeping(const std::stop_token& token)
+	{
+		const std::stop_callback callback{token, [] {}};
+	}
+
+	/**
 	 * @brief A consuming predicate over a plain int, for driving detail::wait_awaiter
 	 *        itself.
 	 *
@@ -139,18 +151,6 @@ namespace
 	 * Derived a friend, so the probe can reach the node its own base holds. A test
 	 * cannot otherwise, and the semaphore's own queue is private.
 	 */
-	/**
-	 * Does roughly the bookkeeping an arriving waiter does between its ready check and
-	 * its link -- one std::stop_callback registered and destroyed -- so that a stop
-	 * requested after it lands near the moment that waiter's link condition runs
-	 * instead of well before the waiter has looked at the primitive at all. Both sides
-	 * scale with the same work, so this is not a calibration against a wall clock.
-	 */
-	inline void match_an_arriving_waiters_bookkeeping(const std::stop_token& token)
-	{
-		const std::stop_callback callback{token, [] {}};
-	}
-
 	class probe_awaiter: public alt::detail::wait_awaiter<probe_awaiter>
 	{
 	public:
@@ -855,6 +855,12 @@ TEST_F(AsyncSemaphoreTest, NoPermitIsLostWhenAStopAndAReleaseBothRaceAnArrivingW
 	// consumed a permit and then reported cancelled breaks it by one. Acquirers that
 	// are cancelled contribute to neither side, which is the point -- they must hold
 	// nothing.
+	//
+	// The released counter is kept but deliberately not asserted on, unlike in the test
+	// above: an acquirer cancelled on its way into the co_await has its frame destroyed
+	// from inside await_suspend, so the statement that would have recorded the outcome
+	// never runs. How many acquirers get as far as recording anything is up to the
+	// schedule. Do not add an assertion on it.
 	//
 	// Two things make the race occur rather than merely be possible.
 	//

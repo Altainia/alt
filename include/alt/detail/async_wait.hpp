@@ -168,6 +168,14 @@ namespace alt::detail
 		 *    does not run the condition at all if it has been lost. So the flag staying
 		 *    false means the election refused the link, which is the released case.
 		 *
+		 *    Guarded by AsyncSemaphoreTest.AConsumingPredicateThatWinsAtTheLinkIsNeverReportedCancelled,
+		 *    which drives this function by hand with a consuming predicate that claims
+		 *    its own node from inside the condition, and by
+		 *    AsyncSemaphoreTest.AWaiterWhoseNodeIsWonBeforeTheLinkIsStillReportedCancelled
+		 *    for the converse, so neither answer can be hardwired. They live in
+		 *    tests/test_async_semaphore.cpp because a consuming predicate is what
+		 *    exposes this at all, not because they are about the semaphore.
+		 *
 		 * The node must also outlive every claim on it, which is why m_stop is
 		 * declared after m_node: it is destroyed first, so no callback can be
 		 * mid-flight over a dead node. cancellable_task's promise records having once

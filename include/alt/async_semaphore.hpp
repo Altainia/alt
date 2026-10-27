@@ -65,7 +65,15 @@ namespace alt
 	 *
 	 * Destroying the semaphore from a resumed waiter's body is allowed, including
 	 * from a waiter release() resumed, and release() says what it does to keep that
-	 * true.
+	 * true. With one qualification a waiter cannot check for itself: one release()
+	 * may have won several waiters and is committed to resuming all of them, so a
+	 * waiter that destroys the semaphore may be followed by siblings that are still
+	 * handed their permits -- correctly, since each was won before anything was
+	 * resumed -- into an object that no longer exists. Those siblings must not touch
+	 * the semaphore after their wait returns. Since no waiter can tell whether it is
+	 * the last of a chain, in practice a waiter that destroys the semaphore must be
+	 * one whose siblings do not go back to it, which is what a shutdown drain looks
+	 * like: every waiter is leaving.
 	 */
 	class async_semaphore
 	{

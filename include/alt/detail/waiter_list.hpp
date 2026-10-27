@@ -292,15 +292,31 @@ namespace alt::detail
 		 *
 		 * @param still_waiting Evaluated with the list's mutex held, so it must not
 		 *        take a lock of its own, touch this list, or resume anything. Reading
-		 *        the primitive's own atomic flag is the intended shape.
+		 *        the primitive's own atomic flag is the intended shape. A condition
+		 *        whose caller needs to know afterwards that *it* was the refusal must
+		 *        record that here, while this mutex is held; see the @c return below.
 		 *
 		 * @return True when the node is on the list, and from that instant any party
 		 *         may win it, so the caller must read nothing from the waiter's frame
-		 *         afterwards. False when nothing was inserted; the two causes are told
-		 *         apart by the node's @c state, which the caller may safely read
-		 *         because a node on no list has no resumer but its own frame: still
-		 *         @c linked means @c still_waiting refused, and anything else means the
-		 *         election was lost.
+		 *         afterwards.
+		 *
+		 *         False when nothing was inserted, which has two causes: the election
+		 *         was already lost, or @c still_waiting refused. **The node cannot
+		 *         tell them apart once this mutex is dropped.** Its @c state word is
+		 *         not the answer: a node refused by the condition can be won by a
+		 *         cancellation callback a moment later -- that callback finds the node
+		 *         on no list and resumes nothing, correctly -- and the word then reads
+		 *         @c claimed exactly as it would have had the election been lost
+		 *         first. A caller that acts on that reading calls a satisfied wait a
+		 *         cancelled one, which for a condition that consumed something is a
+		 *         permit or a lock nobody holds and nothing returns.
+		 *
+		 *         So a caller that needs the cause has its condition record it, under
+		 *         this mutex, where the answer is still true. The condition is
+		 *         consulted only when the election is still held -- this function
+		 *         tests the election first -- so a flag it never set means the
+		 *         election refused the link. detail::wait_awaiter::await_suspend's
+		 *         rule 4 is the worked example.
 		 */
 		template<typename Condition>
 		[[nodiscard]] bool link(waiter_node& node, Condition still_waiting)

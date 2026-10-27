@@ -64,9 +64,11 @@ namespace alt
 		// What this costs, and it is a real cost: a waiter resumed by one of these
 		// permits is resumed after the last of them has been placed, so it can no longer
 		// be handed the next one. It re-awaits into a count that already holds the
-		// leftovers, where an unrelated try_acquire could take one first. A permit's
-		// route is not observable from outside the semaphore, so no caller can tell; what
-		// a caller could tell is a destroyed semaphore.
+		// leftovers, where an unrelated try_acquire could take one first. That is
+		// visible -- available() reads it and try_acquire() can act on it, which is why
+		// release()'s documentation states it -- and it is the price of being able to
+		// destroy the semaphore from a waiter this call resumed, which is the more
+		// dangerous thing for a caller to get wrong.
 		//
 		// The waiter the permit goes to is deliberately not handed to the action:
 		// resuming it under the mutex is the one thing that must not happen there.
