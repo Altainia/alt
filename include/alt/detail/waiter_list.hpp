@@ -29,6 +29,31 @@ namespace alt::detail
 	};
 
 	/**
+	 * @brief What a claim attempt achieved.
+	 *
+	 * The election has two winning outcomes rather than one, because a node is
+	 * winnable from the moment it exists and that is before its waiter has linked
+	 * it. Winning therefore says who owns the resumption; whether the node was
+	 * actually parked says whether there is a resumption to perform.
+	 */
+	enum class claim_result : int
+	{
+		/** Another party already owns this resumption. The node must not be touched again. */
+		lost,
+
+		/** Won, and the node came off the list. The caller must resume it, exactly once. */
+		detached,
+
+		/**
+		 * Won, but the node was on no list, so nobody is parked on it. Resuming it
+		 * would run a coroutine still inside its own await_suspend, so the caller
+		 * resumes nothing and touches nothing: the waiter's own frame will see its
+		 * link refused and resume itself. See waiter_list::link.
+		 */
+		not_linked
+	};
+
+	/**
 	 * @brief One suspended waiter's place in a waiter_list.
 	 *
 	 * A node lives inside an awaiter, which lives inside a coroutine frame, so the
@@ -36,9 +61,9 @@ namespace alt::detail
 	 * finishes. Nothing here is reference counted and nothing is heap allocated:
 	 * the waiter owns its own node and the list only borrows it.
 	 *
-	 * The links and the handle are written by the waiting coroutine before it is
-	 * linked, and afterwards only under the list's mutex. Two fields are touched
-	 * without it: @c state, because the claim protocol has to work from a stop
+	 * The links, @c on_list and the handle are written by the waiting coroutine
+	 * before it is linked, and afterwards only under the list's mutex. Two fields
+	 * are touched without it: @c state, because the claim protocol has to work from a stop
 	 * callback that cannot take the mutex, and @c satisfied, which only the party
 	 * that won the claim writes, at a point where the node is already off the list
 	 * and reachable from nothing else.
@@ -50,6 +75,15 @@ namespace alt::detail
 
 		/** Next node in link order, or null at the tail. Also the link of a detached chain. */
 		waiter_node* next{nullptr};
+
+		/**
+		 * Whether this node is currently on a list. Guarded by the list's mutex, like
+		 * the links themselves, and not derivable from them: the sole node of a list
+		 * has null links too. This is the one thing that tells a winning claimer
+		 * whether anybody is actually parked here, which is why waiter_list::claim
+		 * can report a win that detached nothing.
+		 */
+		bool on_list{false};
 
 		/**
 		 * The waiter to resume. Default constructed empty, and must hold a resumable
@@ -168,6 +202,12 @@ namespace alt::detail
 	 * - Between being detached and being resumed a node is reachable only from the
 	 *   owner's local chain. That window is invisible to this list, and resuming
 	 *   there is what resume_claimed is for.
+	 * - A node is winnable before its waiter has linked it, so winning the election
+	 *   and having a waiter to resume are two different things. claim() reports them
+	 *   separately and link() refuses a node whose election is already lost, which
+	 *   between them give exactly one resumption on either side of that window: the
+	 *   winner resumes nothing it did not unlink, and the waiter whose link was
+	 *   refused resumes itself.
 	 *
 	 * Two preconditions the list cannot enforce and the owner must:
 	 *
@@ -221,29 +261,70 @@ namespace alt::detail
 		waiter_list& operator=(waiter_list&&)      = delete;
 
 		/**
-		 * @brief Adds a waiter to the back of the list.
+		 * @brief Adds a waiter to the back of the list, if it is still waiting at all.
 		 *
 		 * Link order is resume order: detach_all returns the nodes oldest first and
 		 * detach_one takes the oldest claimable node, so the primitives above this one
 		 * are fair without doing anything to be fair.
 		 *
-		 * The node must be @c linked, must not already be on a list, and must carry a
-		 * resumable handle. The handle is asserted, because a node is winnable the
-		 * instant it is linked and from then on nobody downstream can tell an empty
-		 * handle from a resumable one.
+		 * The node must not already be on a list and must carry a resumable handle.
+		 * The handle is asserted, because a node is winnable the instant it is linked
+		 * and from then on nobody downstream can tell an empty handle from a resumable
+		 * one.
+		 *
+		 * Two conditions are then checked together under the mutex, and the node is
+		 * inserted only if both hold:
+		 *
+		 * - The node is still @c linked. A node already won is refused, because its
+		 *   winner saw claim_result::not_linked and resumed nothing: parking it now
+		 *   would suspend a waiter with no party left to wake it.
+		 * - @c still_waiting returns true. This is where a primitive's own state joins
+		 *   the decision. A waiter checks whether the primitive is satisfied before it
+		 *   suspends, and a satisfier that lands between that check and this call has
+		 *   already walked the list and found nothing. Asking again here, under the
+		 *   same mutex the satisfier's detach takes, is what makes those two steps one
+		 *   decision instead of a lost wakeup.
+		 *
+		 * @param still_waiting Evaluated with the list's mutex held, so it must not
+		 *        take a lock of its own, touch this list, or resume anything. Reading
+		 *        the primitive's own atomic flag is the intended shape.
+		 *
+		 * @return True when the node is on the list, and from that instant any party
+		 *         may win it, so the caller must read nothing from the waiter's frame
+		 *         afterwards. False when nothing was inserted; the two causes are told
+		 *         apart by the node's @c state, which the caller may safely read
+		 *         because a node on no list has no resumer but its own frame: still
+		 *         @c linked means @c still_waiting refused, and anything else means the
+		 *         election was lost.
 		 */
-		void link(waiter_node& node)
+		template<typename Condition>
+		[[nodiscard]] bool link(waiter_node& node, Condition still_waiting)
 		{
 			// The cheapest place to catch the most likely mistake above this header:
 			// linking a waiter before its handle has been stored. Checked here rather
 			// than in resume_claimed, where the node is already detached and in flight
 			// and whoever owns it has nothing left to do but resume it.
 			assert(node.handle && "linking an alt waiter with no handle to resume");
+			assert(!node.on_list && "linking an alt waiter that is already on a list");
 
 			const std::scoped_lock lock{m_mutex};
 
-			node.prev = m_tail;
-			node.next = nullptr;
+			// The election first, so a node already won is refused whatever the
+			// condition would have said. A lost election means some other party owns
+			// this waiter's resumption, and that outranks the primitive's state.
+			if(node.state.load(std::memory_order_acquire) != waiter_state::linked)
+			{
+				return false;
+			}
+
+			if(!still_waiting())
+			{
+				return false;
+			}
+
+			node.prev    = m_tail;
+			node.next    = nullptr;
+			node.on_list = true;
 
 			if(m_tail != nullptr)
 			{
@@ -256,6 +337,13 @@ namespace alt::detail
 
 			m_tail = &node;
 			++m_size;
+			return true;
+		}
+
+		/** Links a waiter whose primitive has no state of its own to consult. */
+		[[nodiscard]] bool link(waiter_node& node)
+		{
+			return link(node, [] { return true; });
 		}
 
 		/**
@@ -270,21 +358,36 @@ namespace alt::detail
 		 * cancellation callback that must not block on the primitive's lock in the
 		 * common losing case.
 		 *
-		 * @return True when this caller won and now owns the resumption. The node
-		 *         comes back unlinked with both links cleared, so it can be passed
-		 *         straight to resume_claimed as a chain of one. False when another
-		 *         party already owns it, and then the node must not be touched again.
+		 * Winning is not the same as having someone to resume. A node is winnable
+		 * before its waiter has linked it, and a winner that finds the node on no
+		 * list must resume nothing: the waiter is still inside its own await_suspend,
+		 * its link will be refused, and it resumes itself. The membership check is
+		 * made under the mutex, because that is the only place it is authoritative.
+		 *
+		 * @return claim_result::detached when this caller won and the node came off
+		 *         the list, with both links cleared, so it can be passed straight to
+		 *         resume_claimed as a chain of one. claim_result::not_linked when this
+		 *         caller won a node that was on no list: nothing to resume, and
+		 *         nothing in the node may be written, because its waiter reads its own
+		 *         fields on its own thread. claim_result::lost when another party
+		 *         already owns it, and then the node must not be touched again.
 		 */
-		bool claim(waiter_node& node)
+		claim_result claim(waiter_node& node)
 		{
 			if(!try_claim(node))
 			{
-				return false;
+				return claim_result::lost;
 			}
 
 			const std::scoped_lock lock{m_mutex};
+
+			if(!node.on_list)
+			{
+				return claim_result::not_linked;
+			}
+
 			unlink_locked(node);
-			return true;
+			return claim_result::detached;
 		}
 
 		/**
@@ -446,8 +549,9 @@ namespace alt::detail
 				m_tail = node.prev;
 			}
 
-			node.prev = nullptr;
-			node.next = nullptr;
+			node.prev    = nullptr;
+			node.next    = nullptr;
+			node.on_list = false;
 			--m_size;
 		}
 

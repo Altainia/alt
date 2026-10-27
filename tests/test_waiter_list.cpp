@@ -14,6 +14,7 @@
 
 namespace
 {
+	using alt::detail::claim_result;
 	using alt::detail::resume_claimed;
 	using alt::detail::waiter_list;
 	using alt::detail::waiter_node;
@@ -130,7 +131,7 @@ namespace
 		waiter_node* node = nullptr;
 		make_counting_waiter(node, resumptions, tag);
 		node->handle = alt_test::parked;
-		list.link(*node);
+		ASSERT_TRUE(list.link(*node));
 	}
 
 	/** Counts the nodes a detached chain holds, without resuming any of them. */
@@ -151,7 +152,7 @@ namespace
 		for(waiter_node& node: nodes)
 		{
 			node.handle = std::noop_coroutine();
-			list.link(node);
+			ASSERT_TRUE(list.link(node));
 		}
 	}
 
@@ -164,7 +165,7 @@ namespace
 			// genuine race instead of only the first one.
 			rendezvous(arrived, (index + 1) * 2);
 
-			if(list.claim(nodes[index]))
+			if(list.claim(nodes[index]) == claim_result::detached)
 			{
 				winners[index].fetch_add(1, std::memory_order_relaxed);
 			}
@@ -198,7 +199,7 @@ namespace
 
 		for(waiter_node& node: nodes)
 		{
-			if(list.claim(node))
+			if(list.claim(node) == claim_result::detached)
 			{
 				resume_claimed(&node, false);
 				++resumed;
@@ -231,9 +232,9 @@ TEST(WaiterList, LinkingThenDetachingReturnsTheNodesInFifoOrder)
 	waiter_list list;
 	EXPECT_TRUE(list.empty());
 
-	list.link(first);
-	list.link(second);
-	list.link(third);
+	ASSERT_TRUE(list.link(first));
+	ASSERT_TRUE(list.link(second));
+	ASSERT_TRUE(list.link(third));
 	EXPECT_EQ(list.size(), 3U);
 	EXPECT_FALSE(list.empty());
 
@@ -288,15 +289,80 @@ TEST(WaiterList, ADetachedNodeIsAlreadyClaimedSoClaimLoses)
 	waiter_node node{.handle = std::noop_coroutine()};
 
 	waiter_list list;
-	list.link(node);
+	ASSERT_TRUE(list.link(node));
 
 	waiter_node* const chain = list.detach_all();
 	ASSERT_EQ(chain, &node);
 	EXPECT_EQ(node.state.load(std::memory_order_acquire), waiter_state::claimed);
 
 	// The satisfier already owns this resumption, so a late claim must lose.
-	EXPECT_FALSE(list.claim(node));
+	EXPECT_EQ(list.claim(node), claim_result::lost);
 	EXPECT_EQ(node.state.load(std::memory_order_acquire), waiter_state::claimed);
+}
+
+TEST(WaiterList, ClaimingANodeThatWasNeverLinkedWinsButDetachesNothing)
+{
+	// A node is winnable from the moment it exists, which is before its waiter has
+	// linked it. A stop callback claiming it then owns the resumption and must not
+	// perform one: nobody is parked on a node that is on no list, and the waiter it
+	// belongs to is still inside its own await_suspend. Reporting the win without a
+	// detach is what lets that waiter resume itself instead.
+	waiter_node node{.handle = std::noop_coroutine()};
+	waiter_list list;
+
+	EXPECT_EQ(list.claim(node), claim_result::not_linked);
+	EXPECT_EQ(node.state.load(std::memory_order_acquire), waiter_state::claimed);
+
+	// Still a one-shot election: a second claimer loses whatever the first achieved.
+	EXPECT_EQ(list.claim(node), claim_result::lost);
+}
+
+TEST(WaiterList, LinkingIsRefusedForANodeAClaimerHasAlreadyWon)
+{
+	// The other half of the window above. Linking a node whose election is already
+	// lost would park a waiter nobody will ever resume, because the winner found
+	// nothing to unlink and resumed nothing. Refusing the link is what hands the
+	// resumption back to the waiter itself.
+	waiter_node node{.handle = std::noop_coroutine()};
+	waiter_list list;
+
+	ASSERT_EQ(list.claim(node), claim_result::not_linked);
+
+	int conditions_checked = 0;
+	EXPECT_FALSE(list.link(node, [&] {
+		++conditions_checked;
+		return true;
+	}));
+
+	// The election is settled before the caller's condition is asked, so a node
+	// already won is refused whatever the condition would have said.
+	EXPECT_EQ(conditions_checked, 0);
+	EXPECT_EQ(list.size(), 0U);
+	EXPECT_TRUE(list.empty());
+}
+
+TEST(WaiterList, LinkingIsRefusedWhenTheCallersConditionSaysTheWaitIsOver)
+{
+	// What makes a primitive's satisfied flag and its waiting queue one decision
+	// rather than two. The condition is evaluated under the same mutex the
+	// insertion takes, so a satisfier that ran between a waiter's own ready check
+	// and this call cannot leave that waiter parked on something already satisfied.
+	waiter_node node{.handle = std::noop_coroutine()};
+	waiter_list list;
+
+	EXPECT_FALSE(list.link(node, [] { return false; }));
+	EXPECT_EQ(list.size(), 0U);
+
+	// Untouched by the refusal: the node is still winnable and still off every
+	// list, so its waiter owns it outright and reports its own outcome.
+	EXPECT_EQ(node.state.load(std::memory_order_acquire), waiter_state::linked);
+	EXPECT_FALSE(node.on_list);
+
+	// And the same node links when the condition holds, so the refusal above was
+	// the condition's doing rather than anything about the node.
+	EXPECT_TRUE(list.link(node, [] { return true; }));
+	EXPECT_EQ(list.size(), 1U);
+	EXPECT_TRUE(node.on_list);
 }
 
 TEST(WaiterList, ClaimUnlinksSoSizeDrops)
@@ -305,10 +371,10 @@ TEST(WaiterList, ClaimUnlinksSoSizeDrops)
 	waiter_node second{.handle = std::noop_coroutine()};
 
 	waiter_list list;
-	list.link(first);
-	list.link(second);
+	ASSERT_TRUE(list.link(first));
+	ASSERT_TRUE(list.link(second));
 
-	ASSERT_TRUE(list.claim(first));
+	ASSERT_EQ(list.claim(first), claim_result::detached);
 	EXPECT_EQ(list.size(), 1U);
 
 	// The winner's node comes back as a chain of one, ready for resume_claimed.
@@ -316,7 +382,7 @@ TEST(WaiterList, ClaimUnlinksSoSizeDrops)
 	EXPECT_EQ(first.next, nullptr);
 
 	// A second claim of the same node loses: the first caller owns the resumption.
-	EXPECT_FALSE(list.claim(first));
+	EXPECT_EQ(list.claim(first), claim_result::lost);
 	EXPECT_EQ(list.size(), 1U);
 
 	// The node still linked is untouched and still detachable.
@@ -336,8 +402,8 @@ TEST(WaiterList, DetachingSkipsANodeAnotherPartyHasAlreadyClaimed)
 	waiter_node available{.handle = std::noop_coroutine()};
 
 	waiter_list list;
-	list.link(taken);
-	list.link(available);
+	ASSERT_TRUE(list.link(taken));
+	ASSERT_TRUE(list.link(available));
 
 	taken.state.store(waiter_state::claimed, std::memory_order_release);
 
@@ -360,8 +426,8 @@ TEST(WaiterList, ResumeClaimedWritesSatisfiedAndMarksDone)
 	waiter_node unsatisfied_node{.handle = std::noop_coroutine()};
 
 	waiter_list list;
-	list.link(satisfied_node);
-	list.link(unsatisfied_node);
+	ASSERT_TRUE(list.link(satisfied_node));
+	ASSERT_TRUE(list.link(unsatisfied_node));
 
 	waiter_node* const satisfied_chain = list.detach_one();
 	ASSERT_EQ(satisfied_chain, &satisfied_node);
@@ -422,7 +488,7 @@ TEST(WaiterList, TheWalkTakesNoLockSoAWaiterMayDestroyTheListMidWalk)
 	waiter_node* destroyer             = nullptr;
 	make_list_destroying_waiter(destroyer, destroyer_resumptions, list);
 	destroyer->handle = alt_test::parked;
-	list->link(*destroyer);
+	ASSERT_TRUE(list->link(*destroyer));
 
 	int second_resumptions = 0;
 	int third_resumptions  = 0;
@@ -453,8 +519,8 @@ TEST(WaiterList, DestroyingTheListWithLinkedNodesLeavesNoneLinked)
 
 	{
 		waiter_list list;
-		list.link(first);
-		list.link(second);
+		ASSERT_TRUE(list.link(first));
+		ASSERT_TRUE(list.link(second));
 		ASSERT_EQ(list.size(), 2U);
 	}
 
