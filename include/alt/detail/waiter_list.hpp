@@ -4,6 +4,7 @@
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 
 namespace alt::detail
@@ -16,7 +17,7 @@ namespace alt::detail
 	 * done. There is no way back, which is what makes a single compare-exchange
 	 * enough to elect one resumer for the lifetime of a waiter.
 	 */
-	enum class waiter_state : int
+	enum class waiter_state : std::uint8_t
 	{
 		/** On a waiter_list and unclaimed. Anyone may still win this node. */
 		linked,
@@ -36,7 +37,7 @@ namespace alt::detail
 	 * it. Winning therefore says who owns the resumption; whether the node was
 	 * actually parked says whether there is a resumption to perform.
 	 */
-	enum class claim_result : int
+	enum class claim_result : std::uint8_t
 	{
 		/** Another party already owns this resumption. The node must not be touched again. */
 		lost,

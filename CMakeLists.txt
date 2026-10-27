@@ -86,6 +86,14 @@ if(ALT_CPPCHECK)
             --suppress=functionStatic:*/alt/sync_wait.hpp
             --suppress=functionStatic:*/alt/task.hpp
             --suppress=functionStatic:*/alt/detail/cancellation.hpp
+            # Surfaced by phase 5's first compiled source, which is the first src/*.cpp
+            # to reach cancellation.hpp. The parameter it names is a work_item callback,
+            # whose signature is fixed by alt::work_item::invoke as void (*)(void*)
+            # noexcept, so const there would not compile against the posting side.
+            # cppcheck says as much itself: "you might also need to cast function
+            # pointer(s)". The variables inside that callback are const, which is the
+            # part of the finding that was worth acting on.
+            --suppress=constParameterCallback:*/alt/detail/cancellation.hpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

@@ -239,7 +239,7 @@ namespace alt::detail
 		  m_context(context)
 		{}
 
-		bool await_ready() const noexcept
+		[[nodiscard]] bool await_ready() const noexcept
 		{
 			return false;
 		}
@@ -267,12 +267,12 @@ namespace alt::detail
 	private:
 		static void resume_or_abandon(void* state) noexcept
 		{
-			auto* const self = static_cast<checked_resume_on*>(state);
+			const auto* const self = static_cast<const checked_resume_on*>(state);
 
 			// Copied out before anything is destroyed, for the same reason
 			// abandon_chain copies: the teardown frees the frame this awaiter lives in.
-			cancellation_context* const   context = self->m_context;
-			const std::coroutine_handle<> handle  = self->m_handle;
+			const cancellation_context* const context = self->m_context;
+			const std::coroutine_handle<>     handle  = self->m_handle;
 
 			if(context != nullptr && context->stop_requested())
 			{

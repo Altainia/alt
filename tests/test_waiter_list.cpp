@@ -29,35 +29,9 @@ namespace
 	 */
 	constexpr std::size_t contended_nodes = 32;
 
-	/** Spins before a waiting party starts yielding. See rendezvous below. */
-	constexpr int spin_limit = 100000;
-
-	/**
-	 * @brief Waits until @c released parties have arrived, spinning.
-	 *
-	 * A two-party rendezvous that leaves both sides running within nanoseconds of
-	 * each other, which is what makes the claim election genuinely contended. A
-	 * condition variable or a sleep would hand the race to whichever side woke
-	 * first and the window under test would never be hit. The yield is only a
-	 * backstop for a machine with fewer cores than threads, where an unbounded spin
-	 * could starve the party being waited for.
-	 */
-	void rendezvous(std::atomic<std::size_t>& arrived, std::size_t released)
-	{
-		arrived.fetch_add(1, std::memory_order_acq_rel);
-
-		for(int spins = 0; arrived.load(std::memory_order_acquire) < released;)
-		{
-			if(spins < spin_limit)
-			{
-				++spins;
-			}
-			else
-			{
-				std::this_thread::yield();
-			}
-		}
-	}
+	// The two-party rendezvous both contended tests below are built around lives in
+	// coroutine_test_support.hpp, because alt::async_event's tests need the same one.
+	using alt_test::rendezvous;
 
 	/**
 	 * A real, self-destroying coroutine. Its final_suspend never suspends, so the
