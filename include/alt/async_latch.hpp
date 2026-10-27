@@ -69,7 +69,9 @@ namespace alt
 	 * such a combinator lands: every multi-node resumption in the library would need
 	 * the same revisit, which is async_event::set, this count_down,
 	 * async_semaphore::release -- which wins its waiters one detach_one at a time but
-	 * resumes them as one chain -- and all four destructors. Resuming one node per
+	 * resumes them as one chain -- and all four destructors, including the
+	 * ~waiter_list backstop each of them runs ahead of, which walks a multi-node chain
+	 * of its own and is reachable only through those four. Resuming one node per
 	 * detach, and not holding the next node across a resumption, is what each of them
 	 * would have to change to.
 	 */

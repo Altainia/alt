@@ -251,6 +251,16 @@ the scenario above). If code after `request_stop()` needs to know teardown
 has actually happened, it needs its own signal for that — `cancellable_task`
 does not provide one.
 
+Note what this does and does not say about a chain parked on one of the four
+async primitives, which is the case the narrowing of point 6 above describes.
+There, `request_stop()` really does run body code before it returns, and with no
+`home` it destroys the frames inside the call as well — so for that chain it is
+the *acknowledgement* that is missing rather than the work: nothing tells the
+caller which of the two happened, and the caller still must not assume either.
+The no-deadlock rationale is unaffected, since a chain whose next resumption
+goes through a scheduler the calling thread pumps is exactly the case where the
+teardown cannot happen inside the call.
+
 ## Frames are destroyed on the thread that observed cancellation, unless a home scheduler is given
 
 With no `home` in `start_options`, the chain is destroyed in place, on

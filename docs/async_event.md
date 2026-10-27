@@ -39,9 +39,10 @@ public:
 };
 ```
 
-- `co_await event` yields [`alt::wait_result`](#the-result-of-a-wait): a value when
-  the event released the wait, and `std::errc::operation_canceled` when the wait
-  ended without that. It costs no suspension at all if the event is already set.
+- `co_await event` yields [`alt::wait_result`](#the-result-of-a-wait): a value
+  when the event released the wait, and `std::errc::operation_canceled` when the
+  wait ended without that. It costs no suspension at all if the event is already
+  set.
 - `set()` sets the event and releases every parked waiter, satisfied, in the
   order they parked. Idempotent: setting an event that is already set releases
   whatever is parked, which is nothing, because nothing can park on a set event.
@@ -322,13 +323,13 @@ Destroying the *event* from a waiter's body is a different thing and is allowed:
 `set()` marks the event set and takes the queue — in that order, the store being
 the action it performs under the list's mutex and the walk coming after it — and
 only then resumes, the resumption being the last thing it does, so there is
-nothing left for it to read afterwards. One qualification comes with that, and no waiter can check it for
-itself. A single `set()` may have won several waiters and is committed to
-resuming all of them, so the siblings that follow the one which destroyed the
-event are still resumed — correctly, each having been won before anything ran —
-into a scope where the event no longer exists. Those siblings must not touch the
-event after their wait returns. Since a waiter cannot tell whether it is the
-last of a chain, in practice a waiter that destroys the event must be one whose
-siblings do not go back to it, which is what a shutdown looks like: everybody is
-leaving. [`alt::async_semaphore`](async_semaphore.md#a-waiter-that-destroys-the-semaphore-cannot-know-it-is-the-last)
+nothing left for it to read afterwards. One qualification comes with that, and no
+waiter can check it for itself. A single `set()` may have won several waiters and
+is committed to resuming all of them, so the siblings that follow the one which
+destroyed the event are still resumed — correctly, each having been won before
+anything ran — into a scope where the event no longer exists. Those siblings must
+not touch the event after their wait returns. Since a waiter cannot tell whether
+it is the last of a chain, in practice a waiter that destroys the event must be
+one whose siblings do not go back to it, which is what a shutdown looks like:
+everybody is leaving. [`alt::async_semaphore`](async_semaphore.md#a-waiter-that-destroys-the-semaphore-cannot-know-it-is-the-last)
 documents the same qualification for the same reason.

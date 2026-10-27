@@ -28,6 +28,11 @@ using namespace alt_test;
 static_assert(alt::awaitable<alt::async_event&>);
 static_assert(std::is_same_v<alt::await_result_t<alt::async_event&>, alt::wait_result>);
 
+// What alt::wait_result is, pinned once for the whole family: the assertions above and
+// in the latch's and semaphore's tests name the alias, so without this nothing in the
+// suite would hold the alias to the type every page states it is.
+static_assert(std::is_same_v<alt::wait_result, std::expected<void, std::error_code>>);
+
 // An event is referred to by the awaiters inside suspended coroutine frames, so
 // it can be neither copied nor moved.
 static_assert(!std::is_copy_constructible_v<alt::async_event>);

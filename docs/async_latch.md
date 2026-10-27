@@ -43,8 +43,8 @@ public:
   `count_down`'s arguments. Zero is a latch that is already released. **The count
   must not be negative**; a debug build asserts it, and a release build does not
   check.
-- `co_await latch` yields [`alt::wait_result`](#the-result-of-a-wait): a value when
-  the count reached zero, and `std::errc::operation_canceled` when the wait
+- `co_await latch` yields [`alt::wait_result`](#the-result-of-a-wait): a value
+  when the count reached zero, and `std::errc::operation_canceled` when the wait
   ended without that. It costs no suspension at all if the count is already
   zero.
 - `count_down(n)` lowers the count by `n` and, if that reaches zero, releases
