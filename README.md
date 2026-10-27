@@ -118,11 +118,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.7.1_amd64.deb` in the project root:
+Produces `altlib_1.8.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.7.1_amd64.deb
+sudo dpkg -i altlib_1.8.0_amd64.deb
 ```
 
 ## Using in your project
@@ -130,7 +130,7 @@ sudo dpkg -i altlib_1.7.1_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.7.1 REQUIRED)
+find_package(Alt 1.8.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
