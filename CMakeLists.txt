@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Alt VERSION 1.7.1 LANGUAGES CXX)
+project(Alt VERSION 1.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -86,6 +86,24 @@ if(ALT_CPPCHECK)
             --suppress=functionStatic:*/alt/sync_wait.hpp
             --suppress=functionStatic:*/alt/task.hpp
             --suppress=functionStatic:*/alt/detail/cancellation.hpp
+            # Surfaced by phase 5's first compiled source, which is the first src/*.cpp
+            # to reach cancellation.hpp. The parameter it names is a work_item callback,
+            # whose signature is fixed by alt::work_item::invoke as void (*)(void*)
+            # noexcept, so const there would not compile against the posting side.
+            # cppcheck says as much itself: "you might also need to cast function
+            # pointer(s)". The variables inside that callback are const, which is the
+            # part of the finding that was worth acting on.
+            --suppress=constParameterCallback:*/alt/detail/cancellation.hpp
+            # alt::async_mutex is the first primitive whose wait yields a value, so it
+            # is the first whose awaiter declares an await_resume of its own, hiding
+            # detail::wait_awaiter's. The hiding is the design rather than an accident:
+            # the base still decides whether the wait succeeded, the derived decides
+            # only what success is worth, and it calls the base by qualified name to get
+            # the verdict. Neither way out of the finding is available. The name is
+            # fixed by the coroutine await protocol, so it cannot be renamed, and making
+            # the base's non-public would change machinery async_event, async_latch and
+            # async_semaphore all resume through.
+            --suppress=duplInheritedMember:*/alt/async_mutex.hpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

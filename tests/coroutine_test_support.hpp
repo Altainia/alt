@@ -1,7 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <coroutine>
+#include <cstddef>
 #include <exception>
+#include <thread>
 #include <vector>
 
 namespace alt_test
@@ -199,6 +202,36 @@ namespace alt_test
 		const auto handle = parked;
 		parked            = {};
 		handle.resume();
+	}
+
+	/** Spins before a waiting party starts yielding. See rendezvous below. */
+	inline constexpr int spin_limit = 100000;
+
+	/**
+	 * @brief Waits until @c released parties have arrived, spinning.
+	 *
+	 * A rendezvous that leaves both sides running within nanoseconds of each other,
+	 * which is what makes a race between them genuinely contended. A condition
+	 * variable or a sleep would hand the race to whichever side woke first and the
+	 * window under test would never be hit. The yield is only a backstop for a
+	 * machine with fewer cores than threads, where an unbounded spin could starve
+	 * the party being waited for.
+	 */
+	inline void rendezvous(std::atomic<std::size_t>& arrived, std::size_t released)
+	{
+		arrived.fetch_add(1, std::memory_order_acq_rel);
+
+		for(int spins = 0; arrived.load(std::memory_order_acquire) < released;)
+		{
+			if(spins < spin_limit)
+			{
+				++spins;
+			}
+			else
+			{
+				std::this_thread::yield();
+			}
+		}
 	}
 
 	/** Resets all shared test state. Call this from each fixture's SetUp. */

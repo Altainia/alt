@@ -20,11 +20,35 @@ Point 6 is the guarantee: it is provided by the coroutine machinery itself
 and does not depend on whatever is being awaited cooperating with
 cancellation.
 
+**One case narrows point 6, and it is the case this library's own async
+primitives put a coroutine in.** A chain parked on an
+[`alt::async_event`](async_event.md), [`alt::async_latch`](async_latch.md),
+[`alt::async_semaphore`](async_semaphore.md) or
+[`alt::async_mutex`](async_mutex.md) is not left parked until something
+satisfies it. The awaiter registers a stop callback, and `request_stop()` runs
+that callback, which **releases the parked waiter and resumes its body**, with a
+result reporting that the wait was released rather than satisfied. For such a
+chain point 6 therefore reads "nothing after the *next* suspension point runs":
+the code between that `co_await` and the following suspension point really does
+execute, which is why those waits hand back a result that has to be checked.
+
+And it executes **on the thread that called `request_stop()`, even when
+`start_options::home` was supplied.** `home` governs only where the frames are
+*destroyed*; it has no say over where a released waiter's body runs. In the
+scenario above that means body code running on the thread that closed the
+window, synchronously inside `request_stop()`, while the window is on its way
+out — which is the very thing point 6 otherwise rules out. A coroutine that
+awaits one of the four and then touches thread-affine state must check the
+wait's result and `co_await alt::resume_on(...)` before touching it.
+
 Step 5 is the interesting one. Cancellation is checked on entry to every
 suspension point, and also at the resumptions this library owns: a hop through
-`alt::resume_on`, and a child `alt::task` completing and handing control back
-to its parent. So the resume in step 5 does not happen at all if a stop was
-requested while the task sat there, and step 6's teardown takes its place.
+`alt::resume_on`, a child `alt::task` completing and handing control back to its
+parent, and the stop callback a wait on one of the four async primitives
+registers. The first two observe the stop and tear the chain down instead of
+resuming; the third resumes the waiter deliberately, as just described. So the
+resume in step 5 does not happen at all if a stop was requested while the task
+sat there, and step 6's teardown takes its place.
 
 A foreign awaitable that resumes the frame itself is the exception, and it is
 checked on entry only. See [Foreign awaitables are checked on entry
@@ -227,6 +251,16 @@ the scenario above). If code after `request_stop()` needs to know teardown
 has actually happened, it needs its own signal for that — `cancellable_task`
 does not provide one.
 
+Note what this does and does not say about a chain parked on one of the four
+async primitives, which is the case the narrowing of point 6 above describes.
+There, `request_stop()` really does run body code before it returns, and with no
+`home` it destroys the frames inside the call as well — so for that chain it is
+the *acknowledgement* that is missing rather than the work: nothing tells the
+caller which of the two happened, and the caller still must not assume either.
+The no-deadlock rationale is unaffected, since a chain whose next resumption
+goes through a scheduler the calling thread pumps is exactly the case where the
+teardown cannot happen inside the call.
+
 ## Frames are destroyed on the thread that observed cancellation, unless a home scheduler is given
 
 With no `home` in `start_options`, the chain is destroyed in place, on
@@ -248,9 +282,20 @@ destroys the frames.
 
 Cancellation is checked in two places. On entry to every suspension point,
 which covers anything you can `co_await`. And at the resumptions this library
-owns, of which there are two: `alt::resume_on` returning from a scheduler, and
-a child `alt::task` completing and transferring back to its parent. Both of
-those observe the stop and tear the chain down instead of resuming.
+owns, of which there are three: `alt::resume_on` returning from a scheduler, a
+child `alt::task` completing and transferring back to its parent, and the stop
+callback that a wait on `alt::async_event`, `alt::async_latch`,
+`alt::async_semaphore` or `alt::async_mutex` registers
+(`detail::waiter_stop_release`).
+
+The first two observe the stop and tear the chain down instead of resuming. The
+third does the opposite: it unlinks the parked waiter and **resumes** it, with a
+result reporting the wait as released rather than satisfied, and lets the body
+run on to its next suspension point — where the ordinary teardown then takes
+over. It runs on the thread that called `request_stop()` whatever
+`start_options::home` says, because `home` governs only where the frames are
+destroyed. See the narrowing of point 6 at the top of this page, which is what
+that costs the motivating scenario.
 
 What is not covered is a foreign awaitable that resumes the frame directly,
 because intercepting a resumption means knowing how that resumption happens:
@@ -302,3 +347,13 @@ another suspension point, and so never tears itself down, no matter how long
 ago cancellation was requested. This is the same failure mode as the leaked
 home scheduler above, viewed from the awaited side rather than the teardown
 side.
+
+The four async primitives are the exception, and they are the exception
+deliberately. A coroutine parked on an [`alt::async_event`](async_event.md)
+nobody ever sets — or on a latch nobody counts down, a semaphore nobody
+releases, a mutex nobody unlocks — is *not* stuck here: the stop callback its
+awaiter registered releases the waiter, its body resumes with the released
+result, and the chain tears itself down at the following suspension point. That
+is the whole purpose of those stop callbacks. Everything else an awaitable can
+be — a foreign awaitable that resumes the frame itself, a scheduler nobody pumps
+— is covered by the rule above.

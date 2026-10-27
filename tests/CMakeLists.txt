@@ -47,6 +47,11 @@ add_executable(alt_tests
     test_coroutine.cpp
     test_scheduler.cpp
     test_work_queue.cpp
+    test_waiter_list.cpp
+    test_async_event.cpp
+    test_async_latch.cpp
+    test_async_semaphore.cpp
+    test_async_mutex.cpp
     test_run_loop.cpp
     test_thread_pool.cpp
     test_cancellation.cpp
@@ -81,7 +86,7 @@ include(GoogleTest)
 #
 # Headroom is deliberate and large. The slowest test in the suite is
 # sha2.hashes_the_one_million_character_vector at 0.79s under ThreadSanitizer, the
-# slowest preset; every concurrency test is at or under 0.08s there, and the
+# slowest preset; the slowest concurrency test is at or under 0.5s there, and the
 # longest deliberate sleep in the suite is 50ms. 60s is roughly 75x the slowest
 # legitimate test, so it cannot fire on a slow machine, and it is short enough to
 # report a hang while the build is still being watched.

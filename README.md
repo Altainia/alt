@@ -118,11 +118,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.7.1_amd64.deb` in the project root:
+Produces `altlib_1.8.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.7.1_amd64.deb
+sudo dpkg -i altlib_1.8.0_amd64.deb
 ```
 
 ## Using in your project
@@ -130,7 +130,7 @@ sudo dpkg -i altlib_1.7.1_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.7.1 REQUIRED)
+find_package(Alt 1.8.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
@@ -169,3 +169,7 @@ Then include headers as needed:
 | `<alt/thread_pool.hpp>` | Fixed-size thread pool built by a factory returning `std::expected`: `thread_pool` | [docs/thread_pool.md](docs/thread_pool.md) |
 | `<alt/sync_wait.hpp>` | Blocking and driving entry points for running an awaitable to completion: `sync_wait` | [docs/sync_wait.md](docs/sync_wait.md) |
 | `<alt/cancellable_task.hpp>` | Self-owning, cancellable root coroutine: `cancellable_task`, `cancellation_handle`, `start`, `cancellation_point` | [docs/cancellable_task.md](docs/cancellable_task.md) |
+| `<alt/async_event.hpp>` | Manual-reset signal coroutines await: `async_event`, `wait_result` | [docs/async_event.md](docs/async_event.md) |
+| `<alt/async_latch.hpp>` | Single-use countdown coroutines await: `async_latch`, `wait_result` | [docs/async_latch.md](docs/async_latch.md) |
+| `<alt/async_semaphore.hpp>` | Counting semaphore coroutines await: `async_semaphore`, `wait_result` | [docs/async_semaphore.md](docs/async_semaphore.md) |
+| `<alt/async_mutex.hpp>` | Mutual exclusion that blocks no thread, with an RAII guard: `async_mutex`, `async_mutex_lock` | [docs/async_mutex.md](docs/async_mutex.md) |

@@ -237,6 +237,15 @@ alt::task<void> handler()
 }
 ```
 
+The async synchronization primitives capture no scheduler, which is why
+`resume_on` is how a waiter on one reaches a thread of its own choosing. A
+coroutine parked on [`alt::async_event`](async_event.md),
+[`alt::async_latch`](async_latch.md),
+[`alt::async_semaphore`](async_semaphore.md) or
+[`alt::async_mutex`](async_mutex.md) resumes on whichever thread satisfied
+it — inside the `set()`, `count_down()`, `release()` or lock release that did
+so — and runs its body there until it hops.
+
 ## Lifetime
 
 **The scheduler, and anything a work item's state pointer points at, must
