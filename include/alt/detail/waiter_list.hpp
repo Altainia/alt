@@ -53,8 +53,10 @@ namespace alt::detail
 
 		/**
 		 * The waiter to resume. Default constructed empty, and must hold a resumable
-		 * handle before the node is linked: nothing below ever resumes a null handle,
-		 * because nothing below can tell that it is one.
+		 * handle before the node is linked, which waiter_list::link asserts. An empty
+		 * handle is perfectly detectable; what nothing downstream can do is supply the
+		 * missing one, which is why the check belongs at the link and not at the
+		 * resume.
 		 */
 		std::coroutine_handle<> handle;
 
@@ -196,6 +198,13 @@ namespace alt::detail
 		 * a resumption may not touch this list: it is being destroyed. Each waiter
 		 * sees @c satisfied false, which is how it tells this apart from the
 		 * primitive actually completing.
+		 *
+		 * This is also the one multi-node resumption the list performs on its own
+		 * behalf, so resume_claimed's chain rule binds here as much as anywhere: a
+		 * waiter released by this destructor may not destroy another waiter still
+		 * queued behind it in the same chain. A primitive whose waiters can destroy
+		 * one another must therefore drain its list with detach_one before it reaches
+		 * this destructor, rather than leaving the release to the backstop.
 		 */
 		~waiter_list()
 		{
@@ -294,7 +303,12 @@ namespace alt::detail
 		 *         multi-node chain to resume_claimed carries that function's rule with
 		 *         it: no waiter's resumption may destroy a later node in the chain. A
 		 *         primitive whose waiters can destroy one another must release them
-		 *         with detach_one instead, one chain of one at a time.
+		 *         with detach_one instead, one chain of one at a time. That works for a
+		 *         reason worth making explicit: a node still on the list can be
+		 *         withdrawn by its own owner's claim, so a waiter about to be destroyed
+		 *         can still be taken off the list first, while a node already sitting
+		 *         in a chain is beyond rescue — nothing can take it back out before the
+		 *         walk reaches it.
 		 */
 		waiter_node* detach_all() noexcept
 		{
