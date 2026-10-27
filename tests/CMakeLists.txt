@@ -49,6 +49,7 @@ add_executable(alt_tests
     test_work_queue.cpp
     test_waiter_list.cpp
     test_async_event.cpp
+    test_async_latch.cpp
     test_run_loop.cpp
     test_thread_pool.cpp
     test_cancellation.cpp
