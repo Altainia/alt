@@ -409,10 +409,18 @@ namespace alt::detail
 		 * action's position inside the section does not matter: there is no
 		 * interleaving left to reason about.
 		 *
-		 * @param under_lock Run with the mutex held. It must not take a lock, call back
-		 *        into this list, or resume anything, and it must not throw: this
-		 *        function is noexcept, so an exception terminates. Publishing the
-		 *        primitive's own atomic flag is the intended shape.
+		 * This form is for a satisfier that always releases everyone it finds, which is
+		 * an event being set. A satisfier that must sometimes release nobody cannot use
+		 * it, because it always walks: a latch's count_down releases nothing until the
+		 * count reaches zero, so it belongs on the overload below, which says why that
+		 * is equally correct.
+		 *
+		 * @param under_lock Run with the mutex held. It must not take a lock of its
+		 *        own, must not call back into this list -- size(), empty() and link()
+		 *        all take the mutex it is already holding, so any of them self-deadlocks
+		 *        -- must not resume anything, and must not throw: this function is
+		 *        noexcept, so an exception terminates. Publishing the primitive's own
+		 *        atomic flag is the intended shape.
 		 *
 		 * @return As the overload below.
 		 */
@@ -427,8 +435,21 @@ namespace alt::detail
 		/**
 		 * @brief Claims and detaches every node this caller can win.
 		 *
-		 * What a satisfier that releases everyone and has no state of its own to
-		 * publish calls, which in practice means a primitive being destroyed.
+		 * Correct in two cases, and a latch is the second of them.
+		 *
+		 * The first is a satisfier with no state of its own to publish, which means a
+		 * primitive being destroyed.
+		 *
+		 * The second is a satisfier that published its state *before* this call. That
+		 * is as watertight as the action overload, by the same argument: a waiter
+		 * reaches this list only through link(), which takes this mutex, so a waiter
+		 * that read the old state before the publish must still pass its condition
+		 * under the mutex -- after the publish -- and will decline to park. A latch's
+		 * count_down is exactly this shape, and has to be, since it must release nobody
+		 * until its decrement reaches zero and the action overload would release
+		 * everyone on every call. What is *not* correct is publishing after the walk,
+		 * or between the walk and the resumptions; see alt::async_event::set for that
+		 * window and why it chose the other overload.
 		 *
 		 * A node another party has already claimed but not yet unlinked is left where
 		 * it is, because that party owns it and will unlink it when it takes the
@@ -472,15 +493,22 @@ namespace alt::detail
 		 *
 		 * has a lost wakeup that link()'s condition cannot save, because the waiter's
 		 * condition can read the count as zero under this mutex in the gap between the
-		 * detach that found nothing and the increment, and park on a permit that has
-		 * already been given away. Deciding both inside this one critical section is
-		 * the fix.
+		 * detach that found nothing and the increment that follows it. The waiter then
+		 * parks, and the permit lands in the count a moment later with nobody left to
+		 * wake. The permit has not been given to anyone: it is sitting in the count,
+		 * and the waiter that should have had it is suspended. Deciding both inside this
+		 * one critical section is the fix.
 		 *
 		 * @param under_lock Run with the mutex held, after the detach attempt, with
-		 *        true when a node was detached. Same restrictions as detach_all's: no
-		 *        lock, no reentry into this list, no resumption, no exception. The node
-		 *        itself is deliberately not passed, because resuming under the mutex is
-		 *        the one thing that must not happen here.
+		 *        true when a node was detached. It must not take a lock of its own, must
+		 *        not call back into this list -- size(), empty() and link() all take the
+		 *        mutex it is already holding, so any of them self-deadlocks -- must not
+		 *        resume anything, and must not throw: this function is noexcept, so an
+		 *        exception terminates. Changing the primitive's own count or flag is the
+		 *        whole of what belongs here. The detached node is deliberately not
+		 *        passed, because resuming it under the mutex is the one thing that must
+		 *        not happen here: a resumed waiter runs its body, which may re-await
+		 *        this primitive or destroy it.
 		 *
 		 * @return As the overload below.
 		 */
