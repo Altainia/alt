@@ -300,6 +300,19 @@ namespace alt::detail
 			return wait_result{};
 		}
 
+		// The three deleted operations stay public even though every real constructor
+		// below is private. clang-tidy 19's bugprone-crtp-constructor-accessibility
+		// objects to the deleted copy constructor; clang-tidy 21 does not, having
+		// stopped reporting deleted special members. The hazard that check guards is a
+		// usable public constructor, which would let an unrelated class inherit from
+		// wait_awaiter<SomeoneElse> and cast its awaiter to that type. A deleted
+		// constructor cannot construct anything, so it cannot be that door. Making
+		// these private instead trades one finding for three, because
+		// modernize-use-equals-delete then fires on each: a private deleted function
+		// tells a caller about access where a public one tells them about deletion,
+		// which is the better diagnostic. The project's gate is clang-tidy 19, so a
+		// local run on a newer toolchain will not reproduce this.
+		// NOLINTNEXTLINE(bugprone-crtp-constructor-accessibility): a deleted constructor is not the public door the check is looking for; see above.
 		wait_awaiter(const wait_awaiter&)            = delete;
 		wait_awaiter& operator=(const wait_awaiter&) = delete;
 		wait_awaiter& operator=(wait_awaiter&&)      = delete;
