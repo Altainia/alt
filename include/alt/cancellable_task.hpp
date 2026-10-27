@@ -107,14 +107,25 @@ namespace alt
 	namespace detail
 	{
 
-		/** Forwards an external stop request into the task's own source. */
+		/**
+		 * @brief Forwards an external stop request into the task's own source.
+		 *
+		 * Holds a copy of the source, not a pointer to the promise's member. The
+		 * copy shares the same reference-counted stop state, so requesting a stop
+		 * on it is equivalent, and it lives inside the std::stop_callback that
+		 * invokes it. Since that callback's destructor blocks until a concurrently
+		 * running invocation returns, the object this touches is alive for the whole
+		 * call by construction, whatever order the promise declares its members in.
+		 * A pointer here would instead make correctness depend on the promise's
+		 * member declaration order, which nothing in the language checks.
+		 */
 		struct stop_forwarder
 		{
-			std::stop_source* target;
+			std::stop_source target;
 
 			void operator()() const noexcept
 			{
-				target->request_stop();
+				target.request_stop();
 			}
 		};
 
@@ -197,7 +208,7 @@ namespace alt
 				// callback over an already-stopped token invokes it at once.
 				if(options.token.stop_possible())
 				{
-					m_external.emplace(options.token, stop_forwarder{&m_source});
+					m_external.emplace(options.token, stop_forwarder{m_source});
 				}
 			}
 
@@ -207,19 +218,13 @@ namespace alt
 			}
 
 		private:
-			// DELICATE. Read this before reordering these members.
-			//
-			// m_external must stay the last member, so that it is destroyed first,
-			// ahead of m_source. std::stop_callback's destructor blocks until any
-			// concurrently running invocation of its callback returns, and that
-			// callback (stop_forwarder) dereferences m_source. Declaring m_external
-			// any earlier would destroy m_source first: a thread already inside
-			// stop_forwarder::operator(), calling m_source.request_stop() from an
-			// external request_stop(), would then dereference a destroyed
-			// std::stop_source while this frame's own teardown runs on another
-			// thread. Nothing else in this class, no test, no compiler warning, and
-			// no clang-tidy check catches that reordering; only the declaration
-			// order does.
+			// These members carry no declaration-order requirement. They once did:
+			// stop_forwarder held a std::stop_source* into this frame, so m_external
+			// had to be destroyed ahead of m_source or a thread inside the forwarder
+			// could dereference a destroyed source while another thread tore the
+			// frame down. Nothing checked that ordering, so the forwarder now holds a
+			// reference-counted copy instead and the hazard is gone structurally. See
+			// stop_forwarder above before changing it back.
 			cancellation_context                              m_context{};
 			std::stop_source                                  m_source;
 			exception_handler                                 m_handler{};
