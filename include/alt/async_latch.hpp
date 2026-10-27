@@ -41,6 +41,20 @@ namespace alt
 	 * the node it is parked on lives in that frame; destroying this latch instead
 	 * releases them all, which is the supported teardown.
 	 *
+	 * Destroying the latch itself from a resumed waiter's body is a different thing
+	 * and is allowed: the releasing count_down() publishes the zero and takes the
+	 * queue first, and the resumption is the last thing it does, so nothing is left to
+	 * be read afterwards. It carries one qualification a waiter cannot check for
+	 * itself, the same one async_semaphore::release carries and for the same reason,
+	 * that call resuming one multi-node chain exactly as that one does. It is
+	 * committed to resuming every waiter it took, so a waiter that destroys the latch
+	 * may be followed by siblings that are still resumed -- correctly, each having
+	 * been won before anything ran -- into an object that no longer exists. Those
+	 * siblings must not touch the latch after their wait returns. Since no waiter can
+	 * tell whether it is the last of a chain, in practice a waiter that destroys the
+	 * latch must be one whose siblings do not go back to it, which is what a shutdown
+	 * looks like: every waiter is leaving.
+	 *
 	 * That first rule is why count_down() can resume its waiters from one multi-node
 	 * chain (detach_all) instead of one detach_one at a time: nothing in the library
 	 * lets one waiter own a sibling's frame, because there is no when_all or race

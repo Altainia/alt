@@ -175,11 +175,18 @@ or `alt::cancellable_task`, and is documented at
 strength of that is narrower than it looks, and it was measured rather than
 assumed:
 
-- **Clang and clang-tidy warn** on a dropped `co_await` result.
-- **GCC does not warn here.** Measured on GCC 15.2: `-Wunused-result` does fire
-  for a discarded `co_await` whose result is a scalar, and does not fire for one
-  whose result is a class type. Every wait in this family yields a
-  `std::expected`, which puts all four of them on the silent side.
+- **Clang and clang-tidy warn** on a dropped `co_await` on any of these four
+  primitives.
+- **GCC does not.** On all four the attribute is unenforced under GCC: a dropped
+  result is diagnosed by nothing.
+- A discarded `co_await` on an `alt::task<T>` *is* diagnosed by GCC, as well as
+  by Clang. **What divides those two cases on GCC was not determined, so do not
+  read the line above as a statement about `co_await` in general.** It is
+  demonstrably not the result type: a discarded `co_await` on a
+  `task<std::expected<void, std::error_code>>` warns on GCC, while one on an
+  `async_event` — whose result is that same type — does not.
+
+Measured with `-Wall -Wextra` on GCC 15.2.0 and Clang 21.1.8.
 
 So on a GCC build `co_await latch;` written as a statement is diagnosed by
 nothing, and the coroutine goes on to read results that may not exist.

@@ -22,10 +22,13 @@ namespace alt
 	 * std::unexpected, never an empty guard.
 	 *
 	 * That type-level guarantee is what the family's other primitives do not have,
-	 * and it is worth its weight for a measured reason. Dropping the result of a
-	 * co_await is diagnosed by Clang and clang-tidy and by nothing at all on GCC,
-	 * which does not apply -Wunused-result to a co_await expression; see
-	 * detail::cancellation_checked::await_resume, where that was measured. So on a
+	 * and it is worth its weight for a measured reason. On GCC 15.2.0 and Clang
+	 * 21.1.8, dropping the result of a co_await on this class, or on any of the other
+	 * three primitives, is diagnosed by Clang and by clang-tidy and by nothing at all
+	 * on GCC. What divides that from a discarded co_await on an alt::task<T>, which
+	 * GCC does warn on, was not determined; it is not the result type. See
+	 * detail::cancellation_checked::await_resume, where both cases were measured and
+	 * where the reasons not to generalize from either are recorded. So on a
 	 * GCC build `co_await mutex;` as a statement is diagnosed by nothing -- and it is
 	 * still safe here, because the guard inside the discarded std::expected is
 	 * destroyed at the end of that full-expression and unlocks. A dropped result is a

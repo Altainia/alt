@@ -29,11 +29,14 @@ namespace alt
 	 * work, another retires it. The consequence is that the caller is responsible for
 	 * checking the result and for releasing what it acquired. await_resume() is
 	 * [[nodiscard]] so that dropping the result is a diagnostic, and that is worth
-	 * knowing the exact strength of: Clang and clang-tidy warn on a dropped co_await
-	 * result, while GCC does not apply -Wunused-result to a co_await expression at
-	 * all. See detail::cancellation_checked::await_resume, where that was measured. So
-	 * on a GCC build a caller that ignores the result and carries on without a permit
-	 * is diagnosed by nothing.
+	 * knowing the exact strength of, which was measured rather than assumed: on
+	 * GCC 15.2.0 and Clang 21.1.8, a dropped co_await on this class is diagnosed by
+	 * Clang and by clang-tidy and by nothing at all on GCC. So on a GCC build a caller
+	 * that ignores the result and carries on without a permit is diagnosed by nothing.
+	 * What divides that from a discarded co_await on an alt::task<T>, which GCC does
+	 * warn on, was not determined; it is not the result type. See
+	 * detail::cancellation_checked::await_resume, where both cases were measured and
+	 * where the reasons not to generalize from either are recorded.
 	 *
 	 * Fairness, as far as it goes: permits are handed to parked waiters in the order
 	 * they parked, and a release never adds to the count while a parked waiter could

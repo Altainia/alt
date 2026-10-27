@@ -93,6 +93,47 @@ never `co_await`-ed — never starts its coroutine body at all. This is almost
 never what's intended, which is why the type is marked `[[nodiscard]]`; treat
 a discarded task as a bug to fix, not a warning to suppress.
 
+## Discarding an await *result* is `[[nodiscard]]` too
+
+A different thing from the above, and newer. Every `co_await` inside an
+`alt::task` or an `alt::cancellable_task` is wrapped by the cancellation layer,
+which injects the stop check ahead of the suspension point, and that wrapper's
+`await_resume` carries `[[nodiscard]]`. So the rule is: **a value-returning
+await inside an `alt::task` is `[[nodiscard]]`**, whatever is being awaited.
+Void-returning awaits are unaffected, having no result to discard.
+
+```cpp
+alt::task<void> caller()
+{
+    co_await square(3);             // warns: the result is dropped
+    const int n = co_await square(3);
+    use(n);
+}
+```
+
+This widening arrived with the phase that added the async synchronization
+primitives, so a build that was clean before it may now warn — including one
+with warnings-as-errors, as this project's own clang-tidy gate is. The fix is to
+use the value, or to drop it deliberately with a cast to `void`.
+
+Which compilers act on it was measured rather than assumed, with `-Wall
+-Wextra` on GCC 15.2.0 and Clang 21.1.8:
+
+- A discarded `co_await` on an `alt::task<T>` is diagnosed by **GCC as well as
+  by Clang** and clang-tidy. Measured for `T = int` and for
+  `T = std::expected<void, std::error_code>`.
+- A discarded `co_await` on one of the async primitives —
+  [`async_event`](async_event.md), [`async_latch`](async_latch.md),
+  [`async_semaphore`](async_semaphore.md), [`async_mutex`](async_mutex.md) — is
+  diagnosed by Clang and clang-tidy and by **nothing at all on GCC**.
+- **What divides those two cases on GCC was not determined**, so neither line
+  above generalizes to an awaitable it does not name. It is demonstrably not the
+  result type: a `task<std::expected<void, std::error_code>>` warns on GCC,
+  while an `async_event` — whose result is that same type — does not.
+
+`include/alt/detail/cancellation.hpp` records the measurement, and why no rule
+was inferred from it.
+
 ## `task<T&>` — the result outlives the frame only if something else keeps it alive
 
 ```cpp

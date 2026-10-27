@@ -39,6 +39,20 @@ namespace alt
 	 * destroyed from outside, because the node it is parked on lives in that frame;
 	 * destroying this event instead releases them all, which is the supported
 	 * teardown.
+	 *
+	 * Destroying the event itself from a resumed waiter's body is a different thing
+	 * and is allowed: set() marks the event set and takes the queue in one critical
+	 * section, and the resumption is the last thing it does, so nothing is left to be
+	 * read afterwards. It carries one qualification a waiter cannot check for itself,
+	 * the same one async_semaphore::release carries and for the same reason, this
+	 * function resuming one multi-node chain exactly as that one does. A single set()
+	 * may have taken several waiters and is committed to resuming all of them, so a
+	 * waiter that destroys the event may be followed by siblings that are still
+	 * resumed -- correctly, each having been won before anything ran -- into an object
+	 * that no longer exists. Those siblings must not touch the event after their wait
+	 * returns. Since no waiter can tell whether it is the last of a chain, in practice
+	 * a waiter that destroys the event must be one whose siblings do not go back to
+	 * it, which is what a shutdown looks like: every waiter is leaving.
 	 */
 	class async_event
 	{

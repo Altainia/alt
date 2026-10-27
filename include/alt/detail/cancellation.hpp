@@ -178,19 +178,36 @@ namespace alt::detail
 		 * discarding the result of co_await on an alt::task<int> now warns too, not only
 		 * on an async primitive's satisfied-or-released std::expected. That is the
 		 * intent. Awaiting a value and dropping it is a defect, and the primitives added
-		 * in phase 5 lean on the diagnostic -- alt::async_mutex most of all, where a
-		 * dropped result is a lock the caller believes it holds. Void-returning awaits
-		 * are unaffected, having no result to discard.
+		 * in phase 5 lean on the diagnostic -- alt::async_event, alt::async_latch and
+		 * alt::async_semaphore most of all, since for those three it is the only thing
+		 * standing between a released waiter and a body that proceeds as though the wait
+		 * had succeeded. alt::async_mutex leans on its guard's type instead: a dropped
+		 * result there is a critical section of zero length, not a lock held in error.
+		 * Void-returning awaits are unaffected, having no result to discard.
 		 *
-		 * Two consequences worth knowing before relying on it. Which compilers act on it
-		 * was measured rather than assumed: Clang 21.1 warns both through this wrapper
-		 * and without it, while GCC 15.2 warns in neither case, because it does not
-		 * apply -Wunused-result to a co_await expression at all, even when the awaiter's
-		 * own await_resume carries the attribute. So the Clang and clang-tidy builds
-		 * catch a dropped result and the GCC build catches nothing. And because the
-		 * widening reaches every wrapped await, a downstream build with
-		 * warnings-as-errors may see new diagnostics on code that compiled clean
-		 * before this.
+		 * Which compilers act on it was measured rather than assumed, and the
+		 * measurement does not reduce to a rule. On GCC 15.2.0 and Clang 21.1.8, with
+		 * -Wall -Wextra:
+		 *
+		 * - A discarded co_await on alt::async_event, alt::async_latch,
+		 *   alt::async_semaphore or alt::async_mutex is diagnosed by Clang and by
+		 *   clang-tidy, and by nothing at all on GCC. For those four the attribute is
+		 *   unenforced under GCC.
+		 * - A discarded co_await on an alt::task<T> is diagnosed by GCC as well as by
+		 *   Clang, measured for both T = int and T = std::expected<void,
+		 *   std::error_code>.
+		 *
+		 * What divides those two cases on GCC was not determined. It is demonstrably not
+		 * the result type: the primitives' result is std::expected<void,
+		 * std::error_code>, which is also the alt::task case GCC does warn on. So do not
+		 * generalize from either line above to an awaitable not named in it, and in
+		 * particular do not read the first line as a statement about co_await in
+		 * general. Three earlier versions of this comment each stated a rule from a
+		 * sample and each rule was false.
+		 *
+		 * And because the widening reaches every wrapped await, a downstream build with
+		 * warnings-as-errors may see new diagnostics on code that compiled clean before
+		 * this -- on GCC as well as on Clang, the alt::task case being the common one.
 		 */
 		[[nodiscard]] decltype(auto) await_resume()
 		{
