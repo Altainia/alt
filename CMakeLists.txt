@@ -94,6 +94,16 @@ if(ALT_CPPCHECK)
             # pointer(s)". The variables inside that callback are const, which is the
             # part of the finding that was worth acting on.
             --suppress=constParameterCallback:*/alt/detail/cancellation.hpp
+            # alt::async_mutex is the first primitive whose wait yields a value, so it
+            # is the first whose awaiter declares an await_resume of its own, hiding
+            # detail::wait_awaiter's. The hiding is the design rather than an accident:
+            # the base still decides whether the wait succeeded, the derived decides
+            # only what success is worth, and it calls the base by qualified name to get
+            # the verdict. Neither way out of the finding is available. The name is
+            # fixed by the coroutine await protocol, so it cannot be renamed, and making
+            # the base's non-public would change machinery async_event, async_latch and
+            # async_semaphore all resume through.
+            --suppress=duplInheritedMember:*/alt/async_mutex.hpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src
