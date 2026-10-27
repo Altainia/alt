@@ -54,15 +54,18 @@ namespace alt
 	 * Neither copyable nor movable: the awaiters inside suspended coroutine frames
 	 * hold pointers to it, and no copy or move could fix those up.
 	 *
-	 * Three things a waiter's body may not do. It may not destroy another waiter of
-	 * the same semaphore, because the node a parked waiter is on lives in that
-	 * waiter's frame and nothing withdraws it from the queue; see
-	 * detail::waiter_list::detach_all for why one detach at a time does not make that
-	 * safe. Nor may a coroutine parked here have its frame destroyed from outside, for
-	 * the same reason; destroying this semaphore instead releases them all, which is
-	 * the supported teardown. And it may not destroy the semaphore itself from inside a
-	 * resumption that release(n) performed with permits still to hand out -- see
-	 * release().
+	 * Two things a waiter's body may not do, both shared with async_event and
+	 * async_latch. It may not destroy another waiter of the same semaphore, because
+	 * the node a parked waiter is on lives in that waiter's frame and nothing
+	 * withdraws it from the queue; see detail::waiter_list::detach_all for why
+	 * detaching one at a time does not make that safe either. And a coroutine parked
+	 * here may not have its frame destroyed from outside, for the same reason;
+	 * destroying this semaphore instead releases them all, which is the supported
+	 * teardown.
+	 *
+	 * Destroying the semaphore from a resumed waiter's body is allowed, including
+	 * from a waiter release() resumed, and release() says what it does to keep that
+	 * true.
 	 */
 	class async_semaphore
 	{
@@ -97,16 +100,15 @@ namespace alt
 		 * semaphore holds must stay within std::ptrdiff_t.
 		 *
 		 * Waiter bodies run on this thread before this returns, so this must not be
-		 * called with a lock held that a waiter might take. One waiter is resumed per
-		 * permit, each one before the next permit is handed out, which means a waiter
-		 * resumed here can re-await this semaphore and be given one of the permits this
-		 * same call has left.
+		 * called with a lock held that a waiter might take. Every permit is placed
+		 * before any waiter is resumed, and the resumptions are the last thing this
+		 * function does, so a waiter resumed here may do anything its body likes --
+		 * including destroying this semaphore, which a pool shutting down by releasing
+		 * one permit per worker will do from the last worker it wakes.
 		 *
-		 * That last point carries a precondition this cannot enforce. For @p n of one
-		 * the resumption is the last thing this function does, so the waiter may do
-		 * anything, including destroying this semaphore. For larger @p n this call comes
-		 * back to the semaphore after each resumption, to decide where the next permit
-		 * goes, so a waiter resumed by release(n > 1) must not destroy the semaphore.
+		 * The order has one visible consequence. A waiter resumed here that re-awaits
+		 * this semaphore finds any leftover permits already in the count rather than
+		 * being handed one directly, so an unrelated try_acquire() may take one first.
 		 */
 		void release(std::ptrdiff_t n = 1);
 

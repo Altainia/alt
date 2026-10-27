@@ -83,7 +83,9 @@ namespace alt::detail
 	 *   It is consulted at most twice per wait, and the second call happens only if
 	 *   the first returned false, so a condition that consumes something — a
 	 *   semaphore permit, a mutex — succeeds at most once per wait and may consume on
-	 *   either call.
+	 *   either call. Whichever of the two calls returns true, the wait reports
+	 *   satisfied; a consuming condition is never told it was cancelled after it has
+	 *   already consumed, which is what await_suspend's rule 4 exists to guarantee.
 	 * - `waiter_list& list()` — the queue to park in.
 	 *
 	 * Every wait reports std::expected<void, std::error_code>: a value when the
@@ -141,11 +143,30 @@ namespace alt::detail
 		 *    between that check and this registration still has to be caught, and the
 		 *    immediate-fire behavior of std::stop_callback is what catches it.
 		 *
-		 * 3. **The link is the last statement that touches *this.** Everything
-		 *    await_resume reads is written before it. After a *failed* link the frame
-		 *    has no resumer but itself, because the node is on no list and nothing can
-		 *    reach it, so reading the node's own state there is safe; after a
-		 *    successful one, nothing may be read at all.
+		 * 3. **The link is the last statement that touches *this**, and after a
+		 *    *successful* one nothing may be read at all: the node is on the list, so
+		 *    any party may win it, resume this frame and destroy it. After a *failed*
+		 *    link the frame has no resumer but itself, because the node is on no list
+		 *    and nothing can reach it, so *this is safe to touch again -- but only the
+		 *    frame's own members, never the node.
+		 *
+		 * 4. **Which of the two refusals happened is decided inside the condition, not
+		 *    read off the node afterwards.** The node's state word cannot answer it
+		 *    once the mutex is dropped, and an earlier version of this function that
+		 *    asked it there was wrong. A condition that refuses the link because the
+		 *    primitive is satisfied, followed by a stop callback winning the node a
+		 *    moment later, leaves the state word reading @c claimed with nothing
+		 *    resumed -- indistinguishable, from here, from a stop that won the node
+		 *    before the condition ever ran. Reported as a cancellation, that is a wait
+		 *    that took what the primitive gave it and then said it got nothing: for
+		 *    alt::async_semaphore a permit consumed and never returned, and for a
+		 *    future alt::async_mutex a lock held by nobody. The condition knows which
+		 *    case it is, so it says so, under the mutex, where the answer is still
+		 *    true.
+		 *
+		 *    Both refusals cannot happen at once: link() tests the election first and
+		 *    does not run the condition at all if it has been lost. So the flag staying
+		 *    false means the election refused the link, which is the released case.
 		 *
 		 * The node must also outlive every claim on it, which is why m_stop is
 		 * declared after m_node: it is destroyed first, so no callback can be
@@ -183,18 +204,33 @@ namespace alt::detail
 			// read of *this at all. See rule 3 above.
 			m_parked = true;
 
-			if(waiters.link(m_node, [this] { return !derived().ready(); }))
+			// Set by the condition itself, under the list's mutex, so that the two
+			// reasons a link can be refused are told apart while they can still be told
+			// apart. See rule 4 above; this is a local rather than a member because
+			// nothing reads it after this function returns.
+			bool satisfied_at_the_link = false;
+
+			const auto still_waiting = [this, &satisfied_at_the_link] {
+				if(derived().ready())
+				{
+					satisfied_at_the_link = true;
+					return false;
+				}
+
+				return true;
+			};
+
+			if(waiters.link(m_node, still_waiting))
 			{
 				return true;
 			}
 
-			// Not linked, so nothing but this frame can resume it, and *this is safe to
-			// touch again. The election decides which of the two refusals happened: a
-			// node that is still linked was refused by the condition, meaning the
-			// primitive was satisfied between await_ready and here, and anything else
-			// means a stop callback won this waiter and left the resumption to it.
+			// Not linked, so nothing but this frame can resume it, and the frame's own
+			// members are safe to touch again. The node is not: a stop callback may be
+			// mid-flight over it, and whatever it finds there it resumes nothing, having
+			// won a node that is on no list.
 			m_parked   = false;
-			m_released = m_node.state.load(std::memory_order_acquire) != waiter_state::linked;
+			m_released = !satisfied_at_the_link;
 			return false;
 		}
 

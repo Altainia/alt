@@ -18,12 +18,11 @@ namespace alt
 		// async_event's destructor gives: a released waiter may await this semaphore
 		// again, and that re-await must land in a list that has not finished its walk.
 		//
-		// This is the one multi-node resumption the semaphore performs -- release() hands
-		// out one permit at a time, so every chain it resumes holds a single node -- and
-		// resume_claimed's chain rule therefore binds here: a waiter released by this
-		// destructor may not destroy another waiter still queued behind it. That is sound
-		// for the same reason it is sound in async_latch, whose count_down records the
-		// argument and the condition under which it must be revisited.
+		// Like release(), this resumes a multi-node chain, so resume_claimed's chain rule
+		// binds here: a waiter released by this destructor may not destroy another waiter
+		// still queued behind it. That is sound for the same reason it is sound in
+		// async_latch, whose count_down records the argument and the condition under
+		// which it must be revisited.
 		detail::resume_claimed(m_waiters.detach_all(), false);
 	}
 
@@ -44,20 +43,36 @@ namespace alt
 		// in the count. waiter_list::detach_one documents that lost wakeup with this
 		// function as its worked example.
 		//
-		// The resumption is outside the mutex, because a resumed waiter runs its body: it
-		// may re-await this semaphore, take whatever lock it likes, or, once the last
-		// permit is gone, destroy the semaphore. It is also the last statement of the
-		// final iteration, which is what makes that destruction safe for release(1):
-		// remaining reaches zero before the resume, so the only thing read afterwards is
-		// the loop condition, and that reads a local. Resume before lowering remaining
-		// and a read of *this would follow a resumption that may have destroyed it.
+		// Every waiter won is strung onto a local chain and the whole chain is resumed
+		// once, after the loop, rather than one waiter per iteration. That is what makes
+		// the resumption the last statement of this function, as it is in
+		// async_event::set and async_latch::count_down, and it is the only reason a
+		// waiter resumed from here may destroy the semaphore: resuming inside the loop
+		// would bring control back to read m_waiters afterwards. Nothing about the
+		// decision above changes, because the chain is assembled from nodes that are
+		// already claimed and already off the list -- unlink_locked clears both their
+		// links -- so holding them across the next detach_one is the window
+		// resume_claimed documents as safe.
 		//
-		// One permit at a time, each handed over before the next is decided, is also what
-		// keeps every chain this function resumes to a single node, so resume_claimed's
-		// chain rule has nothing to bite on here. The waiter the permit goes to is
-		// deliberately not handed to the action: resuming it under the mutex is the one
-		// thing that must not happen there.
-		std::ptrdiff_t remaining = n;
+		// The resumption stays outside the mutex, because a resumed waiter runs its body:
+		// it may re-await this semaphore, take whatever lock it likes, or destroy it.
+		// Resuming a multi-node chain does carry resume_claimed's chain rule, so a waiter
+		// resumed here may not destroy another waiter of this semaphore -- which the class
+		// documentation already forbids for the reason the list gives, that nothing
+		// withdraws a parked node from the queue.
+		//
+		// What this costs, and it is a real cost: a waiter resumed by one of these
+		// permits is resumed after the last of them has been placed, so it can no longer
+		// be handed the next one. It re-awaits into a count that already holds the
+		// leftovers, where an unrelated try_acquire could take one first. A permit's
+		// route is not observable from outside the semaphore, so no caller can tell; what
+		// a caller could tell is a destroyed semaphore.
+		//
+		// The waiter the permit goes to is deliberately not handed to the action:
+		// resuming it under the mutex is the one thing that must not happen there.
+		detail::waiter_node* chain_head = nullptr;
+		detail::waiter_node* chain_tail = nullptr;
+		std::ptrdiff_t       remaining  = n;
 
 		while(remaining > 0)
 		{
@@ -77,8 +92,27 @@ namespace alt
 				remaining = 0;
 			});
 
-			detail::resume_claimed(won, true);
+			if(won == nullptr)
+			{
+				break;
+			}
+
+			// Linked forwards only, like detach_all's own walk: the chain's nodes die one
+			// at a time as they are resumed, so a prev pointer here would point at freed
+			// storage.
+			if(chain_tail != nullptr)
+			{
+				chain_tail->next = won;
+			}
+			else
+			{
+				chain_head = won;
+			}
+
+			chain_tail = won;
 		}
+
+		detail::resume_claimed(chain_head, true);
 	}
 
 	bool async_semaphore::try_acquire() noexcept

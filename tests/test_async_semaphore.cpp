@@ -3,10 +3,13 @@
 #include <alt/async_semaphore.hpp>
 #include <alt/awaitable.hpp>
 #include <alt/cancellable_task.hpp>
+#include <alt/detail/async_wait.hpp>
+#include <alt/detail/waiter_list.hpp>
 #include <atomic>
 #include <coroutine>
 #include <cstddef>
 #include <expected>
+#include <stop_token>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -121,6 +124,89 @@ namespace
 			released.fetch_add(1, std::memory_order_acq_rel);
 		}
 	}
+
+	/**
+	 * @brief A consuming predicate over a plain int, for driving detail::wait_awaiter
+	 *        itself.
+	 *
+	 * Stands in for async_semaphore in the two machinery tests below. It consumes
+	 * exactly as try_acquire() does, and it can do from inside the predicate what a
+	 * winning stop callback would do to the node -- which is the one instant in a wait
+	 * that nothing outside the awaiter can reach, because it happens under the list's
+	 * mutex.
+	 *
+	 * Deriving from wait_awaiter is what gives it access to the node: the base makes
+	 * Derived a friend, so the probe can reach the node its own base holds. A test
+	 * cannot otherwise, and the semaphore's own queue is private.
+	 */
+	/**
+	 * Does roughly the bookkeeping an arriving waiter does between its ready check and
+	 * its link -- one std::stop_callback registered and destroyed -- so that a stop
+	 * requested after it lands near the moment that waiter's link condition runs
+	 * instead of well before the waiter has looked at the primitive at all. Both sides
+	 * scale with the same work, so this is not a calibration against a wall clock.
+	 */
+	inline void match_an_arriving_waiters_bookkeeping(const std::stop_token& token)
+	{
+		const std::stop_callback callback{token, [] {}};
+	}
+
+	class probe_awaiter: public alt::detail::wait_awaiter<probe_awaiter>
+	{
+	public:
+		probe_awaiter(alt::detail::waiter_list& list, int& permits) noexcept: m_list(&list), m_permits(&permits)
+		{}
+
+		/**
+		 * Stores what a winning stop callback's compare-exchange would store. The
+		 * callback's claim is the only part of it that runs without the list's mutex, so
+		 * this is the whole of what that party does to the node before it reaches the
+		 * mutex and finds there is nobody to resume.
+		 */
+		void claim_the_node() noexcept
+		{
+			m_node.state.store(alt::detail::waiter_state::claimed, std::memory_order_release);
+		}
+
+		/**
+		 * Arranges for the same claim to happen from inside the predicate, so that it
+		 * lands after the condition has consumed and before the link returns. Calling
+		 * waiter_list::claim there would self-deadlock on the mutex link() is holding,
+		 * which is why this writes the state word directly.
+		 */
+		void claim_the_node_while_consuming() noexcept
+		{
+			m_claim_while_consuming = &m_node;
+		}
+
+		/** Consuming, as a semaphore's is. */
+		[[nodiscard]] bool ready() const noexcept
+		{
+			if(*m_permits <= 0)
+			{
+				return false;
+			}
+
+			--*m_permits;
+
+			if(m_claim_while_consuming != nullptr)
+			{
+				m_claim_while_consuming->state.store(alt::detail::waiter_state::claimed, std::memory_order_release);
+			}
+
+			return true;
+		}
+
+		[[nodiscard]] alt::detail::waiter_list& list() const noexcept
+		{
+			return *m_list;
+		}
+
+	private:
+		alt::detail::waiter_list* m_list;
+		int*                      m_permits;
+		alt::detail::waiter_node* m_claim_while_consuming = nullptr;
+	};
 }
 
 class AsyncSemaphoreTest: public ::testing::Test
@@ -283,12 +369,12 @@ TEST_F(AsyncSemaphoreTest, AvailableReflectsReleases)
 
 TEST_F(AsyncSemaphoreTest, AWaiterResumedByAReleaseCanTakeAnotherOfItsPermits)
 {
-	// release(n) hands each permit over before it decides where the next one goes, so
-	// a waiter resumed by one of them is parked again, from inside that same release(),
-	// in time to be given another. What the assertions pin is the outcome -- both waits
-	// satisfied, with nothing left in the count -- rather than whether the second
-	// permit was handed straight over or passed through the count on the way, because a
-	// permit's route is not observable from outside the semaphore.
+	// release(n) places every permit before it resumes anybody, so the waiter resumed
+	// by the first permit finds the second already in the count and takes it on the
+	// re-await. Both waits are satisfied by one release(2) either way: what the
+	// assertions pin is that outcome, not the route the second permit took, because a
+	// permit's route is not observable from outside the semaphore. Which is what makes
+	// the ordering inside release() a free choice, and it spends it on resuming last.
 	alt::async_semaphore semaphore{0};
 	wait_record          first;
 	wait_record          second;
@@ -537,6 +623,67 @@ TEST_F(AsyncSemaphoreTest, ASemaphoreWithNoPermitStillParksAtTheLink)
 	EXPECT_EQ(semaphore.available(), 0);
 }
 
+TEST_F(AsyncSemaphoreTest, AConsumingPredicateThatWinsAtTheLinkIsNeverReportedCancelled)
+{
+	// The defect this test exists for lived in detail::wait_awaiter rather than here,
+	// and only a consuming predicate can expose it. await_suspend used to decide *why*
+	// a link had been refused by re-reading the node's state word after dropping the
+	// list's mutex. A stop callback winning the node in that gap left the word reading
+	// claimed, which the frame could not tell apart from a stop that had won before the
+	// condition ever ran -- so a condition that had already taken a permit reported
+	// operation_canceled. The permit was then gone for good: nobody held it and nothing
+	// would return it, and a bounded-concurrency semaphore under cancellation pressure
+	// bleeds down to zero and stops admitting anyone. The same window at a future
+	// async_mutex is a lock held by nobody, forever.
+	//
+	// Driven at the machinery, because the instant that matters is inside link()'s
+	// condition, under the list's mutex, where nothing outside the awaiter can reach.
+	// The probe consumes exactly as try_acquire() does and then does to the node what
+	// the stop callback's compare-exchange would have done.
+	alt::detail::waiter_list list;
+	int                      permits = 0;
+
+	probe_awaiter awaiter{list, permits};
+	ASSERT_FALSE(awaiter.await_ready());
+
+	// The permit arrives between the two consultations, and the stop lands in the same
+	// breath, after the condition has consumed it.
+	permits = 1;
+	awaiter.claim_the_node_while_consuming();
+
+	EXPECT_FALSE(awaiter.await_suspend(std::noop_coroutine()));
+
+	// The predicate took the permit, so the wait must say it got one.
+	EXPECT_EQ(permits, 0);
+	EXPECT_TRUE(awaiter.await_resume().has_value());
+}
+
+TEST_F(AsyncSemaphoreTest, AWaiterWhoseNodeIsWonBeforeTheLinkIsStillReportedCancelled)
+{
+	// The converse, so the test above cannot be passed by an await_suspend that calls
+	// every refused link satisfied. link() tests the election before it runs the
+	// condition, so a node already won never reaches the predicate: nothing is
+	// consumed, and the wait is the released one it was before.
+	alt::detail::waiter_list list;
+	int                      permits = 0;
+
+	probe_awaiter awaiter{list, permits};
+	ASSERT_FALSE(awaiter.await_ready());
+
+	awaiter.claim_the_node();
+
+	// A permit arrives too, so that the only thing keeping the predicate from
+	// consuming it is the election having already been lost.
+	permits = 1;
+
+	EXPECT_FALSE(awaiter.await_suspend(std::noop_coroutine()));
+	EXPECT_EQ(permits, 1);
+
+	const auto result = awaiter.await_resume();
+	ASSERT_FALSE(result.has_value());
+	EXPECT_EQ(result.error(), released_error);
+}
+
 TEST_F(AsyncSemaphoreTest, AConcurrentReleaseIsNeverMissedByAnArrivingWaiter)
 {
 	// One waiter arriving while one release runs, which is the smallest shape of the
@@ -657,10 +804,13 @@ TEST_F(AsyncSemaphoreTest, EveryPermitReachesAWaiterWhenReleasesAndArrivalsConte
 
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
-		alt::async_semaphore     semaphore{0};
+		// Declared ahead of the semaphore, so that anything its destructor resumes is
+		// writing into counters that are still alive.
 		std::atomic<int>         satisfied{0};
 		std::atomic<int>         released{0};
 		std::atomic<std::size_t> arrived{0};
+
+		alt::async_semaphore semaphore{0};
 
 		{
 			std::vector<std::jthread> threads;
@@ -685,6 +835,91 @@ TEST_F(AsyncSemaphoreTest, EveryPermitReachesAWaiterWhenReleasesAndArrivalsConte
 		ASSERT_EQ(satisfied.load(std::memory_order_acquire), static_cast<int>(acquirers)) << "repeat " << repeat;
 		ASSERT_EQ(released.load(std::memory_order_acquire), 0) << "repeat " << repeat;
 		ASSERT_EQ(semaphore.available(), 0) << "repeat " << repeat;
+	}
+}
+
+TEST_F(AsyncSemaphoreTest, NoPermitIsLostWhenAStopAndAReleaseBothRaceAnArrivingWaiter)
+{
+	// The end-to-end form of
+	// AConsumingPredicateThatWinsAtTheLinkIsNeverReportedCancelled, and the shape
+	// neither earlier race had: AStopAndAReleaseDoNotBothResumeAndThePermitIsNotLost
+	// puts a stop against a waiter that is already parked, and
+	// EveryPermitReachesAWaiterWhenReleasesAndArrivalsContend puts releases against
+	// waiters that are arriving but stops nothing. The defect needs both at once
+	// against an arriving waiter: a permit arriving in time for the link's condition
+	// to take it, and a stop landing on the same node in the same breath.
+	//
+	// The invariant is conservation, and it holds under every schedule: each permit
+	// released is either held by an acquirer that reported success or still in the
+	// count, so satisfied + available() is exactly the number released. A waiter that
+	// consumed a permit and then reported cancelled breaks it by one. Acquirers that
+	// are cancelled contribute to neither side, which is the point -- they must hold
+	// nothing.
+	//
+	// Two things make the race occur rather than merely be possible.
+	//
+	// Each acquirer carries an external stop source created before it starts, so a
+	// stopper thread can reach it while it is still on its way to the co_await. The
+	// handle alt::start returns cannot do that: it does not exist until the coroutine
+	// has already suspended.
+	//
+	// And the stoppers do one std::stop_callback's worth of bookkeeping after the
+	// rendezvous, before they request anything. Without it the stop lands before its
+	// target has even looked at the semaphore -- which is a different and benign
+	// interleaving, the one cancellation_checked catches on the way in -- and the
+	// defect is reached only by schedule noise: measured 2 of 20 runs of 100 repeats.
+	// With the stopper doing the work its target must do between its ready check and
+	// its link, the request lands near the condition instead, and the defect is caught
+	// in 20 of 20 runs. Both figures are against the pre-fix await_suspend, from one
+	// loop over the same binary, read from its exit status; against the fix as it
+	// stands, 0 of 20.
+	constexpr std::size_t acquirers = 4;
+	constexpr std::size_t releasers = 4;
+	constexpr std::size_t stoppers  = 2;
+	constexpr std::size_t parties   = acquirers + releasers + stoppers;
+
+	for(int repeat = 0; repeat < race_repeats; ++repeat)
+	{
+		// Declared ahead of the semaphore, so that anything its destructor resumes is
+		// writing into counters that are still alive.
+		std::atomic<int>         satisfied{0};
+		std::atomic<int>         released{0};
+		std::atomic<std::size_t> arrived{0};
+
+		alt::async_semaphore          semaphore{0};
+		std::vector<std::stop_source> sources(acquirers);
+		std::stop_source              unrelated;
+
+		{
+			std::vector<std::jthread> threads;
+			threads.reserve(parties);
+
+			for(std::size_t index = 0; index < acquirers; ++index)
+			{
+				threads.emplace_back([&, index] {
+					const auto handle = alt::start(racing_counting_acquirer(semaphore, satisfied, released, arrived, parties), {.token = sources[index].get_token()});
+				});
+			}
+
+			for(std::size_t index = 0; index < releasers; ++index)
+			{
+				threads.emplace_back([&] {
+					rendezvous(arrived, parties);
+					semaphore.release();
+				});
+			}
+
+			for(std::size_t index = 0; index < stoppers; ++index)
+			{
+				threads.emplace_back([&, index] {
+					rendezvous(arrived, parties);
+					match_an_arriving_waiters_bookkeeping(unrelated.get_token());
+					sources[index].request_stop();
+				});
+			}
+		}
+
+		ASSERT_EQ(satisfied.load(std::memory_order_acquire) + semaphore.available(), static_cast<std::ptrdiff_t>(releasers)) << "repeat " << repeat;
 	}
 }
 
