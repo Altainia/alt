@@ -145,9 +145,12 @@ namespace alt
 	 * waiter's frame and nothing withdraws it from the queue, and a coroutine parked
 	 * here may not have its frame destroyed from outside, for the same reason.
 	 * Destroying this mutex instead releases them all, which is the supported
-	 * teardown -- and a waiter released that way must not await this mutex again, as
-	 * the destructor explains, unlike async_semaphore's, where a re-await during
-	 * destruction is both supported and tested.
+	 * teardown -- and a waiter released that way must not await this mutex again,
+	 * unlike async_semaphore's, where a re-await during destruction is both supported
+	 * and tested. That is a choice rather than a consequence of anything else here:
+	 * the ordinary case is benign, and the destructor says what the choice buys, which
+	 * is not having to promise that a re-await is never handed the lock inside the
+	 * destructor body and does not carry the guard out of it.
 	 *
 	 * The third is this mutex's own, and it is where it parts company with
 	 * async_semaphore, which permits a waiter resumed by release() to destroy the

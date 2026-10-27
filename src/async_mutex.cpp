@@ -17,8 +17,11 @@ namespace alt
 		 * Per-thread rather than per-mutex, exactly as detail::trampoline_state is, and
 		 * for the same reason: the thing being bounded is one thread's stack. A mutex is
 		 * identified by address only while a drain for it is live on this thread's
-		 * stack, and async_mutex forbids a resumed waiter from destroying the mutex, so
-		 * the pointer can never name a different object than the one it was stored for.
+		 * stack, and async_mutex forbids a resumed waiter from destroying this mutex or
+		 * any mutex whose lock is in transit on this thread -- the saved outer_mutex of
+		 * a nested drain being the second kind -- so the pointer can never name a
+		 * different object than the one it was stored for. It is only ever compared
+		 * against, never dereferenced, which is the belt to that braces.
 		 */
 		struct handoff_state
 		{
@@ -74,26 +77,46 @@ namespace alt
 	async_mutex::~async_mutex()
 	{
 		// Released here rather than left to m_waiters' own destructor, as in
-		// async_event, async_latch and async_semaphore -- but the reason those three
-		// give does not hold for a mutex, and the honest version is worth having. There
-		// it is that a released waiter may await the primitive again, and that re-await
-		// has to land in a list that has not finished its walk. Here a re-await is
-		// unsupported either way: it would find the lock free, since nobody is in a
-		// critical section of an object being destroyed, and would be handed a guard
-		// naming a half-destroyed mutex. A waiter released by this destructor must
-		// simply not come back.
+		// async_event, async_latch and async_semaphore, whose reason is that a released
+		// waiter may await the primitive again and that re-await has to land in a list
+		// that has not finished its walk.
 		//
-		// So this call is equivalent to the backstop it pre-empts, and removing it does
-		// not change a single test. It stays for two smaller reasons: the family does
-		// this in one place rather than four, and the waiters are released while the
-		// object is still whole, which is a property no later change to the member
-		// declaration order can take away.
+		// For a mutex that re-await is *chosen* to be unsupported, and the distinction
+		// matters because nothing forces it. This destructor is one detach_all and one
+		// resume_claimed: it never calls unlock(), so no waiter it releases builds a
+		// guard and none of them re-enters the hand-off loop. The iterative drain has
+		// no say here at all.
+		//
+		// What it would take to support it is the one durable objection, and it is not
+		// what an earlier version of this comment said. A re-awaiting waiter would not
+		// find the lock free and would not find a half-destroyed mutex: m_held is true
+		// at this point, because waiters are only parked here if somebody took the
+		// lock, and inside its own destructor body every member of this object is still
+		// alive and member calls on it are perfectly well defined. So the ordinary case
+		// is benign -- the re-await parks in a list that is still whole and ~waiter_list
+		// releases it a second time, which is exactly async_semaphore's supported shape.
+		//
+		// The objection is what the shape rests on. It is benign only while this mutex
+		// is destroyed *locked*, and a mutex destroyed unlocked with waiters still
+		// parked is not reachable through the public interface today but is not ruled
+		// out by anything in the type either. There, the re-await is handed the lock
+		// inside this destructor body, and nothing stops that guard being moved out to
+		// outlive the body: a guard that outlives its mutex has no mutex to hand the
+		// lock back to. Supporting re-await would mean promising that cannot happen, and
+		// this class has nothing to promise it with. So the rule stays: a waiter
+		// released here must not come back.
+		//
+		// Which is also why the explicit release stays rather than being left to
+		// ~waiter_list. It is equivalent to that backstop only while the rule above
+		// holds; the moment the choice is revisited, this call is what keeps a re-await
+		// landing in a live list, and the equivalence goes away with it. Do not read
+		// "removing it changes no test" as "removing it is free".
 		//
 		// This resumes a multi-node chain, so resume_claimed's chain rule binds here: a
 		// waiter released by this destructor may not destroy another waiter still queued
 		// behind it. That is sound for the same reason it is sound in async_latch, whose
-		// count_down records the argument and the condition under which it must be
-		// revisited.
+		// class documentation records the argument and the condition under which it must
+		// be revisited.
 		detail::resume_claimed(m_waiters.detach_all(), false);
 	}
 
@@ -155,6 +178,12 @@ namespace alt
 		// must see it as held and park; the loop's next detach_one is what gives it
 		// away. Clearing it in the nested call instead would let an arrival take the
 		// lock and then let this loop hand the same lock to a parked waiter.
+		//
+		// Accumulating the whole chain and resuming it once, as async_semaphore::release
+		// does, is not available rather than merely not chosen: release() knows n up
+		// front and can win every node before it resumes anybody, while this function
+		// has one lock to give and cannot know there is a second hand-off to make until
+		// the first waiter gives the lock back -- which happens inside the resumption.
 		//
 		// resume_claimed is the last statement of each iteration that touches *this*.
 		// What follows it reads only this thread's own hand-off state, so a resumed

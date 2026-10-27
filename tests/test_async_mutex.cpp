@@ -349,9 +349,15 @@ namespace
 	{
 		reset_coroutine_test_state();
 
-		alt::async_mutex         mutex;
+		// Declared ahead of the mutex, so that anything its destructor resumes is
+		// writing into storage that is still alive. Unreachable in a passing run, but
+		// an assertion below that fires leaves this scope with the waiter still parked,
+		// and the destructor's release would then turn the regression this test exists
+		// to report into whatever the dead record happened to contain.
 		lock_record              record;
 		std::atomic<std::size_t> arrived{0};
+
+		alt::async_mutex mutex;
 
 		auto owner = mutex.try_lock();
 		ASSERT_TRUE(owner.has_value()) << "repeat " << repeat;
