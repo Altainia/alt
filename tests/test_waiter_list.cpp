@@ -484,12 +484,15 @@ TEST(WaiterList, AConcurrentSatisfierAndStopDoNotBothResume)
 	// miss.
 	//
 	// Those are measurements, not arguments. With claim's compare-exchange broken
-	// into a load and a store, this test detected it in 200 of 200 runs, and in 269
-	// of 270 across three samples -- the single miss is the reason to call it
-	// reliable rather than certain. Swapping the rendezvous for the one-sided start
-	// flag an earlier draft used drops that to 2 detections in 100 runs. That
-	// comparison is what identifies the rendezvous as the load-bearing part, rather
-	// than anything about which node either side reaches for first.
+	// into a load and a store, this test detected it in 200 of 200 runs of the whole
+	// test, each run being race_repeats races. Swapping the rendezvous for the
+	// one-sided start flag an earlier draft used drops that to 2 detections in 100
+	// runs. That comparison is what identifies the rendezvous as the load-bearing
+	// part, rather than anything about which node either side reaches for first.
+	//
+	// A detector built on a race is never certain whatever a sample shows, so treat
+	// those figures as what they are: one machine, one compiler, one sample each. A
+	// single green run of this test is weak evidence on its own.
 	//
 	// None of which is why the test is worth keeping day to day. The standing guards
 	// are the exactly-once resumption count and the m_size check at the bottom of

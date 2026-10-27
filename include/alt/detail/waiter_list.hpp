@@ -307,7 +307,7 @@ namespace alt::detail
 		 *         reason worth making explicit: a node still on the list can be
 		 *         withdrawn by its own owner's claim, so a waiter about to be destroyed
 		 *         can still be taken off the list first, while a node already sitting
-		 *         in a chain is beyond rescue — nothing can take it back out before the
+		 *         in a chain is beyond rescue: nothing can take it back out before the
 		 *         walk reaches it.
 		 */
 		waiter_node* detach_all() noexcept
