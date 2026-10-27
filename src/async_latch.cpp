@@ -27,8 +27,13 @@ namespace alt
 
 		// DELICATE. Read this before changing it.
 		//
-		// Two steps, and their order is load-bearing: zero is published first, and the
-		// waiting queue is taken second.
+		// Publishing zero and electing the walker are the same operation: the
+		// compare-exchange below. The detach_all call is control-dependent on its
+		// result, so there is no pair of statements whose order has to be kept.
+		//
+		// What would reintroduce the question is splitting that compare-exchange into
+		// a load, a decision and a store. ConcurrentCountDownsReleaseTheWaiterExactlyOnce
+		// rejects that split; do not make it without that test still passing.
 		//
 		// A waiter decides whether to park by reading m_count as the condition on its
 		// link, under the list's mutex, and detach_all takes that same mutex. So a

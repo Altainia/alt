@@ -40,6 +40,13 @@ namespace alt
 	 * coroutine parked here may not have its frame destroyed from outside, because
 	 * the node it is parked on lives in that frame; destroying this latch instead
 	 * releases them all, which is the supported teardown.
+	 *
+	 * That first rule is why count_down() can resume its waiters from one multi-node
+	 * chain (detach_all) instead of one detach_one at a time: nothing in the library
+	 * lets one waiter own a sibling's frame, because there is no when_all or race
+	 * combinator and a task is lazy and owns only the child it awaits. Revisit the
+	 * day such a combinator lands: async_event and async_latch would then both need
+	 * detach_one.
 	 */
 	class async_latch
 	{

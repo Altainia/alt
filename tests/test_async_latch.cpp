@@ -3,8 +3,6 @@
 #include <alt/async_latch.hpp>
 #include <alt/awaitable.hpp>
 #include <alt/cancellable_task.hpp>
-#include <alt/detail/cancellation.hpp>
-#include <alt/task.hpp>
 #include <atomic>
 #include <coroutine>
 #include <cstddef>
@@ -465,6 +463,13 @@ TEST_F(AsyncLatchTest, ALatchNotYetReleasedStillParksAtTheLink)
 	latch.count_down();
 
 	EXPECT_TRUE(awaiter.await_suspend(std::noop_coroutine()));
+
+	// Released before the scope ends. The awaiter's node is linked, and the latch
+	// was declared first so it outlives the awaiter: left linked, the latch's
+	// destructor would walk a dead node. Reaching zero detaches and resumes it,
+	// which also shows the park was a real one.
+	latch.count_down();
+	EXPECT_TRUE(awaiter.await_resume().has_value());
 }
 
 TEST_F(AsyncLatchTest, ConcurrentCountDownsReleaseTheWaiterExactlyOnce)
