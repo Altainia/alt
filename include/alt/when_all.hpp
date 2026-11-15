@@ -319,11 +319,19 @@ namespace alt::detail
 			// 109 hang out of 200 repeats in debug, and 0 pass / 200 fail under
 			// AddressSanitizer, where the report is heap-use-after-free in
 			// _Stop_state_t::_M_lock() reached from stop_forwarder::operator(). The other
-			// four combinator tests added alongside it pass 200/200, and a whole-suite
-			// run reaches 32 of 33 passes before that one test hangs. One level of
+			// four combinator tests added alongside it pass 200/200, and a run of the
+			// WhenAllTest suite -- that suite alone, not the project's 761 tests --
+			// reaches 32 of its 33 passes before that one test hangs. One level of
 			// nesting is what makes the hazard observable, because what gets freed
 			// mid-walk is a child's own stop state, held alive only by an inner block's
 			// m_link once the child's frame is gone.
+			//
+			// The other half of that mutation, relaying the chain's cancellation_context
+			// into each child instead of giving it the block's source, is inexpressible
+			// rather than merely unmeasured: cancellable_task_promise::configure
+			// (cancellable_task.hpp) always installs its own m_source.get_token() as the
+			// context token and only links an external one, so a cancellable_task cannot
+			// be handed a parent context to relay. Do not re-attempt it.
 			child_options.token = m_state->shared().children_token();
 
 			// One add_ref per child, before that child is started, for the same reason
@@ -621,11 +629,29 @@ namespace alt
 	 * owns it. The lvalue case is not made safe by copying, because alt::task is not
 	 * copyable, which is the point of the distinction.
 	 *
+	 * **Passing the same awaitable object twice is a precondition violation.** Two
+	 * children would then await one object concurrently, which no awaitable in the
+	 * library supports; an rvalue awaitable cannot be passed twice at all, so this
+	 * concerns lvalues. Nothing checks for it.
+	 *
 	 * Awaiting this costs one allocation, including when there are no arguments at all,
 	 * for which the result is an empty tuple rather than a cancellation.
 	 *
-	 * The children inherit the awaiting chain's home scheduler and share one stop
-	 * source: nothing cancels a single child on its own.
+	 * The children inherit the awaiting chain's home scheduler. The shared block is
+	 * what makes that safe: it is reference counted, held by every child and by the
+	 * awaiter, and so outlives the chain, which may be gone long before the home
+	 * scheduler runs a child's teardown. The children share one stop source: nothing
+	 * cancels a single child on its own.
+	 *
+	 * **Each child is its own cancellation root**, and the reason this is safe rests on
+	 * three invariants. (A) The combinator never owns or destroys a child frame; it only
+	 * ever requests stops, and the children are self-owning alt::cancellable_task
+	 * roots. (B) The claim election cannot free an already-claimed node: a loser whose
+	 * node a satisfier already won loses the compare-and-swap in waiter_list::claim, so
+	 * its waiter_stop_release resumes and frees nothing. (C) The combinator never
+	 * destroys a child, though it may resume the awaiting chain while children are
+	 * still alive; (A) is what makes that safe for the sibling hazard. The argument
+	 * is recorded where the hazard is: see the note on alt::async_latch.
 	 */
 	template<typename... Awaitables>
 	  requires(awaitable<Awaitables> && ...)
