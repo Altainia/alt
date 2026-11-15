@@ -38,6 +38,14 @@ ctest --preset debug --output-on-failure
 
 Run these before committing. All must pass with zero errors.
 
+CI runs **eight** jobs on every branch push and pull request, and every one of them
+corresponds to a check below: `Build & Test (GCC)`, `Build & Test (Clang)`,
+`Build & Test (optimized)`, `AddressSanitizer + UBSan`, `ThreadSanitizer`,
+`clang-tidy`, `cppcheck` and `Coverage`. A local sweep that skips one is not a
+green branch, however it reports itself — a sweep that omitted `Coverage` and a
+sweep that ran a newer `clang-tidy` than CI's have each produced a red build after
+reporting clean.
+
 ### AddressSanitizer + UBSan
 
 ```bash
@@ -68,12 +76,30 @@ ctest --preset release-tests --output-on-failure
 
 ### clang-tidy
 
-Requires `clang-tidy` on `PATH`. Warnings are errors — the build fails on any finding.
+Warnings are errors — the build fails on any finding.
+
+**CI uses `clang-tidy-19`, not whatever `clang-tidy` resolves to on `PATH`.** The
+findings differ between versions: `bugprone-crtp-constructor-accessibility` reports a
+public *deleted* copy constructor in 19 and no longer does in 21. Pin the tool and the
+compiler to CI's, or the gate you run is not the gate that will fail:
 
 ```bash
-cmake -B build/tidy -DALT_CLANG_TIDY=ON -DCMAKE_CXX_COMPILER=clang++
+cmake -B build/tidy -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 \
+    -DCLANG_TIDY_PATH=/usr/bin/clang-tidy-19 -DCMAKE_BUILD_TYPE=Debug \
+    -DALT_CLANG_TIDY=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build/tidy
 ```
+
+That is CI's own invocation, flag for flag — see the `clang-tidy` job in
+`.github/workflows/ci.yml`. `CMAKE_BUILD_TYPE` is part of it: findings in
+assert-dependent code change with the build type.
+
+The whole-project gate compiles every test into one target, so a finding in an early
+file aborts the build before later files are analyzed. To check one file you changed,
+run `clang-tidy-19` on it directly and pass the GoogleTest headers with `-isystem`
+rather than `-I`, which otherwise reports spurious findings from GoogleTest's own
+macros. `tests/.clang-tidy` carries the suite's suppression list — append to it, never
+rewrite it.
 
 ### cppcheck
 
@@ -93,6 +119,9 @@ clang-format -i <changed files>
 ```
 
 ### Code coverage
+
+**This is a CI gate, not an optional report.** The `Coverage` job fails the build if
+`lcov` cannot produce the report, so run it before opening a pull request.
 
 Requires GCC and `lcov`. Report lands in `build/debug-coverage/coverage/index.html`.
 
