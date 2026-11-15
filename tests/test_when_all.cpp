@@ -55,6 +55,25 @@ namespace
 	/** The condition every released wait reports. See alt::wait_result. */
 	constexpr std::errc released_error = std::errc::operation_canceled;
 
+	/** How many times the contextless park test retries for a repeat that actually parked. */
+	constexpr int contextless_park_attempts = 100;
+
+	/** Spins until @p flag is set, yielding only as a backstop. See alt_test::rendezvous. */
+	void spin_until(const std::atomic<bool>& flag)
+	{
+		for(int spins = 0; !flag.load(std::memory_order_acquire);)
+		{
+			if(spins < spin_limit)
+			{
+				++spins;
+			}
+			else
+			{
+				std::this_thread::yield();
+			}
+		}
+	}
+
 	/** A task that completes synchronously with @p value. */
 	template<typename T>
 	alt::task<T> make_value_task(T value)
@@ -73,6 +92,14 @@ namespace
 	alt::task<int&> make_reference_task(int& target)
 	{
 		co_return target;
+	}
+
+	/** A task that publishes that its body ran and then completes with @p value. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the flag is owned by the calling test, which joins the thread watching it before leaving its scope.
+	alt::task<int> make_signalling_value_task(int value, std::atomic<bool>& ran)
+	{
+		ran.store(true, std::memory_order_release);
+		co_return value;
 	}
 
 	/** A task whose body throws instead of producing a value. */
@@ -206,9 +233,6 @@ namespace
 		/** Whether the await reported a satisfied wait. */
 		bool satisfied = false;
 
-		/** Set by the statement after the co_await, the point of decision 5. */
-		bool body_ran_on = false;
-
 		/** The error a released await reported. */
 		std::error_code error;
 
@@ -221,9 +245,8 @@ namespace
 	void record_outcome(wait_record& record, const Result& result)
 	{
 		++record.resumptions;
-		record.satisfied   = result.has_value();
-		record.body_ran_on = true;
-		record.resumed_on  = std::this_thread::get_id();
+		record.satisfied  = result.has_value();
+		record.resumed_on = std::this_thread::get_id();
 
 		if(!result)
 		{
@@ -344,9 +367,17 @@ namespace
 	 * ended.
 	 *
 	 * @p frames_at_return takes live_frames as read at the instant the await returned,
-	 * which is the only place that instant is observable. The test asserts it is zero:
-	 * no child frame is left alive once the await has returned.
+	 * which is the only place that instant is observable. The test asserts it is zero,
+	 * which says every child BODY ran to its end before the await returned -- the
+	 * tracker is a body-scoped local, so it is gone once the body is past it. It does not
+	 * say the child frames had been freed by then, and the sibling property this test is
+	 * about is the body, not the frame.
 	 */
+	// The NOLINT below covers this function's whole signature only because
+	// .clang-format's ColumnLimit is 0, which keeps the signature on one line. Wrapping
+	// it by hand reopens cppcoreguidelines-avoid-reference-coroutine-parameters on every
+	// line after the first, and the same trap applies to the dozen other long signatures
+	// in this file.
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which outlives the whole chain.
 	alt::cancellable_task throwing_sibling_root(alt::task_completion_source<int>& source, std::atomic<bool>& finished, std::string& caught, bool& returned, int& frames_at_return)
 	{
@@ -365,17 +396,61 @@ namespace
 		returned = true;
 	}
 
-	/** Awaits a when_all from a promise whose cancellation context is null. */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the record is owned by the calling test, which blocks in sync_wait until this completes.
-	alt::task<void> contextless_probe(wait_record& record, std::tuple<int, int>& values)
+	/**
+	 * Awaits a when_all that parks, from a promise whose cancellation context is null.
+	 *
+	 * Position 0 parks on @p gate, which only the calling test's second thread can set;
+	 * position 1 completes inside the fan-out and publishes @p fanned_out as it goes,
+	 * which is what releases that thread. So the chain reaches its park with one child
+	 * outstanding, and is resumed from the thread that sets the gate.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which blocks in sync_wait until this completes and joins its second thread after that.
+	alt::task<void> contextless_probe(alt::task_completion_source<int>& gate, std::atomic<bool>& fanned_out, wait_record& record, std::tuple<int, int>& values)
 	{
-		const auto result = co_await alt::when_all(make_value_task(1), make_value_task(2));
+		const auto result = co_await alt::when_all(gate, make_signalling_value_task(2, fanned_out));
 		record_outcome(record, result);
 
 		if(result)
 		{
-			values = {std::get<0>(*result), std::get<1>(*result)};
+			values = {std::get<0>(*result).value(), std::get<1>(*result)};
 		}
+	}
+
+	/**
+	 * @brief Runs one attempt at a contextless park, asserting what holds either way.
+	 *
+	 * Split out of the test's loop because one function holding the attempt and its
+	 * assertions is over clang-tidy's readability-function-cognitive-complexity
+	 * threshold, exactly as run_one_stop_race records.
+	 *
+	 * @param attempt The attempt index, so a failure names which one.
+	 * @return Whether the await actually parked, read off the thread the body ran on.
+	 */
+	bool run_one_contextless_park(const int attempt)
+	{
+		reset_coroutine_test_state();
+
+		alt::task_completion_source<int> gate;
+		std::atomic<bool>                fanned_out{false};
+		wait_record                      record;
+		std::tuple<int, int>             values{0, 0};
+
+		std::jthread completer{[&] {
+			spin_until(fanned_out);
+			gate.set_value(1);
+		}};
+
+		alt::sync_wait(contextless_probe(gate, fanned_out, record, values));
+		completer.join();
+
+		// True whichever way the race went.
+		EXPECT_EQ(record.resumptions, 1) << "attempt " << attempt;
+		EXPECT_TRUE(record.satisfied) << "attempt " << attempt;
+		EXPECT_EQ(std::get<0>(values), 1) << "attempt " << attempt;
+		EXPECT_EQ(std::get<1>(values), 2) << "attempt " << attempt;
+		EXPECT_EQ(live_frames, 0) << "attempt " << attempt;
+
+		return record.resumed_on != std::this_thread::get_id();
 	}
 
 	/** Awaits a when_all whose children all complete inside the fan-out. */
@@ -586,10 +661,12 @@ TEST_F(WhenAllTest, ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows)
 	EXPECT_EQ(caught, "child body");
 	EXPECT_TRUE(sibling_finished.load(std::memory_order_acquire));
 
-	// No child frame is left alive once the await has returned, read at the instant the
-	// await returned rather than here: by the time this thread is back, the sibling has
-	// finished either way, so a live_frames read here cannot tell the two apart. An
-	// await that returned while the sibling was still parked leaves this at 1.
+	// Every child body ran to its end before the await returned -- not that the frames
+	// were freed, which this cannot see: live_frames counts body-scoped trackers. Read at
+	// the instant the await returned rather than here, because by the time this thread is
+	// back the sibling has finished either way, so a live_frames read here cannot tell
+	// the two apart. An await that returned while the sibling was still parked leaves
+	// this at 1.
 	EXPECT_EQ(frames_at_return, 0) << "the await returned with a child frame still alive";
 }
 
@@ -622,19 +699,32 @@ TEST_F(WhenAllTest, AnAwaitSuspendThatThrowsIsCaughtByTheChildRatherThanTerminat
 	EXPECT_EQ(live_frames, 0);
 }
 
-TEST_F(WhenAllTest, WhenAllInAPromiseWithNoCancellationContextStillCompletes)
+// A when_all that PARKS in a promise with no cancellation context, which is the case
+// the plan named and which no test covered: this one and
+// EveryChildAlreadySatisfiedCompletesWithoutSuspending drove byte-identical probes until
+// the final review noticed. An alt::task driven by sync_wait relays cancellation but has
+// no root above it, so cancellation_context_pointer() is null -- no token to link, no
+// home, and no stop callback for the joiner -- and the await must still park on the
+// counter and be resumed by the last child.
+//
+// That it parked is confirmed after the fact rather than arranged, because nothing
+// outside when_all_awaiter can observe the join's park: the thread that sets the gate is
+// released from inside the fan-out, so it may win the race and complete the child before
+// the chain parks, and then the chain is resumed on this thread instead. Which thread
+// ran the body is the discriminator, and the loop is what makes the test deterministic
+// despite the race. In practice the first attempt parks: the releasing thread has to
+// wake from a spin and traverse task_completion_source::set_value while the chain has
+// only to retire the starter and link.
+TEST_F(WhenAllTest, AWhenAllThatParksInAPromiseWithNoCancellationContextStillCompletes)
 {
-	wait_record          record;
-	std::tuple<int, int> values{0, 0};
+	bool parked_once = false;
 
-	// An alt::task driven by sync_wait relays cancellation but has no root above it, so
-	// cancellation_context_pointer() is null: no token to link and no home scheduler.
-	alt::sync_wait(contextless_probe(record, values));
+	for(int attempt = 0; attempt < contextless_park_attempts && !parked_once; ++attempt)
+	{
+		parked_once = run_one_contextless_park(attempt);
+	}
 
-	EXPECT_EQ(record.resumptions, 1);
-	EXPECT_TRUE(record.satisfied);
-	EXPECT_EQ(std::get<0>(values), 1);
-	EXPECT_EQ(std::get<1>(values), 2);
+	ASSERT_TRUE(parked_once) << "the await never parked in " << contextless_park_attempts << " attempts, so nothing here exercised a contextless park";
 }
 
 TEST_F(WhenAllTest, CancellingTheAwaitingChainReportsOperationCanceled)
@@ -690,10 +780,15 @@ TEST_F(WhenAllTest, TheParentsBodyRunsOnAfterACancelledWait)
 	handle.request_stop();
 
 	// The result, not a torn-down frame, is what told the body it was cancelled: the
-	// statement after the co_await ran, exactly once.
-	EXPECT_TRUE(record.body_ran_on);
+	// statement after the co_await ran, exactly once, and it ran HERE -- inline on the
+	// thread that requested the stop, which is the half
+	// CancellingTheAwaitingChainReportsOperationCanceled does not assert and the only
+	// reason this test is not that one twice over. A wait_record::body_ran_on flag used
+	// to stand in for the first of these; it was set by the same function that increments
+	// resumptions, so it could never differ from resumptions > 0, and it is gone.
 	EXPECT_EQ(record.resumptions, 1);
 	EXPECT_FALSE(record.satisfied);
+	EXPECT_EQ(record.resumed_on, std::this_thread::get_id()) << "the cancelled chain's body is resumed by the stop, not posted";
 }
 
 TEST_F(WhenAllTest, TheChildrensStopOutlivesABlockTheLastChildFreed)
@@ -841,12 +936,21 @@ namespace
 		move_tally* m_tally;
 	};
 
-	/** A sized range that counts how often it is iterated and sized. */
+	/**
+	 * A sized range that counts how often it is iterated.
+	 *
+	 * It counted size() calls too, and nothing ever read the count, so the "iterated
+	 * once" claim rested on begins alone either way. The counter is gone rather than
+	 * asserted because the real figure is two -- when_all's fan-out asks for the size
+	 * once for the block and once more for a local that only the debug build's asserts
+	 * read -- and that second call is exactly the thing a reviewer has already proposed
+	 * guarding with NDEBUG. Pinning it here would make this test fail on a change that
+	 * has nothing to do with what it is for.
+	 */
 	struct counting_range
 	{
 		std::vector<move_counted> items;
 		int*                      begins;
-		int*                      sizes;
 
 		[[nodiscard]] auto begin()
 		{
@@ -861,7 +965,6 @@ namespace
 
 		[[nodiscard]] std::size_t size() const
 		{
-			++*sizes;
 			return items.size();
 		}
 	};
@@ -977,9 +1080,8 @@ namespace
 	int moves_for_a_range_of(const int elements, int& begins)
 	{
 		move_tally tally;
-		int        sizes = 0;
 
-		counting_range range{.items = {}, .begins = &begins, .sizes = &sizes};
+		counting_range range{.items = {}, .begins = &begins};
 		range.items.reserve(static_cast<std::size_t>(elements));
 
 		for(int i = 0; i < elements; ++i)
@@ -1137,7 +1239,13 @@ TEST_F(WhenAllTest, AConstRangeOfCopyableAwaitablesIsCopiedIntoTheChildren)
 
 	ASSERT_TRUE(result.has_value());
 	EXPECT_EQ(*result, (std::vector<int>{7, 8}));
-	EXPECT_EQ(children[0].value, 7);
+
+	// There was an EXPECT_EQ(children[0].value, 7) here. It could not fail: nothing in
+	// the implementation could modify a const element without undefined behavior, so it
+	// asserted a language rule rather than this overload's behavior. What actually pins
+	// "copied, not moved" is that a const range compiles at all -- the static_assert
+	// below -- since a const element cannot be moved from, and the values above, which
+	// came out of the children.
 }
 
 // A const range of move-only elements cannot be moved from, and is rejected up front
@@ -1453,22 +1561,6 @@ namespace
 	 */
 	constexpr int tripwire_block_hops = 1;
 
-	/** Spins until @p flag is set, yielding only as a backstop. See rendezvous. */
-	void spin_until(const std::atomic<bool>& flag)
-	{
-		for(int spins = 0; !flag.load(std::memory_order_acquire);)
-		{
-			if(spins < spin_limit)
-			{
-				++spins;
-			}
-			else
-			{
-				std::this_thread::yield();
-			}
-		}
-	}
-
 	/**
 	 * @brief A child's result value whose destruction opens the window C1 lives in.
 	 *
@@ -1477,9 +1569,13 @@ namespace
 	 * leaves the moved-from object in the slot, where ~when_all_state destroys it --
 	 * and ~when_all_state runs from the release() inside ~when_all_awaiter. Destroying
 	 * the slot's copy is therefore the last instant inside the block's teardown that a
-	 * test can reach, which makes it the narrowest rendezvous available for a stop that
-	 * has to land after the block is freed and before the joiner's stop callback is
-	 * destroyed.
+	 * test can reach: after ~combinator_state has destroyed the completion counter and
+	 * its waiter_list, and before the operator delete that frees the storage. So a stop
+	 * released here reaches a waiter_list that has been destroyed, which is what the
+	 * reset in ~when_all_awaiter prevents. The same window a few hundred nanoseconds
+	 * later, with the storage freed rather than merely destroyed, is reachable only by
+	 * timing -- see the note on the test -- and no rendezvous a test can write lands
+	 * there, because nothing of ours runs between that free and ~m_stop.
 	 *
 	 * Only the copy in the block -- tripwire_block_hops moves from the child's own
 	 * result -- releases the stop thread and holds the teardown open. The child's
@@ -1588,6 +1684,35 @@ namespace
 
 		// Somewhere for the stop this repeat requested to tear the chain down.
 		co_await alt::cancellation_point{};
+	}
+
+	/**
+	 * @brief Checks what one teardown-against-stop repeat produced.
+	 *
+	 * Split from the repeat itself, and both split out of the test's loop, for the
+	 * reason run_one_stop_race records.
+	 *
+	 * Why each of the window's three conditions is needed, since none of it is visible
+	 * in the assertions. The root is a cancellable_task, so the chain's cancellation
+	 * context carries a token that can be stopped and wait_awaiter::await_suspend
+	 * registers a callback at all -- a sync_wait-driven alt::task has a null context and
+	 * registers nothing, which is why every other ready-children test here is safe. The
+	 * one child is ready, so it retires before the join can link, the link is refused
+	 * with that callback left engaged, and the awaiter's release() is the block's LAST
+	 * reference. And the stop is requested from another thread, which is this library's
+	 * documented shutdown idiom.
+	 */
+	void check_the_teardown_repeat(const int repeat, const wait_record& record, const int tag_seen, const int opened)
+	{
+		EXPECT_EQ(record.resumptions, 1) << "repeat " << repeat;
+		EXPECT_TRUE(record.satisfied) << "repeat " << repeat << ": the stop lands after await_resume, so the verdict is the satisfied one";
+		EXPECT_EQ(tag_seen, tripwire_tag) << "repeat " << repeat << ": the chain read its slot before the block was released";
+		EXPECT_EQ(live_frames, 0) << "repeat " << repeat;
+
+		// The window was opened exactly once. A repeat that never reached the block's
+		// copy of the tripwire released its stop somewhere else entirely and guarded
+		// nothing, which is a failure of the test rather than of the code.
+		EXPECT_EQ(opened, 1) << "repeat " << repeat << ": the block's teardown reached the tripwire exactly once";
 	}
 
 	/**
@@ -1830,9 +1955,14 @@ TEST_F(WhenAllTest, ANestedWhenAllInsideAChildIsItsOwnRoot)
 	// levels, so the test's name is earned by a mutation rather than by them: route the
 	// children through the chain's token instead of the block's own stop source -- the
 	// one line this test discriminates, see the DELICATE note on child_options.token in
-	// when_all.hpp -- and this test fails 0 pass / 91 fail / 109 hang out of 200 repeats
-	// while every other test in the suite still passes. It is the only test in the file
+	// when_all.hpp -- and this test fails 0 pass / 91 fail / 109 hang out of 200 repeats,
+	// re-measured at 0 pass / 9 fail / 11 hang out of 20. It is the only test in the file
 	// that catches it, and one level of nesting is why.
+	//
+	// "Every other test still passes" is how that used to be put here, and it was too
+	// strong in one direction: a whole-suite run under the mutation prints 33 passes --
+	// every test ahead of this one in the file -- and then dies in this one, so the test
+	// after it never runs at all. Nothing else fails; one test is simply never reached.
 	handle.request_stop();
 
 	EXPECT_EQ(record.resumptions, 1);
@@ -1885,22 +2015,6 @@ TEST_F(WhenAllTest, AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked)
 
 		const int opened = run_one_teardown_race(record, tag_seen);
 
-		// Why each condition is needed. The root is a cancellable_task, so the chain's
-		// cancellation context carries a token that can be stopped and
-		// wait_awaiter::await_suspend registers a callback at all -- a sync_wait-driven
-		// alt::task has a null context and registers nothing, which is why every other
-		// ready-children test here is safe. The one child is ready, so it retires before
-		// the join can link, the link is refused with that callback left engaged, and the
-		// awaiter's release() is the block's LAST reference. And the stop is requested
-		// from another thread, which is this library's documented shutdown idiom.
-		ASSERT_EQ(record.resumptions, 1) << "repeat " << repeat;
-		EXPECT_TRUE(record.satisfied) << "repeat " << repeat << ": the stop lands after await_resume, so the verdict is the satisfied one";
-		EXPECT_EQ(tag_seen, tripwire_tag) << "repeat " << repeat << ": the chain read its slot before the block was released";
-		EXPECT_EQ(live_frames, 0) << "repeat " << repeat;
-
-		// The window was opened exactly once. A repeat that never reached the block's
-		// copy of the tripwire released its stop somewhere else entirely and guarded
-		// nothing, which is a failure of the test rather than of the code.
-		ASSERT_EQ(opened, 1) << "repeat " << repeat << ": the block's teardown reached the tripwire exactly once";
+		check_the_teardown_repeat(repeat, record, tag_seen, opened);
 	}
 }

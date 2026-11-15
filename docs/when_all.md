@@ -118,15 +118,23 @@ Three invariants make that safe:
   requests stops, and each child is a self-owning `cancellable_task`.
 - **(B)** The claim election cannot free an already-claimed node. A loser whose node
   a satisfier already won loses the compare-and-swap in `waiter_list::claim`, so its
-  `waiter_stop_release` resumes and frees nothing.
+  `waiter_stop_release` resumes and frees nothing; the only way a child frame dies is
+  the child itself running, which happens only when the walk reaches it.
 - **(C)** The combinator never destroys a child. It may resume the awaiting chain
   while children are still alive, and (A) is what makes that safe for the sibling
   hazard.
 
 The argument is recorded where the hazard lives, in the note on
-[`alt::async_latch`](async_latch.md) in `include/alt/async_latch.hpp`. Nesting one
-`when_all` inside a child is the case that makes the root property observable, and
-`tests/test_when_all.cpp` guards it with a nested case.
+[`alt::async_latch`](async_latch.md) in `include/alt/async_latch.hpp`, which states the
+same three invariants under the same labels. Nesting one `when_all` inside a child is
+the case that makes the root property observable, and `tests/test_when_all.cpp` guards
+it with a nested case.
+
+A `when_all` awaited in a promise with **no cancellation context** — an `alt::task`
+driven by `alt::sync_wait`, with no `cancellable_task` root above it — is simply
+uncancellable. There is no token to link, so nothing can stop the children and the
+await can only report the satisfied result. That is not special to `when_all`: it is
+what "cancellation is relayed from a root" means for every awaitable in the library.
 
 ### A child's exception
 

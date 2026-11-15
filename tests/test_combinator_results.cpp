@@ -16,6 +16,7 @@
 #include <vector>
 
 using alt::detail::assemble_combinator_results;
+using alt::detail::combinator_value_t;
 using alt::detail::make_combinator_slots;
 using alt::detail::result_store;
 using alt::detail::when_all_slot_t;
@@ -33,6 +34,23 @@ static_assert(alt::awaitable<alt::async_event&>);
 static_assert(std::same_as<when_all_value_t<alt::async_event&>, alt::wait_result>);
 static_assert(std::same_as<when_all_slot_t<alt::task<void>>, result_store<std::monostate>>);
 static_assert(std::same_as<when_all_slot_t<alt::task<int>>, result_store<int>>);
+
+// What the mapping does with cv-qualifiers and reference-ness, which the alt::wait_result
+// assertion above leans on without saying so: it would hold just as well if async_event
+// yielded alt::wait_result&& or a top-level const alt::wait_result, both of which strip
+// to the same value type, so that assertion is not by itself evidence that the result is
+// a value type. It would NOT hold for const alt::wait_result&, which is the one case
+// that is kept rather than stripped -- the last line below. Written over
+// combinator_value_t rather than when_all_value_t because a bare result type is not an
+// awaitable and cannot be passed to the latter.
+static_assert(std::same_as<combinator_value_t<int&&>, int>);
+static_assert(std::same_as<combinator_value_t<const int>, int>);
+static_assert(std::same_as<combinator_value_t<const int&&>, int>);
+// An lvalue reference is the one case that is kept, as the reference_wrapper the
+// enclosing std::expected needs; constness is kept with it.
+static_assert(std::same_as<combinator_value_t<const int&>, std::reference_wrapper<const int>>);
+static_assert(std::same_as<combinator_value_t<alt::wait_result&&>, alt::wait_result>);
+static_assert(std::same_as<combinator_value_t<const alt::wait_result&>, std::reference_wrapper<const alt::wait_result>>);
 
 namespace
 {

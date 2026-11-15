@@ -66,8 +66,9 @@ namespace alt::detail
 		 * and join_awaiter::ready() is re-read under the waiter list's mutex, so a count
 		 * that reached zero early merely refuses the later link. Moving the starter's
 		 * retirement above when_all's child-start loop therefore fails nothing:
-		 * 0/200 in debug, 0/200 under ThreadSanitizer, and 0 across the whole WhenAllTest
-		 * suite. Deleting the retirement altogether does fail, 20/20, so what is guarded
+		 * 0/200 in debug, 0/200 under ThreadSanitizer, and 0 across the whole 35-test
+		 * WhenAllTest suite -- 20 repeats of it in debug and 10 under AddressSanitizer.
+		 * Deleting the retirement altogether does fail, 20/20, so what is guarded
 		 * is that the starter is retired, not where. An earlier version of this comment
 		 * claimed the position protected a parent "that has not finished suspending";
 		 * three passes over this file asserted that before anyone measured it.
@@ -158,12 +159,11 @@ namespace alt::detail
 			// 200 times out of 200 repeats, and fails nothing at all in alt::when_all:
 			// 0 failures in 200 repeats of each of the five cancellation-path tests run
 			// one at a time, and in a separate single run of the whole WhenAllTest suite
-			// all 33 of its tests still pass. The reason
-			// is in when_all_awaiter's await_resume note: the chain's own stop claims
-			// the joiner before cancel() ever runs, so the flag is never the deciding
-			// half of that verdict today. It is still stored first, because a
-			// combinator that parks before its fan-out ends would make it the deciding
-			// half.
+			// all 35 of its tests still pass. The reason is in when_all_awaiter's
+			// await_resume note: the chain's own stop claims the joiner before cancel()
+			// ever runs, so the flag is never the deciding half of that verdict today. It
+			// is still stored first, because a combinator that parks before its fan-out
+			// ends would make it the deciding half.
 			m_cancelled.store(true, std::memory_order_release);
 
 			// DELICATE. The copy is not a style choice. Read this before removing it.

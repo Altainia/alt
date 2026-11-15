@@ -66,7 +66,15 @@ namespace alt::detail
 	template<alt::awaitable A>
 	using when_all_slot_t = result_store<when_all_value_t<A>>;
 
-	/** Satisfied by a std::tuple specialization. */
+	/**
+	 * Satisfied by anything with a std::tuple_size, which in this library means the
+	 * argument-list form's std::tuple of slots.
+	 *
+	 * std::array and std::pair satisfy it too, and neither is used as a slot container:
+	 * the range form's is a std::vector, which does not. The concept is deliberately
+	 * the loose "has a tuple_size" test rather than a std::tuple check, because it is
+	 * asked only to tell the two containers this library builds apart.
+	 */
 	template<typename T>
 	concept tuple_like_slots = requires { std::tuple_size<T>::value; };
 

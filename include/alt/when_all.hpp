@@ -105,7 +105,7 @@ namespace alt::detail
 		//
 		// Measured rather than argued, and the instrument matters. Swapping these two
 		// lines fails nothing in a debug build -- 0/200 against the cancellation tests
-		// and 0 across all 761 tests -- because the freed block's counter word usually
+		// and 0 across all 763 tests -- because the freed block's counter word usually
 		// still holds a plausible value. Under AddressSanitizer the same swap is
 		// 200/200, reported as heap-use-after-free in completion_counter::complete()
 		// with this function one frame above it. Do not read a green debug run as
@@ -225,16 +225,16 @@ namespace alt::detail
 		 *
 		 * A node being off the counter is NOT the same as that node's stop callback
 		 * being deregistered, and the "never linked at all" case is where the two part
-		 * company. detail::wait_awaiter::await_suspend emplaces its std::stop_callback
-		 * on the chain's token BEFORE it attempts the link, holding a
-		 * waiter_stop_release that points at the node and at the counter's waiter_list,
-		 * which lives inside the block; a refused link leaves that callback registered
-		 * for the rest of the awaiter's life, and nothing in waiter_list::claim's
-		 * election disarms it, because a node refused by the condition is still
-		 * winnable. On the path await_suspend names -- every child retired before the
-		 * join could link -- the reference count here is exactly 1, so releasing first
-		 * frees the waiter_list while a registered callback still points into it, and a
-		 * request_stop() on another thread then takes the mutex of a freed list.
+		 * company. detail::wait_awaiter::await_suspend emplaces its std::stop_callback on
+		 * the chain's token BEFORE it attempts the link, holding a waiter_stop_release
+		 * that points at the node and at the counter's waiter_list, which lives inside
+		 * the block; a refused link leaves that callback registered for the rest of the
+		 * awaiter's life, and nothing in waiter_list::claim's election disarms it,
+		 * because a node refused by the condition is still winnable. On the path
+		 * await_suspend names -- every child retired before the join could link -- the
+		 * reference count here is exactly 1, so releasing first frees the waiter_list
+		 * while a registered callback still points into it, and a request_stop() on
+		 * another thread then takes the mutex of a freed list.
 		 *
 		 * Resetting first closes that, and strengthens the argument above rather than
 		 * replacing it: ~std::stop_callback both deregisters the callback and blocks for
@@ -354,12 +354,14 @@ namespace alt::detail
 			// 109 hang out of 200 repeats in debug, and 0 pass / 200 fail under
 			// AddressSanitizer, where the report is heap-use-after-free in
 			// _Stop_state_t::_M_lock() reached from stop_forwarder::operator(). The other
-			// four combinator tests added alongside it pass 200/200, and a run of the
-			// WhenAllTest suite -- that suite alone, not the project's 761 tests --
-			// reaches 32 of its 33 passes before that one test hangs. One level of
-			// nesting is what makes the hazard observable, because what gets freed
-			// mid-walk is a child's own stop state, held alive only by an inner block's
-			// m_link once the child's frame is gone.
+			// four combinator tests added alongside it pass 200/200. Re-measured against
+			// the 35-test suite this file now has, at 20 repeats rather than 200: 0 pass /
+			// 9 fail / 11 hang, the same character. A whole-suite run in debug prints 33
+			// passes -- every test ahead of that one in the file -- and then dies in it, so
+			// the one test after it never runs at all. One level of nesting is what makes
+			// the hazard observable, because what gets freed mid-walk is a child's own stop
+			// state, held alive only by an inner block's m_link once the child's frame is
+			// gone.
 			//
 			// The other half of that mutation, relaying the chain's cancellation_context
 			// into each child instead of giving it the block's source, is inexpressible
@@ -385,9 +387,9 @@ namespace alt::detail
 			// join_awaiter::ready() is re-read under the list's mutex, so an early zero
 			// only refuses the link. Moving this above the loop fails nothing -- 0/200
 			// debug and 0/200 TSan against the one fan-out test, and 0 across the whole
-			// WhenAllTest suite at 20 repeats in debug and 10 under AddressSanitizer --
-			// while deleting it fails 20/20. See
-			// the combinator_state constructor for why the count stays anyway.
+			// 35-test WhenAllTest suite at 20 repeats in debug and 10 under
+			// AddressSanitizer -- while deleting it fails 20/20. See the combinator_state
+			// constructor for why the count stays anyway.
 			m_state->shared().counter().complete();
 
 			// Park on the counter. completion_counter::join_awaiter is reused as-is rather
@@ -413,9 +415,20 @@ namespace alt::detail
 			// sibling's frame still alive. Not on the exception assertions. Its first
 			// revision raced a releasing thread against the rethrow and failed only 8/200
 			// and 4/200 of the same mutation, on its sibling-finished assertion, which is
-			// why it is single-threaded now. 15 of the 34 WhenAllTest tests abort under
-			// the same mutation, each run alone; the per-test list is in the task 6 fix
-			// report.
+			// why it is single-threaded now.
+			//
+			// The park is load-bearing far beyond that one test. Run each of the 35
+			// WhenAllTest tests alone against the same mutation and 16 of them abort
+			// outright, all on one assert -- result_store's "reading an alt coroutine
+			// result before it was produced" in coroutine.hpp -- because a chain that
+			// carries on without parking assembles slots no child has filled. The 16 are
+			// exactly the tests whose children park: every test in which a child's
+			// completion, a stop or a scheduler drain is what resumes the chain. The 18
+			// that still pass are the ones whose children all retire inside the fan-out,
+			// where the park has nothing to wait for, which is also why
+			// EveryChildAlreadySatisfiedCompletesWithoutSuspending cannot guard this. The
+			// list is reproducible from this paragraph rather than cited: no measurement
+			// report ships with the library.
 			m_join.emplace(m_state->shared().counter());
 			return m_join->await_suspend(h);
 		}
@@ -503,6 +516,12 @@ namespace alt::detail
 				// The range is iterated here and nowhere else, once. Slot i belongs to the
 				// i-th element, so the children are started, and their slots filled, in
 				// range order and assembly reads them back in that order.
+				//
+				// alt::start's cancellation_handle is discarded here and in start_child,
+				// deliberately: nothing in stage A cancels a single child, so the only
+				// thing the handle could do is stop one of them on its own, which the
+				// children's shared stop source exists to prevent. The children are
+				// self-owning roots, so dropping the handle leaks nothing.
 				using element_type = std::ranges::range_value_t<Storage>;
 
 				[[maybe_unused]] const std::size_t count = child_count();
@@ -708,10 +727,19 @@ namespace alt
 	 * ever requests stops, and the children are self-owning alt::cancellable_task
 	 * roots. (B) The claim election cannot free an already-claimed node: a loser whose
 	 * node a satisfier already won loses the compare-and-swap in waiter_list::claim, so
-	 * its waiter_stop_release resumes and frees nothing. (C) The combinator never
-	 * destroys a child, though it may resume the awaiting chain while children are
-	 * still alive; (A) is what makes that safe for the sibling hazard. The argument
-	 * is recorded where the hazard is: see the note on alt::async_latch.
+	 * its waiter_stop_release resumes and frees nothing; the only way a child frame dies
+	 * is the child itself running, which happens only when the walk reaches it. (C) The
+	 * combinator never destroys a child, though it may resume the awaiting chain while
+	 * children are still alive; (A) is what makes that safe for the sibling hazard. The
+	 * argument is recorded where the hazard is: see the note on alt::async_latch, which
+	 * states the same three under the same labels.
+	 *
+	 * A when_all awaited in a promise with no cancellation context -- an alt::task
+	 * driven by alt::sync_wait, with no alt::cancellable_task root above it -- is simply
+	 * uncancellable. There is no token to link, so nothing can stop the children and the
+	 * await can only report the satisfied result. That is not a special case in this
+	 * component: it is what "cancellation is relayed from a root" means for every
+	 * awaitable in the library.
 	 */
 	template<typename... Awaitables>
 	  requires(awaitable<Awaitables> && ...)
