@@ -149,21 +149,23 @@ namespace alt::detail
 	/**
 	 * @brief The awaiter alt::when_all suspends the awaiting chain on.
 	 *
-	 * @tparam Results        The tuple of values a satisfied wait yields.
-	 * @tparam Slots          The tuple of result stores the children write into.
-	 * @tparam AwaitableTuple The tuple of awaitables the awaitable object holds.
+	 * @tparam Results       The tuple (or vector) of values a satisfied wait yields.
+	 * @tparam Slots         The tuple (or vector) of result stores the children write into.
+	 * @tparam Storage       What the awaitable object holds: a std::tuple of awaitables
+	 *                       for the argument-list form, or the range itself for the range
+	 *                       form, whose Results and Slots are then vectors.
 	 *
 	 * Allocates the shared block on suspension, fans the children out as self-owning
 	 * alt::cancellable_task roots, and parks the awaiting chain on the block's
 	 * completion counter. Neither copyable nor assignable; moved exactly once, into
 	 * detail::cancellation_checked's storage, before any await member runs.
 	 */
-	template<typename Results, typename Slots, typename AwaitableTuple>
+	template<typename Results, typename Slots, typename Storage>
 	class when_all_awaiter
 	{
 	public:
-		/** Constructs an awaiter over a tuple of awaitables that outlives it. */
-		explicit when_all_awaiter(AwaitableTuple* awaitables) noexcept: m_awaitables(awaitables)
+		/** Constructs an awaiter over a tuple of awaitables, or a range, that outlives it. */
+		explicit when_all_awaiter(Storage* awaitables) noexcept: m_storage(awaitables)
 		{
 		}
 
@@ -178,7 +180,7 @@ namespace alt::detail
 		 * await_suspend would have to be carried here by hand.
 		 */
 		when_all_awaiter(when_all_awaiter&& other) noexcept:
-		  m_awaitables(other.m_awaitables),
+		  m_storage(other.m_storage),
 		  m_state(std::exchange(other.m_state, nullptr))
 		{
 			assert(!other.m_join.has_value() && "moving an alt when_all_awaiter that has already suspended");
@@ -380,18 +382,18 @@ namespace alt::detail
 
 	private:
 		/** True for the range form, whose storage is the range itself and not a tuple. */
-		static constexpr bool is_range_form = std::ranges::range<AwaitableTuple>;
+		static constexpr bool is_range_form = std::ranges::range<Storage>;
 
 		/** How many children this combinator fans out. */
 		[[nodiscard]] std::size_t child_count() const
 		{
 			if constexpr(is_range_form)
 			{
-				return std::ranges::size(*m_awaitables);
+				return static_cast<std::size_t>(std::ranges::size(*m_storage));
 			}
 			else
 			{
-				return std::tuple_size_v<AwaitableTuple>;
+				return std::tuple_size_v<Storage>;
 			}
 		}
 
@@ -403,12 +405,17 @@ namespace alt::detail
 				// The range is iterated here and nowhere else, once. Slot i belongs to the
 				// i-th element, so the children are started, and their slots filled, in
 				// range order and assembly reads them back in that order.
-				using element_type = std::ranges::range_value_t<AwaitableTuple>;
+				using element_type = std::ranges::range_value_t<Storage>;
 
-				std::size_t index = 0;
+				[[maybe_unused]] const std::size_t count = child_count();
+				std::size_t                        index = 0;
 
-				for(auto it = std::ranges::begin(*m_awaitables); it != std::ranges::end(*m_awaitables); ++it, ++index)
+				for(auto it = std::ranges::begin(*m_storage); it != std::ranges::end(*m_storage); ++it, ++index)
 				{
+					// A conforming sized_range cannot yield more elements than its size:
+					// the slots and the counter were both sized by it.
+					assert(index < count && "a sized range yielded more elements than its size");
+
 					m_state->shared().add_ref();
 
 					// The element is constructed from the iterator's rvalue reference in
@@ -417,12 +424,15 @@ namespace alt::detail
 					static_cast<void>(alt::start(
 					  when_all_child<element_type>(element_type(std::ranges::iter_move(it)), &m_state->slots()[index], &m_state->shared()), options));
 				}
+
+				// Fewer elements than size() would leave the counter above zero forever.
+				assert(index == count && "a sized range yielded fewer elements than its size");
 			}
 			else
 			{
 				[&]<std::size_t... I>(std::index_sequence<I...>) {
 					(start_child<I>(options), ...);
-				}(std::make_index_sequence<std::tuple_size_v<AwaitableTuple>>{});
+				}(std::make_index_sequence<std::tuple_size_v<Storage>>{});
 			}
 		}
 
@@ -432,18 +442,18 @@ namespace alt::detail
 		{
 			// The type the argument tuple stored: a value for an rvalue argument, moved
 			// into the child's frame, and T& for an lvalue one.
-			using child_type = std::tuple_element_t<I, AwaitableTuple>;
+			using child_type = std::tuple_element_t<I, Storage>;
 
 			m_state->shared().add_ref();
 
-			static_cast<void>(alt::start(when_all_child<child_type>(std::forward<child_type>(std::get<I>(*m_awaitables)),
+			static_cast<void>(alt::start(when_all_child<child_type>(std::forward<child_type>(std::get<I>(*m_storage)),
 			                                                        &std::get<I>(m_state->slots()),
 			                                                        &m_state->shared()),
 			                             options));
 		}
 
-		/** The caller's awaitables, owned by the awaitable object this came from. */
-		AwaitableTuple* m_awaitables;
+		/** The caller's awaitables or range, owned by the awaitable object this came from. */
+		Storage* m_storage;
 
 		/** The shared block, from await_suspend until this awaiter is destroyed. */
 		when_all_state<Slots>* m_state = nullptr;
@@ -610,12 +620,15 @@ namespace alt
 	 * counter is constructed with the children plus the starter. Infinite and streaming
 	 * ranges are a non-goal and are excluded by this. The range is iterated once.
 	 *
+	 * A type that is both an awaitable and a sized range is one awaitable child, not a
+	 * range of children: the argument-list overload takes it.
+	 *
 	 * The leak when starting a child throws, and the home and stop-source sharing, are
 	 * the argument-list form's; see there.
 	 */
 	template<std::ranges::sized_range R>
-	  requires awaitable<std::ranges::range_value_t<R>> &&
-	           std::constructible_from<std::ranges::range_value_t<R>, std::ranges::range_rvalue_reference_t<R>>
+	  requires(!awaitable<R>) && awaitable<std::ranges::range_value_t<R>> &&
+	          std::constructible_from<std::ranges::range_value_t<R>, std::ranges::range_rvalue_reference_t<R>>
 	[[nodiscard]] auto when_all(R&& range)
 	{
 		return detail::when_all_range_awaitable<R>{std::forward<R>(range)};

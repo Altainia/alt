@@ -777,6 +777,134 @@ namespace
 		}
 	};
 
+	/** A copyable awaitable that is ready at once with @p value. */
+	struct copyable_ready
+	{
+		int value;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return value;
+		}
+	};
+
+	/** An awaitable ready with a value that records when its contents were moved away. */
+	struct flagged_ready
+	{
+		explicit flagged_ready(const int v): value(v)
+		{
+		}
+
+		flagged_ready(flagged_ready&& other) noexcept: value(other.value)
+		{
+			other.moved_from = true;
+		}
+
+		flagged_ready(const flagged_ready&)            = delete;
+		flagged_ready& operator=(const flagged_ready&) = delete;
+		flagged_ready& operator=(flagged_ready&&)      = delete;
+		~flagged_ready()                               = default;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return value;
+		}
+
+		int  value;
+		bool moved_from = false;
+	};
+
+	/** Both an awaitable and a sized range: the argument-list overload must take it. */
+	struct awaitable_range: copyable_ready
+	{
+		[[nodiscard]] int* begin() const noexcept
+		{
+			return nullptr;
+		}
+
+		[[nodiscard]] int* end() const noexcept
+		{
+			return nullptr;
+		}
+
+		[[nodiscard]] std::size_t size() const noexcept
+		{
+			return 0;
+		}
+	};
+
+	/** A task that parks on @p gate and then yields @p value. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
+	alt::task<int> wait_then_yield(alt::async_event& gate, int value)
+	{
+		const frame_tracker tracker{value};
+		static_cast<void>(co_await gate);
+		co_return value;
+	}
+
+	/** A task whose body throws a runtime_error saying @p message. */
+	alt::task<int> make_throwing_task_with(std::string message)
+	{
+		throw std::runtime_error{message};
+		co_return 0;
+	}
+
+	/** Parks in a when_all over two tasks that yield distinct values, and stores them. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task range_value_root(alt::async_event& first, alt::async_event& second, wait_record& record, std::vector<int>& values)
+	{
+		std::vector<alt::task<int>> children;
+		children.push_back(wait_then_yield(first, 10));
+		children.push_back(wait_then_yield(second, 20));
+
+		const auto result = co_await alt::when_all(std::move(children));
+		record_outcome(record, result);
+
+		if(result)
+		{
+			values = *result;
+		}
+	}
+
+	/** Moves @p elements counting awaitables through a range-form when_all; returns the moves. */
+	int moves_for_a_range_of(const int elements, int& begins)
+	{
+		move_tally tally;
+		int        sizes = 0;
+
+		counting_range range{.items = {}, .begins = &begins, .sizes = &sizes};
+		range.items.reserve(static_cast<std::size_t>(elements));
+
+		for(int i = 0; i < elements; ++i)
+		{
+			range.items.emplace_back(&tally);
+		}
+
+		const auto result = alt::sync_wait(alt::when_all(std::move(range)));
+
+		EXPECT_TRUE(result.has_value());
+		EXPECT_EQ(result->size(), static_cast<std::size_t>(elements));
+		return tally.moves;
+	}
+
 	/** Parks in a when_all over a vector of tasks that each park on an event of their own. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
 	alt::cancellable_task range_event_root(alt::async_event& first, alt::async_event& second, wait_record& record)
@@ -862,32 +990,114 @@ TEST_F(WhenAllTest, CancellingAChainParkedOnARangeFormStopsEveryChild)
 
 TEST_F(WhenAllTest, ARangeIsIteratedOnceAndItsElementsAreMovedIntoTheChildren)
 {
-	constexpr int elements = 4;
+	constexpr int small = 4;
+	constexpr int large = 8;
 
-	move_tally tally;
-	int        begins = 0;
-	int        sizes  = 0;
+	int small_begins = 0;
+	int large_begins = 0;
 
-	counting_range range{.items = {}, .begins = &begins, .sizes = &sizes};
-	range.items.reserve(elements);
+	const int small_moves = moves_for_a_range_of(small, small_begins);
+	const int large_moves = moves_for_a_range_of(large, large_begins);
 
-	for(int i = 0; i < elements; ++i)
-	{
-		range.items.emplace_back(&tally);
-	}
+	EXPECT_EQ(small_begins, 1) << "the range is iterated exactly once";
+	EXPECT_EQ(large_begins, 1);
 
-	ASSERT_EQ(tally.moves, 0) << "emplaced in place, so nothing has moved yet";
+	// move_counted has no copy constructor, so this compiling is the no-copy guarantee:
+	// an element can only reach its child by being moved. What a defect would change
+	// is how many times, so the cost is held to a bound and to linearity in the count,
+	// not to the exact figure the compiler's coroutine lowering happens to produce.
+	EXPECT_EQ(small_moves % small, 0);
+	EXPECT_EQ(large_moves % large, 0);
+	EXPECT_EQ(small_moves / small, large_moves / large) << "moves per element do not depend on the range's size";
+	EXPECT_GT(small_moves, 0) << "the elements reached their children by moving";
+	EXPECT_LE(small_moves / small, 4) << "a handful of moves per element, none made per sibling";
+}
 
-	const auto result = alt::sync_wait(alt::when_all(std::move(range)));
+TEST_F(WhenAllTest, ALvalueRangeIsMovedFromAndYieldsItsValues)
+{
+	std::vector<alt::task<int>> children;
+	children.push_back(make_value_task(4));
+	children.push_back(make_value_task(5));
+
+	const auto result = alt::sync_wait(alt::when_all(children));
 
 	ASSERT_TRUE(result.has_value());
-	EXPECT_EQ(result->size(), static_cast<std::size_t>(elements));
-	EXPECT_EQ(begins, 1) << "the range is iterated exactly once";
+	EXPECT_EQ(*result, (std::vector<int>{4, 5}));
+	EXPECT_EQ(children.size(), 2U) << "the range itself is bound, not consumed";
+}
 
-	// Measured: three moves per element -- the argument-list form's four for one
-	// rvalue argument, less the tuple stage this form does not have -- and no copies,
-	// which move_counted would not compile. A fourth would be a copy of the range or
-	// of an element made on the way to the child.
-	constexpr int moves_per_element = 3;
-	EXPECT_EQ(tally.moves, elements * moves_per_element);
+TEST_F(WhenAllTest, ALvalueRangeIsLeftHoldingMovedFromElements)
+{
+	std::vector<flagged_ready> children;
+	children.emplace_back(3);
+	children.emplace_back(4);
+
+	const auto result = alt::sync_wait(alt::when_all(children));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, (std::vector<int>{3, 4}));
+	EXPECT_TRUE(children[0].moved_from);
+	EXPECT_TRUE(children[1].moved_from);
+}
+
+TEST_F(WhenAllTest, AConstRangeOfCopyableAwaitablesIsCopiedIntoTheChildren)
+{
+	const std::vector<copyable_ready> children{{.value = 7}, {.value = 8}};
+
+	const auto result = alt::sync_wait(alt::when_all(children));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, (std::vector<int>{7, 8}));
+	EXPECT_EQ(children[0].value, 7);
+}
+
+// A const range of move-only elements cannot be moved from, and is rejected up front
+// rather than failing inside the awaiter.
+template<typename T>
+concept when_all_accepts = requires(T&& argument) { alt::when_all(std::forward<T>(argument)); };
+
+static_assert(!when_all_accepts<const std::vector<alt::task<int>>&>);
+static_assert(when_all_accepts<std::vector<alt::task<int>>&>);
+static_assert(when_all_accepts<const std::vector<copyable_ready>&>);
+
+// A type that is both an awaitable and a sized range is one child of the argument-list form.
+static_assert(std::same_as<alt::await_result_t<decltype(alt::when_all(std::declval<awaitable_range>()))>,
+                           std::expected<std::tuple<int>, std::error_code>>);
+
+TEST_F(WhenAllTest, ARangeYieldsResultsByPositionWhenTheChildrenCompleteInReverse)
+{
+	alt::async_event first;
+	alt::async_event second;
+	wait_record      record;
+	std::vector<int> values;
+
+	auto handle = alt::start(range_value_root(first, second, record, values));
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_EQ(live_frames, 2);
+
+	second.set();
+	ASSERT_EQ(record.resumptions, 0) << "the first child is still parked";
+	first.set();
+
+	ASSERT_TRUE(record.satisfied);
+	EXPECT_EQ(values, (std::vector<int>{10, 20})) << "position is range order, not completion order";
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(WhenAllTest, ARangeWithTwoThrowingChildrenRethrowsTheLowestPositions)
+{
+	std::vector<alt::task<int>> children;
+	children.push_back(make_value_task(1));
+	children.push_back(make_throwing_task_with("second position"));
+	children.push_back(make_throwing_task_with("third position"));
+
+	try
+	{
+		[[maybe_unused]] const auto result = alt::sync_wait(alt::when_all(std::move(children)));
+		FAIL() << "the await did not throw";
+	}
+	catch(const std::runtime_error& error)
+	{
+		EXPECT_STREQ(error.what(), "second position");
+	}
 }
