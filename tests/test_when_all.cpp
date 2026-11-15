@@ -1101,3 +1101,417 @@ TEST_F(WhenAllTest, ARangeWithTwoThrowingChildrenRethrowsTheLowestPositions)
 		EXPECT_STREQ(error.what(), "second position");
 	}
 }
+
+// The two paths that falsified the first revision of the combinators design, plus the
+// spec's direct "no child left running" requirement. Revision 1 claimed a combinator
+// could request a stop on each child and have every child gone before teardown
+// returned. Both paths below break that claim on ordinary code, which is why the
+// results, the counter and the children's stop source live in a refcounted block
+// instead of in the awaiting frame.
+namespace
+{
+	/** How many times the satisfier-against-stop race repeats. */
+	constexpr int stop_race_repeats = 200;
+
+	/** What the raced child recorded about its own wait, from inside the child. */
+	struct child_record
+	{
+		/** Whether the child's body reached the statement after its co_await at all. */
+		bool resumed = false;
+
+		/**
+		 * Whether waiter_list::claim handed the child's node to the satisfier rather
+		 * than to the stop callback. True is revision 1's path (a): the stop released
+		 * nothing and the child ran on.
+		 */
+		bool satisfier_won = false;
+
+		/** The value the satisfier published, as the child observed it. */
+		int value = 0;
+	};
+
+	/** A tracked task that parks on @p source and records which party resumed it. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both references are owned by the calling test, which joins the racing thread and waits for live_frames to reach zero before leaving its scope.
+	alt::task<std::expected<int, std::error_code>> tracked_source_wait(alt::task_completion_source<int>& source, child_record& child, int tag)
+	{
+		const frame_tracker tracker{tag};
+		auto                result = co_await source;
+
+		child.resumed       = true;
+		child.satisfier_won = result.has_value();
+
+		if(result)
+		{
+			child.value = *result;
+		}
+
+		co_return result;
+	}
+
+	/**
+	 * Parks in a when_all over a single child, the shape that lets a satisfier and a
+	 * stop race for the same waiter node. @p values_seen counts the satisfied results
+	 * whose slot held the value the satisfier published.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which joins the racing thread and waits for live_frames to reach zero before leaving their scope.
+	alt::cancellable_task one_child_root(alt::task_completion_source<int>& source, child_record& child, wait_record& record, int& values_seen)
+	{
+		const auto result = co_await alt::when_all(tracked_source_wait(source, child, 1));
+		record_outcome(record, result);
+
+		if(result)
+		{
+			// Reading position 0 at all is half the assertion. A satisfied verdict over a
+			// slot no child body filled does not return a wrong value here: result_store
+			// asserts on "reading an alt coroutine result before it was produced", so the
+			// read either sees the satisfier's value or aborts the process.
+			const auto& slot = std::get<0>(*result);
+
+			if(slot.has_value() && *slot == 1)
+			{
+				++values_seen;
+			}
+		}
+
+		co_await alt::cancellation_point{};
+	}
+
+	/** Parks in a when_all over two homed children and then gives the stop somewhere to land. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which drains the home scheduler and waits for live_frames to reach zero before leaving their scope.
+	alt::cancellable_task homed_cancel_root(alt::async_event& first, alt::async_event& second, wait_record& record)
+	{
+		const frame_tracker tracker{0};
+		const auto          result = co_await alt::when_all(homed_wait{first, 1}, homed_wait{second, 2});
+		record_outcome(record, result);
+
+		// The suspension point the cancelled chain is torn down at. With a home
+		// scheduler abandon_chain posts this frame's destruction rather than running
+		// it, which is what defers the parent past its children.
+		co_await alt::cancellation_point{};
+	}
+
+	/** A tracked task that parks on @p gate and counts every resumption of its own body. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event and the counter are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::task<alt::wait_result> wait_counting_resumptions(alt::async_event& gate, int tag, int& resumptions)
+	{
+		const frame_tracker    tracker{tag};
+		const alt::wait_result result = co_await gate;
+		++resumptions;
+		co_return result;
+	}
+
+	/** Parks in a when_all over three children, each on an event of its own. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds them all until live_frames is back to zero.
+	alt::cancellable_task three_child_root(alt::async_event& first, alt::async_event& second, alt::async_event& third, int& resumptions, wait_record& record)
+	{
+		const auto result = co_await alt::when_all(wait_counting_resumptions(first, 1, resumptions),
+		                                           wait_counting_resumptions(second, 2, resumptions),
+		                                           wait_counting_resumptions(third, 3, resumptions));
+		record_outcome(record, result);
+		co_await alt::cancellation_point{};
+	}
+
+	/** Takes a satisfied when_all's results and then parks again, so the chain outlives the block. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds them all until live_frames is back to zero.
+	alt::cancellable_task satisfied_then_parked_root(alt::async_event& first, alt::async_event& second, alt::async_event& after, wait_record& record)
+	{
+		const frame_tracker tracker{0};
+		const auto          result = co_await alt::when_all(tracked_wait(first, 1), tracked_wait(second, 2));
+		record_outcome(record, result);
+
+		// Parks the chain again, so its stop state is still live and still carries a
+		// callback when the test requests the stop. The when_all's own link went with
+		// the block, which the last child released above.
+		[[maybe_unused]] const alt::wait_result parked_again = co_await after;
+	}
+
+	/** A tracked task that parks in a when_all of its own, counting a cancelled inner wait. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds them all until live_frames is back to zero.
+	alt::task<int> nested_pair(alt::async_event& first, alt::async_event& second, int tag, int& inner_cancelled)
+	{
+		const frame_tracker tracker{tag};
+		const auto          result = co_await alt::when_all(tracked_wait(first, tag + 10), tracked_wait(second, tag + 20));
+
+		if(!result)
+		{
+			++inner_cancelled;
+		}
+
+		co_return result ? 1 : 0;
+	}
+
+	/** Parks in a when_all whose two children each park in a when_all of their own. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds them all until live_frames is back to zero.
+	alt::cancellable_task nested_root(alt::async_event& first, alt::async_event& second, alt::async_event& third, alt::async_event& fourth, int& inner_cancelled, wait_record& record)
+	{
+		const auto result = co_await alt::when_all(nested_pair(first, second, 1, inner_cancelled), nested_pair(third, fourth, 2, inner_cancelled));
+		record_outcome(record, result);
+		co_await alt::cancellation_point{};
+	}
+
+	/** Everything one repeat of the satisfier-against-stop race produced. */
+	struct race_record
+	{
+		/** What the child saw: which party resumed it, and with what value. */
+		child_record child;
+
+		/** What the awaiting chain saw: its verdict and how often it resumed. */
+		wait_record parent;
+
+		/** Counts the chain's own reads of slot 0 that found the satisfier's value. */
+		int values_seen = 0;
+	};
+
+	/**
+	 * @brief Runs one repeat of revision 1's path (a). Asserts nothing about the outcome.
+	 *
+	 * Split from the two check_the_race_* functions below, and all three split out of
+	 * the test's loop, because one function holding the race and its assertions is over
+	 * clang-tidy's readability-function-cognitive-complexity threshold -- which every
+	 * other file in this suite satisfies, so splitting is the fix rather than a
+	 * suppression in tests/.clang-tidy.
+	 *
+	 * @param repeat The repeat index, so a precondition failure names which one.
+	 * @param ran    Filled with what the child and the chain each recorded.
+	 */
+	void run_one_stop_race(const int repeat, race_record& ran)
+	{
+		reset_coroutine_test_state();
+
+		alt::task_completion_source<int> source;
+		std::atomic<std::size_t>         arrived{0};
+
+		auto handle = alt::start(one_child_root(source, ran.child, ran.parent, ran.values_seen));
+		ASSERT_EQ(ran.parent.resumptions, 0) << "repeat " << repeat;
+		ASSERT_EQ(live_frames, 1) << "repeat " << repeat;
+
+		// The child is parked on one waiter node, and waiter_list::claim elects between
+		// the satisfier below and the waiter_stop_release that the children's stop
+		// fires. detail::waiter_stop_release resumes nothing unless claim returns
+		// detached, so when the satisfier wins the node the stop callback is a no-op:
+		// request_stop returns having released nothing, and the child carries on -- on
+		// the satisfier's thread -- to write its slot and fire its completion hook into
+		// a block the awaiting chain has usually abandoned already.
+		std::jthread satisfier{[&] {
+			rendezvous(arrived, 2);
+			source.set_value(1);
+		}};
+
+		rendezvous(arrived, 2);
+		handle.request_stop();
+
+		satisfier.join();
+	}
+
+	/**
+	 * @brief Checks that exactly one party resolved the race and nothing was left behind.
+	 *
+	 * Either party may win and both are correct outcomes, so this says nothing about
+	 * which did. What is not allowed is a second resumption, a child nobody resumed, or
+	 * a frame left behind. Under AddressSanitizer and ThreadSanitizer the repeat is also
+	 * the report of record for the block being touched from both threads at once: the
+	 * chain releases its reference on one thread while the child retires into the same
+	 * block on the other.
+	 */
+	void check_the_race_resolved_once(const int repeat, const race_record& ran)
+	{
+		EXPECT_EQ(ran.parent.resumptions, 1) << "repeat " << repeat;
+		EXPECT_TRUE(ran.child.resumed) << "repeat " << repeat << ": exactly one party resumed the child";
+		EXPECT_EQ(live_frames, 0) << "repeat " << repeat;
+	}
+
+	/**
+	 * @brief Checks that what each party reported agrees with which of them won the node.
+	 *
+	 * Written as unconditional truths over derived predicates rather than as assertions
+	 * inside ifs. Both forms say the same thing, and each of these holds on either side
+	 * of the race; the branchless form is also what keeps this function under
+	 * clang-tidy's cognitive-complexity threshold, which a GoogleTest assertion nested
+	 * in an if is expensive enough to break.
+	 */
+	void check_the_race_reported_consistently(const int repeat, const race_record& ran)
+	{
+		const bool value_is_the_satisfiers  = !ran.child.satisfier_won || ran.child.value == 1;
+		const bool slot_read_is_the_value   = !ran.parent.satisfied || ran.values_seen == 1;
+		const bool verdict_carries_a_reason = ran.parent.satisfied || ran.parent.error == released_error;
+
+		EXPECT_TRUE(value_is_the_satisfiers) << "repeat " << repeat << ": a child the satisfier won read the published value";
+		EXPECT_TRUE(slot_read_is_the_value) << "repeat " << repeat << ": a satisfied verdict read the satisfier's value from slot 0";
+		EXPECT_TRUE(verdict_carries_a_reason) << "repeat " << repeat << ": a released verdict reported operation_canceled";
+	}
+}
+
+TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
+{
+	int satisfier_wins  = 0;
+	int satisfied_waits = 0;
+
+	for(int repeat = 0; repeat < stop_race_repeats; ++repeat)
+	{
+		race_record ran;
+		run_one_stop_race(repeat, ran);
+		check_the_race_resolved_once(repeat, ran);
+		check_the_race_reported_consistently(repeat, ran);
+
+		satisfier_wins += ran.child.satisfier_won ? 1 : 0;
+		satisfied_waits += ran.parent.satisfied ? 1 : 0;
+	}
+
+	// The path this test exists for, asserted rather than hoped for. A run in which the
+	// stop won every single node never entered path (a) at all and proves nothing, so
+	// that is a failure of the test rather than a pass of the code.
+	//
+	// The bound is loose on purpose, but the measurement is not: over six 200-repeat
+	// runs in debug the satisfier won 199, 200, 200, 200, 199 and 200 nodes. It wins
+	// almost every one because it reaches the node directly, while the stop first
+	// travels the chain's token, the block's m_link, cancel(), the children's stop
+	// source and the child's own stop_forwarder. The parent's verdict is a different
+	// question and came out satisfied 0, 1, 0, 0, 0 and 0 times over those same runs:
+	// winning the child's node is not winning the chain's, and an earlier draft of this
+	// test asserted on the parent's verdict and so measured 0 or 1 out of 200, which
+	// reads as "the window was never hit" and is not what it means.
+	EXPECT_GT(satisfier_wins, 0) << "the satisfier never beat the stop; the race window was not hit";
+
+	// Recorded rather than asserted, so that a reader of a failure in this loop knows
+	// which mix of outcomes the failing run actually saw.
+	RecordProperty("satisfier_wins", satisfier_wins);
+	RecordProperty("satisfied_waits", satisfied_waits);
+}
+
+TEST_F(WhenAllTest, AHomeSchedulerDefersTheParentsDestructionPastItsChildrens)
+{
+	alt::manual_scheduler home;
+	alt::async_event      first;
+	alt::async_event      second;
+	wait_record           record;
+
+	auto handle = alt::start(homed_cancel_root(first, second, record), {.home = alt::scheduler_ref{home}});
+	ASSERT_EQ(live_frames, 3) << "the chain's own frame and one per parked child";
+
+	// Revision 1's path (b), single-threaded and deterministic: no second thread is
+	// involved anywhere below. abandon_chain posts destroy_trampoline instead of
+	// destroying in place whenever the context carries a home, so the chain's own
+	// teardown is deferred -- and it is posted *first*, from the cancellation point the
+	// resumed body reaches, before the children's stop has even been requested.
+	handle.request_stop();
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_FALSE(record.satisfied);
+	EXPECT_EQ(record.error, released_error);
+	EXPECT_EQ(live_frames, 3) << "three posted teardowns, nothing destroyed yet";
+
+	// Draining runs them in post order, so the chain's frame -- which in revision 1
+	// owned the result slots and the completion counter -- is destroyed while both
+	// children are still alive, and each child then calls complete() and release() on
+	// its way out. Nothing here may touch the destroyed frame: the block is what the
+	// children retire into, and it outlives every party by reference count.
+	EXPECT_EQ(home.drain(), 3U) << "one teardown per child plus the chain's own";
+	EXPECT_EQ(live_frames, 0);
+
+	ASSERT_EQ(destruction_order.size(), 3U);
+	EXPECT_EQ(destruction_order.front(), 0) << "the chain's frame was destroyed before either child's";
+
+	// That the block itself was freed exactly once is not countable from here: the
+	// erased destroy function is when_all_state's own private static, with no probe to
+	// hand it. It is covered twice over elsewhere instead.
+	// CombinatorStateTest.TheLastReleaseRunsTheErasedDeleterExactlyOnce counts the
+	// calls directly, on a block driven by hand with a counting deleter, which is why
+	// this test does not try to reproduce that count through a combinator. What is
+	// specific to the drain above -- that the one release reaching zero is a child's,
+	// after the chain's frame is already gone -- is covered by the sanitizers: a second
+	// release reports a double free under AddressSanitizer, and a block nobody released
+	// is reported by LeakSanitizer.
+}
+
+TEST_F(WhenAllTest, NoChildIsLeftRunningAfterTheChainIsCancelled)
+{
+	alt::async_event first;
+	alt::async_event second;
+	alt::async_event third;
+	int              resumptions = 0;
+	wait_record      record;
+
+	auto handle = alt::start(three_child_root(first, second, third, resumptions, record));
+	ASSERT_EQ(live_frames, 3) << "all three children are parked on their own event";
+	ASSERT_EQ(resumptions, 0);
+
+	handle.request_stop();
+
+	// The spec's direct requirement. CancellingTheAwaitingChainRequestsEveryChildsStop
+	// already shows that the frames are gone; what this adds is the other half of
+	// "no child left running", which a frame count alone cannot show: each child's body
+	// resumed exactly once, with a released wait, and nothing can resume it again.
+	EXPECT_EQ(live_frames, 0) << "no child's frame is left";
+	EXPECT_EQ(resumptions, 3) << "each child's body resumed exactly once, released";
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_FALSE(record.satisfied);
+	EXPECT_EQ(record.error, released_error);
+
+	const int after_the_stop = resumptions;
+
+	first.set();
+	second.set();
+	third.set();
+
+	EXPECT_EQ(resumptions, after_the_stop) << "setting the events resumed nothing: no child is parked on them";
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_EQ(record.resumptions, 1) << "and the chain was not resumed a second time";
+}
+
+TEST_F(WhenAllTest, AStopAfterTheWaitWasSatisfiedRunsOverABlockTheAwaiterHasLeft)
+{
+	alt::async_event first;
+	alt::async_event second;
+	alt::async_event after;
+	wait_record      record;
+
+	auto handle = alt::start(satisfied_then_parked_root(first, second, after, record));
+	ASSERT_EQ(live_frames, 3);
+
+	first.set();
+	second.set();
+
+	// The second child's hook drove the counter to zero, which resumed the chain; the
+	// chain read its slots and dropped the awaiter's reference, and the same hook's
+	// release then took the block's last one. So the block -- and the m_link stop
+	// callback living inside it, registered on this chain's token -- is already freed,
+	// while the chain itself is alive and parked on `after`.
+	ASSERT_EQ(record.resumptions, 1);
+	ASSERT_TRUE(record.satisfied);
+	ASSERT_EQ(live_frames, 1) << "only the chain's own frame is left";
+
+	// Review Focus 5. The stop walks this chain's token with the combinator's link long
+	// gone. AddressSanitizer is the instrument: a link that outlived its block, or a
+	// block whose last reference was the awaiter's rather than the last child's, reads
+	// freed memory here.
+	handle.request_stop();
+
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_EQ(record.resumptions, 1) << "the stop did not resume the chain a second time";
+}
+
+TEST_F(WhenAllTest, ANestedWhenAllInsideAChildIsItsOwnRoot)
+{
+	alt::async_event first;
+	alt::async_event second;
+	alt::async_event third;
+	alt::async_event fourth;
+	int              inner_cancelled = 0;
+	wait_record      record;
+
+	auto handle = alt::start(nested_root(first, second, third, fourth, inner_cancelled, record));
+	ASSERT_EQ(live_frames, 6) << "two children, each parked in a when_all over two of its own";
+
+	// Each child is its own cancellation root, so the outer stop reaches the inner
+	// when_all only by being forwarded into the child's own stop source, and the inner
+	// combinator links to the child's token exactly as the outer one links to the
+	// chain's. Three blocks are in flight -- the outer one and one per child -- each
+	// freed by its own last reference.
+	handle.request_stop();
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_FALSE(record.satisfied);
+	EXPECT_EQ(record.error, released_error);
+	EXPECT_EQ(inner_cancelled, 2) << "both inner when_alls reported a cancelled wait, not a satisfied one";
+	EXPECT_EQ(live_frames, 0) << "both levels are gone";
+}

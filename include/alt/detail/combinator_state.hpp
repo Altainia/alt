@@ -151,6 +151,17 @@ namespace alt::detail
 			// counter to zero and resume the awaiting chain; if that chain read the flag
 			// as false it would report a satisfied wait and assemble results from slots
 			// no child body ever filled.
+			//
+			// What guards the order is this class's own test, not a combinator's.
+			// Swapping these two statements fails
+			// CombinatorStateTest.CancelMarksTheWaitReleasedBeforeStoppingTheChildren
+			// 200/200, and fails nothing at all in alt::when_all -- 0/200 against every
+			// cancellation test in that suite, 33/33 of them still passing. The reason
+			// is in when_all_awaiter's await_resume note: the chain's own stop claims
+			// the joiner before cancel() ever runs, so the flag is never the deciding
+			// half of that verdict today. It is still stored first, because a
+			// combinator that parks before its fan-out ends would make it the deciding
+			// half.
 			m_cancelled.store(true, std::memory_order_release);
 
 			// DELICATE. The copy is not a style choice. Read this before removing it.
