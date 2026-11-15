@@ -116,9 +116,11 @@ because a plausible implementation violates any of them:
   satisfier already won loses the CAS in `waiter_list::claim`, so its
   `waiter_stop_release` resumes and frees nothing. The only way a child frame dies is the
   child itself running, which happens only when the walk reaches it.
-- **(C) The combinator never resumes the awaiting chain while any child is alive.** So
-  the parent's continuation can never be the thing that frees a child, or the primitive
-  the chain is standing on.
+- **(C) The combinator never *destroys* a child.** Revision 2 first wrote this as "never
+  resumes the awaiting chain while any child is alive", which is stronger than the hazard
+  needs and incompatible with decision 2. Resuming the chain early is safe for the sibling
+  hazard precisely because of (A): nothing the chain's teardown destroys is a child frame.
+  What resuming early *does* require is decision 5 below — see the correction there.
 
 Revision 1's reason — "a child observing a stop tears down only itself" — says nothing
 about a stop arriving at a sibling that is *already claimed and queued*, which is the
@@ -208,15 +210,30 @@ children's.
 for a fixed argument list, a `std::vector` for a range, with a `void` child occupying its
 position as `std::monostate` so positions stay stable.
 
-Each position carries its child's **value or exception**, which is `detail::result_store`'s
-existing shape, copied out of the child before its frame dies. Reading a position that
-holds an exception rethrows it. Revision 1 said each position was
-`std::expected<T, std::error_code>` *and* that exceptions were stored and rethrown; those
-are different types and `result_store` has no `error_code` channel. The error channel is
-also unnecessary: under decision 2 a cancelled chain never resumes, so **a cancelled
-position is not observable**. Cancellation is not a result here, which is the one place
-this phase diverges from phase 5's `std::expected` convention, and it diverges because
-there is no caller left to hand an error to.
+Awaiting a `when_all` yields `std::expected<Results, std::error_code>`, with
+`std::errc::operation_canceled` when the wait was released rather than satisfied — the
+same satisfied-or-released shape as every phase-5 primitive. Each position inside
+`Results` carries its child's value, copied out of the child before its frame dies; a
+child that threw has its exception rethrown when the results are assembled, which is
+`detail::result_store`'s existing behaviour.
+
+> **Correction (revision 2, same day).** This section first said cancellation was **not**
+> an observable result, on the ground that a cancelled chain never resumes. That is false
+> under decision 2. Keeping the teardown bounded means the combinator's stop callback
+> resumes the awaiting chain rather than waiting for the children — and
+> `cancellation_checked::await_resume` is a **bare delegation** to the inner awaiter
+> (`include/alt/detail/cancellation.hpp:213-216`), so nothing checks the stop at that
+> resumption. The parent's body therefore runs its next statements immediately. Had the
+> result carried no cancellation channel, those statements would have read unfinished
+> slots. The `[[nodiscard]]` comment two lines above that delegation states the same thing
+> for the primitives: for three of the four it "is the only thing standing between a
+> released waiter and a body that proceeds as though the wait had succeeded." `when_all`
+> is a fourth such waiter and takes the same shape.
+
+Revision 1's error was different and also real: it said each position was
+`std::expected<T, std::error_code>` *and* that exceptions were stored and rethrown. Those
+are different types, and `result_store` has no `error_code` channel. The error channel
+belongs on the wait as a whole, not on each position.
 
 **`when_any`** — completes when the first child does, then requests the others' stop and
 resumes the awaiting chain. It yields the **index** of the winner plus that winner's
@@ -261,9 +278,11 @@ concurrently), cancel-the-losers, and the resource-loss documentation.
    own driving requirement, not by preference.
 3. **A bespoke awaiter rather than a `task<T>`**, forced by `cancellation_checked`.
 4. **One stop source for the child set; children inherit `home`.**
-5. **Positions carry value-or-exception, and cancellation is not an observable result** —
-   the one divergence from phase 5's `std::expected` convention, because a cancelled chain
-   never resumes to be handed an error.
+5. **The wait yields `std::expected<Results, std::error_code>`**, reporting
+   `operation_canceled` when released, with each position carrying its child's value and a
+   thrown child's exception rethrown at assembly. Corrected from this revision's own first
+   draft, which claimed cancellation was unobservable; see the correction in the `when_all`
+   section. No divergence from phase 5's convention after all.
 6. **`when_any` yields an index plus the winner's result**, not a variant.
 7. **The loser resource-loss mode is documented rather than fixed.**
 8. **Two stages, `when_all` first.**
