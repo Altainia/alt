@@ -1,0 +1,145 @@
+# task_group
+
+**Header:** `<alt/task_group.hpp>`
+
+The owner's teardown point for [`alt::cancellable_task`](cancellable_task.md)s. A
+group owns the one stop signal every task spawned through it shares, and counts
+the tasks still alive, so that "everything I started is gone" has an answer a
+caller can wait for.
+
+```cpp
+#include <alt/task_group.hpp>
+```
+
+## Interface
+
+```cpp
+class task_group
+{
+public:
+    task_group();
+    ~task_group();
+
+    task_group(const task_group&)            = delete;
+    task_group& operator=(const task_group&) = delete;
+    task_group(task_group&&)                 = delete;
+    task_group& operator=(task_group&&)      = delete;
+
+    cancellation_handle spawn(cancellable_task t, const start_options& options = {});
+
+    bool                             request_stop() noexcept;
+    [[nodiscard]] bool               stop_requested() const noexcept;
+    [[nodiscard]] std::size_t        outstanding() const noexcept;
+    [[nodiscard]] /* join_awaiter */ join() noexcept;   // co_await yields alt::wait_result
+};
+```
+
+- `spawn` starts the task immediately, up to its first suspension point, exactly
+  as `alt::start` does, and returns that task's own handle. Cancelling the handle
+  cancels only that task; `request_stop()` cancels all of them. It is not
+  `[[nodiscard]]`, unlike `alt::start`, because the group is the handle an owner
+  keeps, so dropping the per-task one is the common case.
+- `request_stop()` asks every task to stop, and returns `true` when this call was
+  the one that requested it. A task spawned afterwards stops at its first
+  suspension point.
+- `outstanding()` is how many spawned tasks are still alive: a snapshot, as stale
+  on return as any other.
+- `co_await group.join()` completes when none is outstanding, and does not suspend
+  at all if none is. It yields [`alt::wait_result`](async_event.md#the-result-of-a-wait):
+  a value when the count reached zero, and `std::errc::operation_canceled` when
+  the awaiting chain was cancelled. Any number of coroutines may join at once and
+  all are released together.
+
+Every member but the destructor is safe to call from any thread. The group is
+neither copyable nor movable, since the completion hook inside every task holds
+its address.
+
+## What the group supplies, and what stays yours
+
+Of the four fields of `alt::start_options`, the group owns two. `token` carries
+the group's stop signal and `on_completion` carries the hook that counts a task
+as gone. Passing either of your own is a mistake, and debug builds assert it.
+
+`home` and `on_exception` are yours and pass through untouched, per task.
+
+- To cancel the group from a signal you already have, register a
+  `std::stop_callback` on that signal whose callback calls `group.request_stop()`.
+- To be told when one task finishes, use an `alt::scope_exit` local in the task's
+  body. It runs on both the normal and the cancelled path.
+
+## Teardown is three steps
+
+```cpp
+group.request_stop();
+co_await group.join();
+// now destroy the primitives the tasks used, and the group itself
+```
+
+It is finite, and that is the point of the order. A task parked on a primitive
+that nobody will ever set would make a join wait forever, and destroying the
+primitive first to release it would be destroying something a live task still
+holds. The stop breaks that circle: a parked waiter is released by its **own stop
+callback**, not by the primitive's destruction, so after `request_stop()` every
+task is on its way out without anything having to be destroyed first. The join
+then waits only for the tail of that, which is frames being torn down, possibly on
+a `home` scheduler that is yet to be drained.
+
+### Declare the primitives before the group
+
+```cpp
+alt::async_event loaded;    // first
+alt::task_group  group;     // after, so it is destroyed first
+```
+
+Locals and members are destroyed in reverse order of declaration, so a group
+declared after the primitives its tasks use is destroyed before them. Neither
+sanitizer catches getting this wrong, so it has to be read for.
+
+## From code that is not a coroutine
+
+The owner of a group is often a window or a service, not a coroutine. Use
+`alt::sync_wait` with the loop that the tasks' `home` or resumption targets, so
+that the loop keeps being pumped while the owner waits. That is reentrant on a
+loop, which is the route a modal flow takes, and it **must catch**: `sync_wait`
+rethrows, and a `sync_wait` inside a work item that throws terminates the
+process. See [run_loop](run_loop.md#driving-the-loop-from-inside-a-work-item-means-catching).
+
+```cpp
+void close_window(void* state) noexcept
+{
+    auto* const w = static_cast<window*>(state);
+
+    try
+    {
+        w->group.request_stop();                       // 1. stop every task
+        alt::sync_wait(w->group.join(), *w->loop);     // 2. wait, pumping the loop
+    }
+    catch(const std::exception&)
+    {
+        // log it; a throw here must not leave the work item
+    }
+
+    // 3. destroy the primitives and the group, which happens when w goes
+}
+```
+
+## Joining is required before destruction
+
+The destructor asserts, in debug builds, that nothing is outstanding. It does
+nothing else: it neither stops nor waits. The group does not own the frames,
+which own themselves, so there is nothing for it to destroy, and blocking would
+deadlock whenever a task needs the destroying thread to make progress. Destroying
+a group with live tasks leaves their completion hooks pointing at freed memory.
+
+A cancelled joiner is the one way to reach that assert without having made a
+mistake. If the coroutine that awaits `join()` is itself cancelled, the join
+reports `operation_canceled` and the group is left unjoined with tasks still
+live. The owner's answer is to join without being cancellable, or to stop and join
+from a scope the cancellation does not reach.
+
+## A spawn racing a join may land after it
+
+`join()` completes when the count reaches zero. A `spawn` racing that moment may be
+counted just after it, and the joiner has then been released with a task still
+alive. An owner that is tearing down stops spawning first, and then the question
+has one answer.

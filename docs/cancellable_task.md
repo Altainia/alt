@@ -309,6 +309,10 @@ A caller who wants a per-task notification *inside* the body, while its locals
 are still alive, uses an `alt::scope_exit` local instead. That also runs on both
 paths.
 
+For a set of tasks, [`alt::task_group`](task_group.md) is the teardown point: it
+owns this hook and the stop token, and gives a point at which every task it
+spawned is known gone.
+
 ## Foreign awaitables are checked on entry only
 
 Cancellation is checked in two places. On entry to every suspension point,
