@@ -242,8 +242,10 @@ namespace alt::detail
 		/**
 		 * Unconditionally false, so the block is allocated and the children started in
 		 * await_suspend, which is the only place that has the awaiting handle. A
-		 * when_all with no children therefore costs one allocation and enters a
-		 * suspension point it returns from without parking.
+		 * when_all with no children therefore still allocates -- the block, and
+		 * whatever the stop source the block holds for the children costs, which on
+		 * libstdc++ is a stop state -- and enters a suspension point it returns from
+		 * without parking. alt::when_all lists what allocates.
 		 */
 		// NOLINTNEXTLINE(readability-convert-member-functions-to-static): the compiler calls this through an awaiter instance at every co_await of a when_all; static here would move readability-static-accessed-through-instance to those call sites instead.
 		[[nodiscard]] bool await_ready() const noexcept
@@ -649,8 +651,16 @@ namespace alt
 	 * positions is no better: it compiles, and the second child gets a moved-from
 	 * object. Nothing checks for either.
 	 *
-	 * Awaiting this costs one allocation, including when there are no arguments at all,
-	 * for which the result is an empty tuple rather than a cancellation.
+	 * What awaiting this allocates, written as a list of what allocates rather than a
+	 * total, because a total would be a claim about the standard library's internals:
+	 * the shared block, one make_unique, with the slot tuple inline in it; the stop
+	 * state of the stop source the block holds for the children, which a
+	 * default-constructed std::stop_source allocates on libstdc++ and an
+	 * implementation storing it inline would not; and per child a coroutine frame
+	 * plus that child's own stop state, each child being a cancellable_task root
+	 * whose promise holds a std::stop_source of its own. With no arguments at all
+	 * there are no children, so the block and its stop state are all that is left:
+	 * not free, though the result is then an empty tuple rather than a cancellation.
 	 *
 	 * The children inherit the awaiting chain's home scheduler. The shared block is
 	 * what makes that safe: it is reference counted, held by every child and by the
@@ -684,7 +694,12 @@ namespace alt
 	 * @c V = detail::when_all_value_t<std::ranges::range_value_t<R>>, element @c i holding
 	 * what awaiting element @c i produced, in range order. A void element contributes
 	 * @c std::monostate, so the vector's element type is uniform. An empty range yields an
-	 * empty vector, not a cancellation, at the cost of one allocation.
+	 * empty vector, not a cancellation, and still allocates the shared block and the stop
+	 * state of the block's stop source.
+	 *
+	 * This form allocates what the overload above lists, with a vector of slots in place
+	 * of the inline slot tuple and the result vector the await yields alongside it. Both
+	 * vectors are sized from the range, so an empty range allocates neither.
 	 *
 	 * **Every element is moved into its child, so the child owns it.** A
 	 * @c std::vector<alt::task<int>> therefore yields a @c std::vector<int>: the value

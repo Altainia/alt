@@ -145,14 +145,25 @@ makes that safe. It is reference counted, held by every child and by the awaiter
 freed by whichever party drops the last reference. It also holds the result slots
 of the argument-list form.
 
-What a `when_all` allocates:
+What a `when_all` allocates, as a list of what allocates rather than a total. A
+total would be a claim about the standard library's internals: whether a
+`std::stop_source` allocates at all is up to the implementation, so add up the
+entries for the one you build against.
 
-- **Argument-list form:** one allocation for the shared block, which holds the slot
-  tuple inline, plus one coroutine frame per child. With no arguments the block is
-  still allocated, and nothing else is.
-- **Range form:** the shared block, plus a vector of slots, plus the result vector
-  the await yields, plus one coroutine frame per child. An empty range allocates the
-  block only.
+- **The shared block**, one `make_unique`, on every form. The argument-list form's
+  slot tuple sits inline in it and costs nothing beyond it.
+- **The stop state of the block's `std::stop_source`**, the one the children
+  observe. A default-constructed `std::stop_source` allocates its stop state on
+  libstdc++; an implementation that stored it inline would not.
+- **A vector of slots and the result vector the await yields**, range form only.
+  Both are sized from the range, so an empty range allocates neither.
+- **One coroutine frame per child, and that child's own stop state.** Each child is
+  a `cancellable_task` root, and its promise holds a `std::stop_source` of its own:
+  the block's token is forwarded into it rather than observed directly, so the child's
+  stop state is a second one alongside the block's.
+
+So no form is allocation-free: an empty argument list and an empty range both start
+no children and still allocate the block and the block's stop state.
 
 ## Preconditions
 
