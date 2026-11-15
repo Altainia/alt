@@ -84,7 +84,8 @@ tuple or an empty vector.
 ```cpp
 std::vector<alt::task<int>> jobs = make_jobs();
 
-const auto results = co_await alt::when_all(std::move(jobs));   // std::vector<int>
+const auto results = co_await alt::when_all(std::move(jobs));
+// std::expected<std::vector<int>, std::error_code>
 ```
 
 Every element is **moved into its child**, so the child owns it, and the value is
@@ -125,7 +126,7 @@ Three invariants make that safe:
 The argument is recorded where the hazard lives, in the note on
 [`alt::async_latch`](async_latch.md) in `include/alt/async_latch.hpp`. Nesting one
 `when_all` inside a child is the case that makes the root property observable, and
-it is guarded by `WhenAllTest.ANestedWhenAllInsideAChildIsItsOwnRoot`.
+`tests/test_when_all.cpp` guards it with a nested case.
 
 ### A child's exception
 
@@ -141,21 +142,32 @@ The children inherit the awaiting chain's `home` scheduler
 is destroyed on the thread `home` promises. The children's frames can outlive the
 chain, which may be gone long before `home` is drained, and the shared block is what
 makes that safe. It is reference counted, held by every child and by the awaiter, and
-freed by whichever party drops the last reference. It also holds the result slots.
+freed by whichever party drops the last reference. It also holds the result slots
+of the argument-list form.
 
-One allocation happens per `when_all`, including the zero-child case.
+What a `when_all` allocates:
+
+- **Argument-list form:** one allocation for the shared block, which holds the slot
+  tuple inline, plus one coroutine frame per child. With no arguments the block is
+  still allocated, and nothing else is.
+- **Range form:** the shared block, plus a vector of slots, plus the result vector
+  the await yields, plus one coroutine frame per child. An empty range allocates the
+  block only.
 
 ## Preconditions
 
 - **An awaitable passed as an lvalue, and everything it refers to, must outlive the
   children.** With a `home` scheduler that means outliving its drain, since the
   children's frames stay alive until that scheduler runs their teardown. An rvalue
-  awaitable is moved into its child's frame, which owns it, and carries no such
-  requirement. Copying would not make the lvalue case safe, because `alt::task` is
-  not copyable.
+  awaitable is moved into its child's frame, which owns the *object*; what the
+  object refers to is not owned, and still has to outlive the children. In the
+  opening example `c` must outlive them, and a lambda that captures by reference
+  loses its referent if the referent does not. Copying would not make the lvalue
+  case safe, because `alt::task` is not copyable.
 - **Passing the same awaitable object twice is a precondition violation.** Two
   children would await one object concurrently, which no awaitable in the library
-  supports. Nothing checks for it.
+  supports. Nothing checks for it. Moving one named awaitable into two positions
+  is no better: it compiles, and the second child gets a moved-from object.
 
 ## Hazards
 

@@ -349,7 +349,9 @@ namespace alt::detail
 			// the fan-out, so no joiner exists for an early zero to resume, and
 			// join_awaiter::ready() is re-read under the list's mutex, so an early zero
 			// only refuses the link. Moving this above the loop fails nothing -- 0/200
-			// debug, 0/200 TSan, 0 across the suite -- while deleting it fails 20/20. See
+			// debug and 0/200 TSan against the one fan-out test, and 0 across the whole
+			// WhenAllTest suite at 20 repeats in debug and 10 under AddressSanitizer --
+			// while deleting it fails 20/20. See
 			// the combinator_state constructor for why the count stays anyway.
 			m_state->shared().counter().complete();
 
@@ -625,14 +627,16 @@ namespace alt
 	 * lvalue, and everything it refers to, must outlive the children** -- which with an
 	 * alt::start_options::home scheduler means outliving its drain, since the children's
 	 * frames stay alive until that scheduler runs their teardown. An awaitable passed as
-	 * an rvalue carries no such requirement: it is moved into its child's frame, which
-	 * owns it. The lvalue case is not made safe by copying, because alt::task is not
-	 * copyable, which is the point of the distinction.
+	 * an rvalue is moved into its child's frame, which owns the object -- but not what
+	 * the object refers to, which must still outlive the children. The lvalue case
+	 * is not made safe by copying, because alt::task is not copyable, which is the
+	 * point of the distinction.
 	 *
 	 * **Passing the same awaitable object twice is a precondition violation.** Two
 	 * children would then await one object concurrently, which no awaitable in the
-	 * library supports; an rvalue awaitable cannot be passed twice at all, so this
-	 * concerns lvalues. Nothing checks for it.
+	 * library supports, which needs lvalues. Moving one named awaitable into two
+	 * positions is no better: it compiles, and the second child gets a moved-from
+	 * object. Nothing checks for either.
 	 *
 	 * Awaiting this costs one allocation, including when there are no arguments at all,
 	 * for which the result is an empty tuple rather than a cancellation.

@@ -63,9 +63,12 @@ namespace alt
 	 * looks like: every waiter is leaving.
 	 *
 	 * That first rule is why count_down() can resume its waiters from one multi-node
-	 * chain (detach_all) instead of one detach_one at a time. alt::when_all exists
-	 * (see include/alt/when_all.hpp), and it does not create the sibling hazard, because
-	 * no combinator ever owns or destroys a child frame: the children are self-owning
+	 * chain (detach_all) instead of one detach_one at a time. An ordinary awaiting
+	 * chain cannot create the sibling hazard, because a task is lazy and owns only the
+	 * child it awaits, and a task_group's tasks are self-owning roots it never destroys.
+	 * alt::when_all (see include/alt/when_all.hpp) adds a combinator to that picture and
+	 * does not create the hazard either, because no combinator ever owns or destroys a
+	 * child frame: the children are self-owning
 	 * alt::cancellable_task roots and the combinator only requests stops. And a waiter
 	 * whose node a satisfier already won loses the compare-and-swap in
 	 * waiter_list::claim, so its waiter_stop_release resumes and frees nothing; the only
