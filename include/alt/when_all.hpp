@@ -377,7 +377,7 @@ namespace alt::detail
 			// assertions. Its first revision raced a releasing thread against the rethrow
 			// and failed only 8/200 and 4/200 of the same mutation, on its
 			// sibling-finished assertion, which is why it is single-threaded now. 15 of the
-			// 35 WhenAllTest tests abort under the same mutation, each run alone; the
+			// 34 WhenAllTest tests abort under the same mutation, each run alone; the
 			// per-test list is in the task 6 fix report.
 			m_join.emplace(m_state->shared().counter());
 			return m_join->await_suspend(h);
