@@ -13,7 +13,13 @@ function(alt_add_coverage target)
         )
     endif()
 
-    target_compile_options(${target} PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+    # -fprofile-update=atomic makes gcov's counters atomic. Without it the counters
+    # are plain increments, so the library's concurrent tests race on them: the
+    # coverage build reported a NEGATIVE hit count for libstdc++'s pthread glue,
+    # which lcov treats as fatal. The same race can silently corrupt counts for
+    # this project's own files, where nothing would flag it, and the coverage job
+    # exists to measure the concurrent components honestly.
+    target_compile_options(${target} PRIVATE --coverage -fprofile-arcs -ftest-coverage -fprofile-update=atomic)
     target_link_options(${target} PRIVATE --coverage)
 endfunction()
 
