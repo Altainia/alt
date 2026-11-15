@@ -8,7 +8,6 @@
 #include <exception>
 #include <expected>
 #include <functional>
-#include <memory>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -323,8 +322,20 @@ namespace alt
 		 */
 		std::atomic<bool> m_set{false};
 
+		/**
+		 * Exists only for the await-twice precondition asserted in operator co_await.
+		 * Atomic because two threads may await. Unconditional rather than wrapped in
+		 * #ifndef NDEBUG because a data member of a header-only template that exists in
+		 * some translation units and not others makes the class layout differ between
+		 * them, an ODR violation, in a library that ships headers and a .deb. One
+		 * uncontended atomic exchange per await is the price of avoiding that.
+		 */
 		std::atomic<bool> m_awaited{false};
 
+		// Declared before m_waiters so the store outlives the list's own destructor
+		// walk. Deliberate but not load-bearing: a waiter that walk releases yields the
+		// released error and reads no store, so nothing depends on this order today.
+		// Recorded so that nobody re-derives it, or "fixes" it, on a hunch.
 		detail::result_store<T> m_result;
 
 		detail::waiter_list m_waiters;

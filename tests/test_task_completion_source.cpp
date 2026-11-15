@@ -420,18 +420,26 @@ TEST_F(TaskCompletionSourceTest, ASetValueLandingAsTheWaiterLinksIsNeverLost)
 	// The source is read before it leaves scope because its destructor would release
 	// a lost waiter, unsatisfied, and hide the defect from the satisfied check.
 	//
-	// Measured, and the measurement is a zero. With the single critical section
-	// replaced by a fill followed by a separate detach (fill the store and set the
-	// flag, release the lock, take it again to detach), this test failed in 0 of
-	// 200 runs of itself, which is 0 of 20000 repeats. That is not a defect in the
-	// mutation so much as a fact about it: filling *before* detaching leaves no
-	// window a waiter can fall into, because the link's condition reads the flag the
-	// fill sets, so a waiter either links ahead of the fill and is found by the
-	// detach, or links behind it and sees the source already set. The ordering that
-	// loses a waiter is detach-then-fill, which was not tried. What this test does
-	// cover is the ThreadSanitizer run over a set_value that really is concurrent
-	// with a waiter arriving, which no deterministic test can give, and the
-	// satisfied-with-the-value check on every path through the window.
+	// Measured, twice. The first mutation tried, a fill followed by a separate detach,
+	// is not a defect at all: filling *before* detaching leaves no window a waiter can
+	// fall into, because the link's condition reads the flag the fill sets, so a
+	// waiter either links ahead of the fill and is found by the detach, or links
+	// behind it and sees the source set. It failed in 0 of 200 runs of this test
+	// (0 of 20000 repeats), as it should.
+	//
+	// The mutation that is a defect is the reverse order: detach first, then fill and
+	// set the flag, outside the one critical section. Then a waiter can link in the
+	// gap, after the detach found nobody and before the flag is set, and park on a
+	// source that is about to be set with nothing left to wake it. That failed in 5 of
+	// 100 runs under debug-tsan and 33 of 200 under debug, each run ending at its
+	// first failing repeat (the test asserts, so one run reports one repeat): every
+	// failure was record.resumptions == 0, the lost waiter, and none was anything
+	// else. At 100 repeats per run that is a per-repeat rate of roughly 0.2 percent
+	// at the lowest, which agrees with the parked path being the rare one below.
+	// One machine, one compiler, one sample; a detector built on a race is never
+	// certain. It also measures how much weight this test carries: it catches the
+	// real defect only about one run in six, and ThreadSanitizer plus the
+	// satisfied-with-the-value check on every path are what it adds besides.
 	//
 	// Which paths it reaches, instrumented for one session and then removed: in 300
 	// repeats the waiter had not yet seen the source set when it came to await it

@@ -55,6 +55,8 @@ namespace alt
         task_completion_source(task_completion_source&&)                 = delete;
         task_completion_source& operator=(task_completion_source&&)      = delete;
 
+        // Shown simplified: the real overloads are constrained, so exactly one
+        // is viable for a given T, and U is never named by the caller.
         template<typename U> void set_value(U&& value);   // T a value type
         void set_value();                                 // T = void
         void set_value(T& value);                         // T = U&
