@@ -17,6 +17,20 @@ rather than building beside it.
 > cancellation approach this revision adopts, on two reasons that do not hold. The
 > sections below are the corrected design.
 
+> **Revision note (stage B, `task_completion_source`).** Two things this document
+> says about `task_completion_source<T>` were not built, both on the plan's
+> reasoning. (1) The awaited value is **not** moved into the waiter's node at claim
+> time. `detail::waiter_node` has no typed slot, and adding a type-erased one would
+> change stage A's shipped mechanism to close a hazard that cannot occur: resumption
+> is synchronous inside the setter and `await_resume` runs before the resumed body
+> continues, so the source is alive at every read, and the other two ways out of a
+> wait (the stop callback and the destructor) report released and read nothing. The
+> value stays in the source's `result_store<T>`, which relies on the family's
+> existing rule that a primitive outlives its own resumption walk. (2) `T&` does
+> **not** follow `result_store`'s shape in the awaited result:
+> `std::expected<T&, E>` is ill-formed, so a reference source yields
+> `std::expected<std::reference_wrapper<T>, std::error_code>`.
+
 ## Intent
 
 Phase 5 is the phase a framework actually reaches for. Phases 1-3 built the

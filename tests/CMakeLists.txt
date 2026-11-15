@@ -53,6 +53,7 @@ add_executable(alt_tests
     test_async_latch.cpp
     test_async_semaphore.cpp
     test_async_mutex.cpp
+    test_task_completion_source.cpp
     test_run_loop.cpp
     test_thread_pool.cpp
     test_cancellation.cpp
