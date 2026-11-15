@@ -55,6 +55,9 @@ namespace
 
 		/** The error a released join reported. */
 		std::error_code error;
+
+		/** The thread the statement after the co_await ran on. */
+		std::thread::id resumed_on;
 	};
 
 	/** A task that parks on a gate nobody need set, and records that it started. */
@@ -101,7 +104,8 @@ namespace
 		const frame_tracker    tracker{tag};
 		const alt::wait_result result = co_await group.join();
 		++record.resumptions;
-		record.satisfied = result.has_value();
+		record.resumed_on = std::this_thread::get_id();
+		record.satisfied  = result.has_value();
 
 		if(!result)
 		{
@@ -114,7 +118,7 @@ namespace
 	 * immediate task, released together by a rendezvous so the two reach the group's
 	 * counter within nanoseconds of each other. Returns once both threads are done.
 	 */
-	void release_and_spawn_together(alt::task_group& group, alt::async_event& gate, std::atomic<std::size_t>& observed)
+	void release_and_spawn_together(alt::task_group& group, alt::async_event& gate, std::atomic<std::size_t>& observed, std::thread::id& spawner_id)
 	{
 		std::atomic<std::size_t> arrived{0};
 
@@ -124,18 +128,29 @@ namespace
 		}};
 
 		std::jthread spawner{[&] {
+			spawner_id = std::this_thread::get_id();
 			rendezvous(arrived, 2);
 			group.spawn(observing_root(group, observed));
 		}};
 	}
 
+	/** What one repeat of the race showed. */
+	struct race_outcome
+	{
+		/** The spawn's raise was seen to precede the other task's retire. A lower bound. */
+		bool raise_first = false;
+
+		/** The joiner was released from inside spawn, on the spawning thread. */
+		bool released_inside_spawn = false;
+	};
+
 	/**
-	 * One repeat of the race. Returns true when the spawn's raise landed before the
-	 * other task's retire, judged by the count the spawned body saw from inside spawn.
-	 * reset_coroutine_test_state() is called per repeat because this asserts
-	 * live_frames, which the fixture zeroes only once.
+	 * One repeat of the race, with a joiner parked on the first task so a release
+	 * that lands inside spawn really happens. The joiner must be released exactly
+	 * once whichever order the two land in. reset_coroutine_test_state() is called
+	 * per repeat because this asserts live_frames, which the fixture zeroes only once.
 	 */
-	bool race_once(int repeat)
+	race_outcome race_once(int repeat)
 	{
 		reset_coroutine_test_state();
 
@@ -143,16 +158,21 @@ namespace
 		alt::task_group          group;
 		int                      started = 0;
 		std::atomic<std::size_t> observed{0};
+		std::thread::id          spawner_id;
+		wait_record              record;
 
 		group.spawn(parked_root(gate, started, 1));
+		const auto handle = alt::start(joining_root(group, record, 2));
 		EXPECT_EQ(group.outstanding(), 1U) << "repeat " << repeat;
 
-		release_and_spawn_together(group, gate, observed);
+		release_and_spawn_together(group, gate, observed, spawner_id);
 
 		EXPECT_EQ(group.outstanding(), 0U) << "repeat " << repeat;
 		EXPECT_EQ(live_frames, 0) << "repeat " << repeat;
+		EXPECT_EQ(record.resumptions, 1) << "repeat " << repeat;
+		EXPECT_TRUE(record.satisfied) << "repeat " << repeat;
 
-		return observed.load(std::memory_order_acquire) == 2U;
+		return {.raise_first = observed.load(std::memory_order_acquire) == 2U, .released_inside_spawn = record.resumed_on == spawner_id};
 	}
 
 	/** Counts the exceptions the group let reach the caller's own handler. */
@@ -304,12 +324,27 @@ TEST_F(TaskGroupTest, StopThenJoinIsTheTeardownSequence)
 	EXPECT_EQ(record.resumptions, 0); // stopped, but the frames are posted, not gone
 	EXPECT_EQ(group.outstanding(), 2U);
 
-	EXPECT_EQ(home.drain(), 2U);
+	// Mutation-checked in a debug build. Moving spawn's add() after start: 0 of 3
+	// runs failed, since a task that parks inside start is counted at the same value
+	// whichever side of it the add falls, so this test does not cover that mutation.
+	// Making complete() release on every completion, which is the ordering this test
+	// is for: 3 of 3 runs passed with the drain taken as a whole, and 3 of 3 failed
+	// once the frames were run one at a time, as below. The first version of this test
+	// guarded nothing against that mutation.
+	//
+	// One frame at a time, so the join is seen to wait for the last of them and not
+	// merely for the drain as a whole.
+	EXPECT_TRUE(home.run_one());
+	EXPECT_EQ(group.outstanding(), 1U);
+	EXPECT_EQ(record.resumptions, 0);
+
+	EXPECT_TRUE(home.run_one());
 
 	EXPECT_EQ(record.resumptions, 1);
 	EXPECT_TRUE(record.satisfied);
 	EXPECT_EQ(group.outstanding(), 0U);
 	EXPECT_EQ(live_frames, 0);
+	EXPECT_EQ(home.drain(), 0U);
 }
 
 TEST_F(TaskGroupTest, ATaskParkedOnAPrimitiveIsReleasedByRequestStopAndJoinCompletes)
@@ -391,6 +426,13 @@ TEST_F(TaskGroupTest, SpawnAfterAJoinHasBegunIsCounted)
 	// but cannot reach: a joiner parked with one task outstanding, then a further
 	// spawn, then both completing. The joiner must stay parked across the second
 	// spawn and across the first completion, and be released only by the last.
+	//
+	// Mutation-checked in a debug build. Moving spawn's add() after start: 0 of 3 runs
+	// failed, for the reason given in StopThenJoinIsTheTeardownSequence: both spawns
+	// park inside start. Making complete() release on every completion: this test
+	// failed (1 run), as did JoinCompletesWhenTheLastTaskFinishes and
+	// ATaskCompletingSynchronouslyInsideSpawnLeavesTheCountCorrect, which is the
+	// ordering it exists for.
 	alt::async_event first_gate;
 	alt::async_event second_gate;
 	alt::task_group  group;
@@ -462,13 +504,13 @@ TEST_F(TaskGroupTest, ATaskCompletingSynchronouslyInsideSpawnLeavesTheCountCorre
 	// the frame and fires the completion hook there. So the count must be raised
 	// before start, or the hook would retire something never counted.
 	//
-	// What this cannot test is a joiner released from inside spawn, and that is
-	// structurally unreachable rather than merely untested: spawn raises the count
-	// to at least one before starting, and a synchronous completion returns it to
-	// exactly its value before the spawn. A joiner can only be parked if that value
-	// was already at least one, so the count after the completion is at least one
-	// too and no release occurs. What can be pinned is the half that is reachable: a
-	// joiner parked on an earlier task is not released by it.
+	// A joiner released from inside spawn is not reachable from this single-threaded
+	// test, where a synchronous completion returns the count to its value before the
+	// spawn and so never reaches zero with a joiner parked. It is reachable with
+	// another thread retiring concurrently, and
+	// ASpawnRacingACompletionNeverUndercountsOrOvercounts exercises that. What this
+	// test pins is the single-threaded half: a joiner parked on an earlier task is
+	// not released by the immediate one.
 	//
 	// Measured by moving the add() to after the start call in spawn. This test then
 	// failed in 100 of 100 runs of itself: the immediate task's retire took the count
@@ -536,28 +578,50 @@ TEST_F(TaskGroupTest, ASpawnRacingACompletionNeverUndercountsOrOvercounts)
 	// count must settle at zero whichever lands first; an undercount would trip
 	// complete()'s assert, and an overcount would leave this non-zero.
 	//
-	// Which interleaving was reached is recorded rather than assumed: the spawned
-	// body reads the count from inside spawn, and sees 2 when the spawn's raise
-	// landed before the other task's retire, 1 when after. The tally is asserted only
-	// to be a full accounting, because how it splits is the scheduler's business.
-	// Measured over five runs of the 100 repeats below, the raise landing first gave
-	// 69, 97, 61, 81 and 43 against 31, 3, 39, 19 and 57 for the retire landing
-	// first, so both orders are reached, though one run came within 3 of reaching only
-	// one.
+	// A joiner is parked on the first task, so the release from inside spawn is
+	// actually reached: with one task live and the joiner parked, spawn raises the
+	// count, the completer retires the live task, and the immediate task's retire then
+	// takes it to zero on the spawning thread. That is why spawn's start call must be
+	// its last statement. Every repeat asserts the joiner was released exactly once.
 	//
-	// Measured against the mutation as well, with the add() moved to after the start
-	// call: 100 of 100 runs of this test aborted, each on complete()'s assertion that
-	// something is outstanding, reached when the other task's retire landed first and
-	// the immediate task retired a count that had not been raised. The assert is what
-	// catches it, so under NDEBUG this test would see an undercount only through the
-	// final count. Which repeat first aborted was not recorded.
-	int spawn_first  = 0;
-	int retire_first = 0;
+	// Which interleaving was reached is recorded rather than assumed. The spawned
+	// body reads the count from inside spawn. Seeing 2 proves the raise preceded the
+	// retire; seeing 1 does not prove the opposite, since the retire may also have
+	// landed between the raise and the read. The raise_first tally is therefore a
+	// lower bound on how often the spawn won. Over six runs of the 100 repeats it was
+	// 43, 40, 49, 17, 37 and 65. That both orders occur is shown by the mutation
+	// below, not by this tally. The joiner was released on the spawning thread, that
+	// is from inside spawn, in 99, 99, 85, 96, 93 and 94 repeats of those same runs.
+	//
+	// Measured against the mutation, with the add() moved to after the start call, in
+	// a debug build and before the joiner was added: 100 of 100 runs of this test
+	// aborted, each on complete()'s assert that something is outstanding. That
+	// requires at least one repeat per run in which the other task's retire landed
+	// before the spawn's raise, so the retire-first order is reached. Which repeat
+	// first aborted was not recorded.
+	//
+	// Under NDEBUG the same mutation was measured too, since the assert is what
+	// caught it above. Without the joiner this test failed 0 of 100 runs: complete()
+	// is an unconditional fetch_sub, so the count wraps to the maximum and the
+	// mutation's trailing add() brings it back to zero, and the final count and
+	// live_frames both come out right. It was therefore blind to the mutation without
+	// the assert. With the joiner it failed 4 of 100 runs (live_frames came out 1; the
+	// cause was not investigated), so it is only weakly sensitive. The test that
+	// detects the mutation independently of the assert is
+	// ATaskCompletingSynchronouslyInsideSpawnLeavesTheCountCorrect, which failed 100 of
+	// 100 runs under NDEBUG through record.resumptions.
+	int raise_first           = 0;
+	int released_inside_spawn = 0;
 
 	for(int repeat = 0; repeat < race_repeats; ++repeat)
 	{
-		(race_once(repeat) ? spawn_first : retire_first) += 1;
+		const race_outcome outcome = race_once(repeat);
+		raise_first += outcome.raise_first ? 1 : 0;
+		released_inside_spawn += outcome.released_inside_spawn ? 1 : 0;
 	}
 
-	EXPECT_EQ(spawn_first + retire_first, race_repeats);
+	// What this test proves is the per-repeat expectations in race_once. The tallies
+	// are deliberately not asserted: recorded in the run's XML output, nothing more.
+	RecordProperty("raise_first", raise_first);
+	RecordProperty("released_inside_spawn", released_inside_spawn);
 }

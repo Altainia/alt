@@ -35,10 +35,20 @@ namespace alt
 		// joiner's body may destroy this group. This is the rule alt::async_event::set
 		// carries for resume_claimed, in the same form.
 		//
-		// A release inside spawn itself is unreachable, which saves chasing it: the
-		// count is at least one once raised, and a synchronous completion returns it to
-		// exactly its value before the spawn. A joiner can only be parked if that value
-		// was already at least one, so no zero is reached here.
+		// A release inside spawn IS reachable, which is why the last-statement rule
+		// above is live and not belt-and-braces. Uncontended, no spawn reaches zero:
+		// the count is at least one once raised, and a synchronous completion returns
+		// it to its value before the spawn. But with one task live and a joiner parked,
+		// the spawn raises 1 to 2, another thread retires the live task, 2 to 1, and
+		// the immediate task's hook then retires 1 to 0 inside start, releasing the
+		// joiner on this thread, whose body may destroy this group. Do not append a
+		// statement after start. See ASpawnRacingACompletionNeverUndercountsOrOvercounts.
+		//
+		// No rollback of the count if start throws. start is not noexcept, but a throw
+		// from it is not expected in practice: an escaped body exception goes to
+		// on_exception, not out of start. If one did occur the count would leak and the
+		// group could never be joined, and a rollback would be the one path in this
+		// function that nothing can exercise, so none is written.
 		m_counter.add();
 		return start(std::move(t), owned);
 	}

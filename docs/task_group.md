@@ -50,8 +50,10 @@ public:
   the awaiting chain was cancelled. Any number of coroutines may join at once and
   all are released together.
 
-Every member but the destructor is safe to call from any thread. The group is
-neither copyable nor movable, since the completion hook inside every task holds
+`spawn` racing a task's completion on another thread is tested, under
+ThreadSanitizer. The other members' thread safety is not separately tested: it
+follows from `std::stop_source` and from the counter's own contract, and only the
+destructor is excluded from it. The group is neither copyable nor movable, since the completion hook inside every task holds
 its address.
 
 ## What the group supplies, and what stays yours
@@ -92,8 +94,20 @@ alt::task_group  group;     // after, so it is destroyed first
 ```
 
 Locals and members are destroyed in reverse order of declaration, so a group
-declared after the primitives its tasks use is destroyed before them. Neither
-sanitizer catches getting this wrong, so it has to be read for.
+declared after the primitives its tasks use is destroyed before them, while those
+primitives still exist. By inspection, that makes the destructor's debug assert
+the signal for an unjoined group at a point where nothing it would report on has
+been destroyed yet.
+
+Nothing enforces the order at compile time, and the sanitizers were measured not
+to tell the two orders apart. In a scratch program with a `home` scheduler that is
+drained after the scope ends, so a task is still live when the group is destroyed,
+both orders behaved identically: a debug build aborted on the destructor's assert
+(under ASan+UBSan and under TSan); with `NDEBUG` AddressSanitizer reported
+`stack-use-after-scope` in `completion_counter::complete()` for both orders, and
+ThreadSanitizer reported nothing for either. What those catch is the group
+destroyed unjoined, not the declaration order, so the order has to be read for,
+and the destructor's assert is the only mechanical signal.
 
 ## From code that is not a coroutine
 
@@ -105,6 +119,9 @@ rethrows, and a `sync_wait` inside a work item that throws terminates the
 process. See [run_loop](run_loop.md#driving-the-loop-from-inside-a-work-item-means-catching).
 
 ```cpp
+// struct window { alt::async_event loaded; alt::task_group group; ... };
+//                 ^ the primitives its tasks use come first; the group is declared after
+
 void close_window(void* state) noexcept
 {
     auto* const w = static_cast<window*>(state);
