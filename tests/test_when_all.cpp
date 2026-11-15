@@ -91,6 +91,15 @@ namespace
 		co_return 0;
 	}
 
+	/** A task that parks on @p source, then raises @p done and yields 7: a sibling that must outlive another's throw. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both objects are owned by the calling test, which joins the thread feeding the source before leaving its scope.
+	alt::task<int> make_finishing_task(alt::task_completion_source<int>& source, std::atomic<bool>& done)
+	{
+		[[maybe_unused]] const auto result = co_await source;
+		done.store(true, std::memory_order_release);
+		co_return 7;
+	}
+
 	/** A tracked task that parks on @p gate and hands back how its wait ended. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
 	alt::task<alt::wait_result> tracked_wait(alt::async_event& gate, int tag)
@@ -508,6 +517,40 @@ TEST_F(WhenAllTest, TwoThrowingChildrenRethrowTheLowestPositionNotTheFirstToThro
 	}
 
 	EXPECT_EQ(caught, "position 0");
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(WhenAllTest, ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows)
+{
+	alt::task_completion_source<int> source;
+	std::atomic<bool>                thrown{false};
+	std::atomic<bool>                sibling_finished{false};
+
+	// Position 0 throws at once. Only after that does this thread let position 1 go, so
+	// the sibling's completion is strictly after the throw and observable on its own flag.
+	std::jthread releaser{[&] {
+		while(!thrown.load(std::memory_order_acquire))
+		{
+			std::this_thread::yield();
+		}
+
+		source.set_value(1);
+	}};
+
+	std::string caught;
+
+	try
+	{
+		[[maybe_unused]] const auto results = alt::sync_wait(alt::when_all(make_signalling_throwing_task("position 0", thrown), make_finishing_task(source, sibling_finished)));
+		ADD_FAILURE() << "the throwing child's exception did not reach the await";
+	}
+	catch(const std::runtime_error& error)
+	{
+		caught = error.what();
+	}
+
+	EXPECT_EQ(caught, "position 0");
+	EXPECT_TRUE(sibling_finished.load(std::memory_order_acquire));
 	EXPECT_EQ(live_frames, 0);
 }
 
