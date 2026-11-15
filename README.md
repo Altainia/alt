@@ -168,7 +168,7 @@ Then include headers as needed:
 | `<alt/run_loop.hpp>` | Serial executor for an owned thread or a platform loop: `run_loop`, `run_loop_options` | [docs/run_loop.md](docs/run_loop.md) |
 | `<alt/thread_pool.hpp>` | Fixed-size thread pool built by a factory returning `std::expected`: `thread_pool` | [docs/thread_pool.md](docs/thread_pool.md) |
 | `<alt/sync_wait.hpp>` | Blocking and driving entry points for running an awaitable to completion: `sync_wait` | [docs/sync_wait.md](docs/sync_wait.md) |
-| `<alt/cancellable_task.hpp>` | Self-owning, cancellable root coroutine: `cancellable_task`, `cancellation_handle`, `start`, `cancellation_point` | [docs/cancellable_task.md](docs/cancellable_task.md) |
+| `<alt/cancellable_task.hpp>` | Self-owning, cancellable root coroutine: `cancellable_task`, `cancellation_handle`, `completion_handler`, `start`, `cancellation_point` | [docs/cancellable_task.md](docs/cancellable_task.md) |
 | `<alt/async_event.hpp>` | Manual-reset signal coroutines await: `async_event`, `wait_result` | [docs/async_event.md](docs/async_event.md) |
 | `<alt/async_latch.hpp>` | Single-use countdown coroutines await: `async_latch`, `wait_result` | [docs/async_latch.md](docs/async_latch.md) |
 | `<alt/async_semaphore.hpp>` | Counting semaphore coroutines await: `async_semaphore`, `wait_result` | [docs/async_semaphore.md](docs/async_semaphore.md) |

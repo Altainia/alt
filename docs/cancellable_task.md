@@ -139,6 +139,12 @@ struct exception_handler
     void* state                                           = nullptr;
 };
 
+struct completion_handler
+{
+    void (*invoke)(void* state) noexcept = nullptr;
+    void* state                          = nullptr;
+};
+
 class cancellation_handle
 {
 public:
@@ -156,6 +162,7 @@ struct start_options
     std::stop_token   token{};
     scheduler_ref     home{};
     exception_handler on_exception{};
+    completion_handler on_completion{};
 };
 
 class [[nodiscard]] cancellable_task
@@ -277,6 +284,30 @@ A home scheduler that is supplied but never pumped, or one destroyed while
 this teardown work is still queued, leaks the entire chain silently: nothing
 about the deferred path ever raises an error for it, it simply never
 destroys the frames.
+
+## An owner can be told when the task is gone
+
+Set `on_completion` in `start_options` and the task calls it once, as its frame
+is destroyed:
+
+```cpp
+alt::start(job(), {.on_completion = {.invoke = &task_gone, .state = &owner}});
+```
+
+The frame's destruction is the only point that normal completion and cancelled
+teardown both pass through, so the hook fires on either path, on whichever thread
+destroyed the frame. It runs after the body's locals have been destroyed, with
+only the frame storage left. It never fires for a task that was never started.
+
+The hook must not throw. The function pointer is `noexcept` in its type for that
+reason, since it runs from a destructor. It must also not touch the task: the
+frame is already being torn down. A request to stop through a copy of the
+`cancellation_handle` is safe, because the stop state is reference counted and
+outlives the frame.
+
+A caller who wants a per-task notification *inside* the body, while its locals
+are still alive, uses an `alt::scope_exit` local instead. That also runs on both
+paths.
 
 ## Foreign awaitables are checked on entry only
 
