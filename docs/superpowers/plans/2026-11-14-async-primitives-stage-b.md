@@ -117,7 +117,11 @@ namespace alt::detail {
 
 Declare `completion_notifier m_completion{};` as the **first** member of `cancellable_task_promise`, so reverse-order destruction destroys it **last**, and set it in `configure` from `options.on_completion`.
 
-The existing comment at the member block says these members carry no declaration-order requirement. That stops being true here, so replace it with a `DELICATE` block stating the new one: the hook fires from `m_completion`'s destructor, and it may resume a coroutine that requests a stop reaching this very frame's `m_external`. Firing last means `m_external` and `m_source` are already destroyed, so no such request can reach anything in this frame. Declaring `m_completion` anywhere else fires the hook while a `std::stop_callback` over a half-destroyed promise is still registered.
+The existing comment at the member block says these members carry no declaration-order requirement. That stops being true here, so replace it with a block stating the new one — and state it correctly, because the obvious version of this argument is wrong.
+
+**Superseded (2026-11-14, task 1 review).** This step first read: "Declaring `m_completion` anywhere else fires the hook while a `std::stop_callback` over a half-destroyed promise is still registered." That is backwards. Members are destroyed in reverse declaration order, so declaring `m_completion` **last** destroys it **first**, and the hook then fires with every other member still fully constructed — there is no half-destroyed promise in that order at all, and `stop_forwarder` holds a reference-counted *copy* of the source rather than a pointer into the promise, as its own Doxygen says. The replacement argument is narrower and true: destroying `m_external` **deregisters** the stop callback from the external token, and `std::stop_callback`'s destructor blocks until a concurrently running invocation returns, so firing the hook last guarantees that no stop request arriving during the hook — from any thread — can route into this frame. That is defense in depth, not a fix for a reachable fault, and the step 6 measurement agrees: no order fails a test.
+
+The block therefore does **not** carry a `DELICATE` header. This project reserves that for orderings that are load-bearing, and a `DELICATE` marker over a hazard a maintainer can disprove from the lines below it is worse than none. State it as a deliberate choice, give the deregistration reason, and say plainly that no fault was measured in either order.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
