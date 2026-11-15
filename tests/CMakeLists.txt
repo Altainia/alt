@@ -63,6 +63,7 @@ add_executable(alt_tests
     test_sync_wait.cpp
     test_cancellable_task.cpp
     test_scheduler_integration.cpp
+    test_combinator_results.cpp
 )
 
 target_link_libraries(alt_tests
