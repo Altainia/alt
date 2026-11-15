@@ -368,6 +368,15 @@ namespace alt::detail
 			// reached zero refuses the link and this returns false. Nothing may be read
 			// from *this after the call: a successful link publishes the node, and any
 			// party may then resume this frame and destroy it.
+			// That this parks until the LAST child retires, and does not return false
+			// once the first exception is in a slot, is what lets a successful sibling
+			// finish before the rethrow. Measured by replacing the park with
+			// `return false`: WhenAllTest.ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows
+			// fails 8/200 in one debug run and 4/200 in a second, every failure on its
+			// sibling-finished assertion, 0 hangs. That is a weak guard, not a strong
+			// one: it passes in over 90% of runs with the park removed, so a green run of
+			// it alone says little. The same mutation aborts every run of
+			// the whole WhenAllTest suite (20/20), so other tests are the stronger guard.
 			m_join.emplace(m_state->shared().counter());
 			return m_join->await_suspend(h);
 		}
