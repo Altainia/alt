@@ -1431,6 +1431,207 @@ namespace
 		EXPECT_TRUE(slot_read_is_the_value) << "repeat " << repeat << ": a satisfied verdict read the satisfier's value from slot 0; satisfied=" << ran.parent.satisfied << " values_seen=" << ran.values_seen;
 		EXPECT_TRUE(verdict_carries_a_reason) << "repeat " << repeat << ": a released verdict reported operation_canceled; satisfied=" << ran.parent.satisfied << " error=" << ran.parent.error.message();
 	}
+
+	/** How many times the teardown-against-stop handshake repeats. */
+	constexpr int teardown_race_repeats = 50;
+
+	/** The value the tripwire child produces, read back by the chain out of its slot. */
+	constexpr int tripwire_tag = 71;
+
+	/**
+	 * How many moves from the child's own result the copy inside the shared block is.
+	 *
+	 * Several objects carry one child's value, and only one of them lives in the block:
+	 * when_all_child materializes the child's result as a temporary and
+	 * result_store::set_value move-constructs the slot's copy from it, so the slot's is
+	 * the first move-target. Everything further along -- what
+	 * assemble_combinator_results builds, and what the std::expected around it holds --
+	 * is a later one, which is why this counts moves rather than destructions: the
+	 * number of moves downstream of the slot is the compiler's business and was in fact
+	 * one higher than first assumed, while the step into the slot is a reference
+	 * binding followed by one variant emplacement either way.
+	 */
+	constexpr int tripwire_block_hops = 1;
+
+	/** Spins until @p flag is set, yielding only as a backstop. See rendezvous. */
+	void spin_until(const std::atomic<bool>& flag)
+	{
+		for(int spins = 0; !flag.load(std::memory_order_acquire);)
+		{
+			if(spins < spin_limit)
+			{
+				++spins;
+			}
+			else
+			{
+				std::this_thread::yield();
+			}
+		}
+	}
+
+	/**
+	 * @brief A child's result value whose destruction opens the window C1 lives in.
+	 *
+	 * A child's value is stored in a result slot inside the shared block.
+	 * when_all_awaiter::await_resume moves it out into the result the chain reads and
+	 * leaves the moved-from object in the slot, where ~when_all_state destroys it --
+	 * and ~when_all_state runs from the release() inside ~when_all_awaiter. Destroying
+	 * the slot's copy is therefore the last instant inside the block's teardown that a
+	 * test can reach, which makes it the narrowest rendezvous available for a stop that
+	 * has to land after the block is freed and before the joiner's stop callback is
+	 * destroyed.
+	 *
+	 * Only the copy in the block -- tripwire_block_hops moves from the child's own
+	 * result -- releases the stop thread and holds the teardown open. The child's
+	 * temporary is destroyed during the fan-out, and the chain's own copies are
+	 * destroyed inside await_resume and in the chain's body, so a stop released by any
+	 * of those would land somewhere the window does not exist.
+	 *
+	 * The hold is a handshake and not a delay: it waits for the stop thread's
+	 * request_stop() to return, which is after every callback on the chain's token has
+	 * run. The window is therefore opened by construction on every repeat rather than
+	 * on the repeats whose timing happens to align, which matters because the window a
+	 * delay would have to straddle is a few tens of nanoseconds wide.
+	 */
+	class teardown_tripwire
+	{
+	public:
+		teardown_tripwire(int* opened, std::atomic<bool>* reached, std::atomic<bool>* stopped): m_opened(opened), m_reached(reached), m_stopped(stopped)
+		{
+		}
+
+		teardown_tripwire(teardown_tripwire&& other) noexcept:
+		  m_opened(other.m_opened),
+		  m_reached(other.m_reached),
+		  m_stopped(other.m_stopped),
+		  m_tag(other.m_tag),
+		  m_hops(other.m_hops + 1)
+		{
+		}
+
+		teardown_tripwire(const teardown_tripwire&)            = delete;
+		teardown_tripwire& operator=(const teardown_tripwire&) = delete;
+		teardown_tripwire& operator=(teardown_tripwire&&)      = delete;
+
+		~teardown_tripwire()
+		{
+			if(m_hops != tripwire_block_hops)
+			{
+				return;
+			}
+
+			++*m_opened;
+			m_reached->store(true, std::memory_order_release);
+			spin_until(*m_stopped);
+		}
+
+		/** The tag this value carries, which travels with it through both moves. */
+		[[nodiscard]] int tag() const noexcept
+		{
+			return m_tag;
+		}
+
+	private:
+		/** Counts the windows this repeat opened. Written only from the awaiting thread. */
+		int* m_opened;
+
+		/** Where the copy inside the block publishes that the teardown has reached it. */
+		std::atomic<bool>* m_reached;
+
+		/** Where the stop thread publishes that its request_stop() has returned. */
+		std::atomic<bool>* m_stopped;
+
+		/** Carried so that what the chain reads back is this object's own value. */
+		int m_tag = tripwire_tag;
+
+		/** How many moves away from the child's own result this copy is. */
+		int m_hops = 0;
+	};
+
+	/** An awaitable that is ready at once with a teardown_tripwire. */
+	struct tripwire_ready
+	{
+		int*               opened;
+		std::atomic<bool>* reached;
+		std::atomic<bool>* stopped;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] teardown_tripwire await_resume() const noexcept
+		{
+			return teardown_tripwire{opened, reached, stopped};
+		}
+	};
+
+	/**
+	 * Awaits a when_all whose only child is ready before the join can link, with the
+	 * tripwire in its result slot. @p tag_seen takes what the chain read back.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which joins the stopping thread and waits for live_frames to reach zero before leaving their scope.
+	alt::cancellable_task tripwire_root(int& opened, std::atomic<bool>& reached, std::atomic<bool>& stopped, wait_record& record, int& tag_seen)
+	{
+		const frame_tracker tracker{0};
+		const auto          result = co_await alt::when_all(tripwire_ready{.opened = &opened, .reached = &reached, .stopped = &stopped});
+		record_outcome(record, result);
+
+		if(result)
+		{
+			tag_seen = std::get<0>(*result).tag();
+		}
+
+		// Somewhere for the stop this repeat requested to tear the chain down.
+		co_await alt::cancellation_point{};
+	}
+
+	/**
+	 * @brief Runs one repeat of the teardown-against-stop handshake. Asserts nothing.
+	 *
+	 * Split from its assertions, and both split out of the test's loop, for the reason
+	 * run_one_stop_race records.
+	 *
+	 * @param record   Filled with what the awaiting chain saw.
+	 * @param tag_seen Filled with the tag the chain read out of its slot.
+	 * @return How many times the block's teardown reached the tripwire, which pins the
+	 *         rendezvous: zero means the window was never opened and the repeat guarded
+	 *         nothing.
+	 */
+	int run_one_teardown_race(wait_record& record, int& tag_seen)
+	{
+		reset_coroutine_test_state();
+
+		std::stop_source         external;
+		std::atomic<std::size_t> arrived{0};
+		std::atomic<bool>        reached{false};
+		std::atomic<bool>        stopped{false};
+		int                      opened = 0;
+
+		// The stop travels through an external token rather than the handle alt::start
+		// returns, because every child here is ready: the whole chain runs to its end
+		// inside start(), so the handle does not exist yet at the instant this repeat is
+		// about. Neither party waits on the other's progress except through these two
+		// flags: the chain waits for request_stop() to return, and request_stop() waits
+		// for nothing the chain holds, so the handshake cannot deadlock.
+		std::jthread stopper{[&] {
+			rendezvous(arrived, 2);
+			spin_until(reached);
+			external.request_stop();
+			stopped.store(true, std::memory_order_release);
+		}};
+
+		rendezvous(arrived, 2);
+
+		[[maybe_unused]] const auto handle = alt::start(tripwire_root(opened, reached, stopped, record, tag_seen), {.token = external.get_token()});
+
+		stopper.join();
+		return opened;
+	}
 }
 
 TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
@@ -1639,4 +1840,67 @@ TEST_F(WhenAllTest, ANestedWhenAllInsideAChildIsItsOwnRoot)
 	EXPECT_EQ(record.error, released_error);
 	EXPECT_EQ(inner_cancelled, 2) << "both inner when_alls reported a cancelled wait, not a satisfied one";
 	EXPECT_EQ(live_frames, 0) << "both levels are gone";
+}
+
+// The window ~when_all_awaiter's m_join.reset() closes, built on purpose rather than
+// hoped for. Read that destructor's note first; this is its guard of record.
+//
+// READ THIS BEFORE TRUSTING A GREEN RUN. Its assertions below cannot fail on the
+// mutation it exists for -- moving the reset below the release, which is the order this
+// branch shipped with until the final review -- and neither sanitizer reports it either:
+// measured 0 failures and 0 hangs in 20 repeats of this test alone in each of the debug,
+// AddressSanitizer and ThreadSanitizer builds, and a full suite run of 763 passes in each
+// of the two sanitizer presets with the mutation in place. That is not evidence the order
+// does not matter, and the reason it is not is specific and worth knowing:
+//
+// On the mutated order the still-registered waiter_stop_release runs
+// waiter_list::claim over the freed block, and claim touches the list through exactly
+// one thing -- std::scoped_lock over the list's std::mutex, whose lock and unlock are
+// glibc's pthread_mutex_lock and pthread_mutex_unlock. Neither sanitizer instruments
+// glibc, so the write into the freed block is made by code they do not watch; and
+// libstdc++'s std::mutex destructor is trivial, so no pthread_mutex_destroy is
+// intercepted either. The rest of the callback's work is on the node, which lives in the
+// chain's own frame and is still alive. So the bug is a write to freed heap memory with
+// no instrumented access anywhere on its path.
+//
+// What was measured directly, by adding a timestamped print to
+// waiter_stop_release::operator() and to when_all_state::destroy in a scratch build: on
+// the mutated order the callback's claim is entered after the block's operator delete
+// has returned, with the list pointer inside the freed block (list=0x...11f0 within
+// block=0x...11c0) and AddressSanitizer reporting nothing. The window is real and this
+// test reaches it; the instruments are blind to it.
+//
+// So what this test contributes is the window itself, deterministically: a
+// cancellable_task root, every child retired before the join could link, and a
+// concurrent request_stop() that is made to land inside the block's teardown by a
+// handshake rather than by timing. No other test in the suite puts those three together.
+// Keep it, and keep the mutation named here, because the next reader will otherwise find
+// a green sanitizer run and conclude the reset is redundant.
+TEST_F(WhenAllTest, AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked)
+{
+	for(int repeat = 0; repeat < teardown_race_repeats; ++repeat)
+	{
+		wait_record record;
+		int         tag_seen = 0;
+
+		const int opened = run_one_teardown_race(record, tag_seen);
+
+		// Why each condition is needed. The root is a cancellable_task, so the chain's
+		// cancellation context carries a token that can be stopped and
+		// wait_awaiter::await_suspend registers a callback at all -- a sync_wait-driven
+		// alt::task has a null context and registers nothing, which is why every other
+		// ready-children test here is safe. The one child is ready, so it retires before
+		// the join can link, the link is refused with that callback left engaged, and the
+		// awaiter's release() is the block's LAST reference. And the stop is requested
+		// from another thread, which is this library's documented shutdown idiom.
+		ASSERT_EQ(record.resumptions, 1) << "repeat " << repeat;
+		EXPECT_TRUE(record.satisfied) << "repeat " << repeat << ": the stop lands after await_resume, so the verdict is the satisfied one";
+		EXPECT_EQ(tag_seen, tripwire_tag) << "repeat " << repeat << ": the chain read its slot before the block was released";
+		EXPECT_EQ(live_frames, 0) << "repeat " << repeat;
+
+		// The window was opened exactly once. A repeat that never reached the block's
+		// copy of the tripwire released its stop somewhere else entirely and guarded
+		// nothing, which is a failure of the test rather than of the code.
+		ASSERT_EQ(opened, 1) << "repeat " << repeat << ": the block's teardown reached the tripwire exactly once";
+	}
 }

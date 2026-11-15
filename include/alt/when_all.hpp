@@ -205,26 +205,55 @@ namespace alt::detail
 		when_all_awaiter& operator=(when_all_awaiter&&)      = delete;
 
 		/**
-		 * @brief Drops the awaiter's reference to the shared block.
+		 * @brief Deregisters the joiner's stop callback, then drops the awaiter's
+		 *        reference to the shared block.
 		 *
 		 * DELICATE. This is reference 1, the one the block is constructed with, and
-		 * where it is dropped is the whole of two invariants.
+		 * where it is dropped is the whole of three invariants. The reset is the third
+		 * of them and is not tidying: both statements free something the other one
+		 * still points at if they are swapped.
 		 *
-		 * The awaiter holds it for as long as the awaiting chain is parked, so the block
-		 * can never reach zero references with a joiner still on the counter: the
-		 * counter is destroyed sixth of the block's seven members, and
+		 * The awaiter holds the reference for as long as the awaiting chain is parked,
+		 * so the block can never reach zero references with a joiner still on the
+		 * counter: the counter is destroyed sixth of the block's seven members, and
 		 * ~completion_counter resumes every still-parked joiner, whose body would then
 		 * run against five already-destroyed members -- among them m_cancelled, which
-		 * await_resume reads. The joiner is always off the
-		 * counter before this runs -- claimed by the zero transition, claimed by the
-		 * chain's cancellation, or never linked at all -- because this destructor runs
-		 * only at the end of the co_await full-expression, after await_resume.
+		 * await_resume reads. The joiner is always off the counter before this runs --
+		 * claimed by the zero transition, claimed by the chain's cancellation, or never
+		 * linked at all -- because this destructor runs only at the end of the co_await
+		 * full-expression, after await_resume.
 		 *
-		 * It is also dropped after await_resume has finished reading the slots, which is
-		 * why the release is here and not there.
+		 * A node being off the counter is NOT the same as that node's stop callback
+		 * being deregistered, and the "never linked at all" case is where the two part
+		 * company. detail::wait_awaiter::await_suspend emplaces its std::stop_callback
+		 * on the chain's token BEFORE it attempts the link, holding a
+		 * waiter_stop_release that points at the node and at the counter's waiter_list,
+		 * which lives inside the block; a refused link leaves that callback registered
+		 * for the rest of the awaiter's life, and nothing in waiter_list::claim's
+		 * election disarms it, because a node refused by the condition is still
+		 * winnable. On the path await_suspend names -- every child retired before the
+		 * join could link -- the reference count here is exactly 1, so releasing first
+		 * frees the waiter_list while a registered callback still points into it, and a
+		 * request_stop() on another thread then takes the mutex of a freed list.
 		 *
-		 * What it does NOT make unreachable is the block's last reference going while a
-		 * cancel() is still unwinding. The chain is released before the children are
+		 * Resetting first closes that, and strengthens the argument above rather than
+		 * replacing it: ~std::stop_callback both deregisters the callback and blocks for
+		 * an invocation already running on another thread, and it now does so while the
+		 * block is still referenced. That is exactly detail::wait_awaiter's stated
+		 * precondition, "the primitive must outlive every claim on its waiters", and
+		 * when_all is the first component in the library that can free the primitive
+		 * from inside its own awaiter. Member destruction will not do this on its own:
+		 * the destructor body runs before any member is destroyed, so ~m_join -- and
+		 * with it ~m_stop -- would otherwise run after the release. The guard of record
+		 * is WhenAllTest.AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked.
+		 *
+		 * The reference is still dropped after await_resume has finished reading the
+		 * slots, which is why the release is here and not there, and the reset does not
+		 * disturb that: await_resume has long returned by the time any of this runs, and
+		 * it reads the joiner's verdict out of the node rather than out of the callback.
+		 *
+		 * What this does NOT make unreachable is the block's last reference going while
+		 * a cancel() is still unwinding. The chain is released before the children are
 		 * stopped, so this destructor runs first and a child's completion hook then
 		 * drops the last reference from inside combinator_state::cancel(). That is the
 		 * ordinary cancellation path, and what makes it survivable is the counted copy
@@ -233,6 +262,10 @@ namespace alt::detail
 		 */
 		~when_all_awaiter()
 		{
+			// First, and see above: this is what makes the release below safe rather
+			// than merely ordered.
+			m_join.reset();
+
 			if(m_state != nullptr)
 			{
 				m_state->shared().release();
