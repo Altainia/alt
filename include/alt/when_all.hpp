@@ -371,12 +371,14 @@ namespace alt::detail
 			// That this parks until the LAST child retires, and does not return false
 			// once the first exception is in a slot, is what lets a successful sibling
 			// finish before the rethrow. Measured by replacing the park with
-			// `return false`: WhenAllTest.ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows
-			// fails 8/200 in one debug run and 4/200 in a second, every failure on its
-			// sibling-finished assertion, 0 hangs. That is a weak guard, not a strong
-			// one: it passes in over 90% of runs with the park removed, so a green run of
-			// it alone says little. The same mutation aborts every run of
-			// the whole WhenAllTest suite (20/20), so other tests are the stronger guard.
+			// `return false`, in debug: WhenAllTest.ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows
+			// fails 200/200, on its EXPECT_FALSE(returned) assertion -- the await returning
+			// while the sibling is still parked -- and not on the exception or live_frames
+			// assertions. Its first revision raced a releasing thread against the rethrow
+			// and failed only 8/200 and 4/200 of the same mutation, on its
+			// sibling-finished assertion, which is why it is single-threaded now. 15 of the
+			// 35 WhenAllTest tests abort under the same mutation, each run alone; the
+			// per-test list is in the task 6 fix report.
 			m_join.emplace(m_state->shared().counter());
 			return m_join->await_suspend(h);
 		}

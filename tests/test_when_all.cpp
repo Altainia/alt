@@ -331,6 +331,23 @@ namespace
 		co_await alt::cancellation_point{};
 	}
 
+	/** Awaits a throwing child beside one parked on @p source, and records how the await ended. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which outlives the whole chain.
+	alt::cancellable_task throwing_sibling_root(alt::task_completion_source<int>& source, std::atomic<bool>& finished, std::string& caught, bool& returned)
+	{
+		try
+		{
+			[[maybe_unused]] const auto results = co_await alt::when_all(make_throwing_task(), make_finishing_task(source, finished));
+			ADD_FAILURE() << "the throwing child's exception did not reach the await";
+		}
+		catch(const std::runtime_error& error)
+		{
+			caught = error.what();
+		}
+
+		returned = true;
+	}
+
 	/** Awaits a when_all from a promise whose cancellation context is null. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the record is owned by the calling test, which blocks in sync_wait until this completes.
 	alt::task<void> contextless_probe(wait_record& record, std::tuple<int, int>& values)
@@ -523,33 +540,27 @@ TEST_F(WhenAllTest, TwoThrowingChildrenRethrowTheLowestPositionNotTheFirstToThro
 TEST_F(WhenAllTest, ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows)
 {
 	alt::task_completion_source<int> source;
-	std::atomic<bool>                thrown{false};
 	std::atomic<bool>                sibling_finished{false};
+	std::string                      caught;
+	bool                             returned = false;
 
-	// Position 0 throws at once. Only after that does this thread let position 1 go, so
-	// the sibling's completion is strictly after the throw and observable on its own flag.
-	std::jthread releaser{[&] {
-		while(!thrown.load(std::memory_order_acquire))
-		{
-			std::this_thread::yield();
-		}
+	// Single-threaded, so there is no race to hope for. Position 0 throws inside the
+	// fan-out, and position 1 is parked on a source that only this thread can set, so
+	// when start() returns the exception is already sitting in its slot and the sibling
+	// has not finished. An await that parked only until the first failure -- or that
+	// returned without parking -- would rethrow into the body right here, before the
+	// sibling's completion.
+	const auto handle = alt::start(throwing_sibling_root(source, sibling_finished, caught, returned));
 
-		source.set_value(1);
-	}};
+	EXPECT_FALSE(returned) << "the await returned while a child was still running";
+	EXPECT_FALSE(sibling_finished.load(std::memory_order_acquire));
 
-	std::string caught;
+	// Releasing the sibling resumes it on this thread; its completion retires the last
+	// child, which resumes the chain, which rethrows.
+	source.set_value(1);
 
-	try
-	{
-		[[maybe_unused]] const auto results = alt::sync_wait(alt::when_all(make_signalling_throwing_task("position 0", thrown), make_finishing_task(source, sibling_finished)));
-		ADD_FAILURE() << "the throwing child's exception did not reach the await";
-	}
-	catch(const std::runtime_error& error)
-	{
-		caught = error.what();
-	}
-
-	EXPECT_EQ(caught, "position 0");
+	EXPECT_TRUE(returned);
+	EXPECT_EQ(caught, "child body");
 	EXPECT_TRUE(sibling_finished.load(std::memory_order_acquire));
 	EXPECT_EQ(live_frames, 0);
 }
