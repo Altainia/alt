@@ -7,6 +7,7 @@
 #include <stop_token>
 #include <thread>
 #include <type_traits>
+#include <vector>
 
 #include "coroutine_test_support.hpp"
 
@@ -91,6 +92,7 @@ TEST_F(CombinatorStateTest, AReleaseThatIsNotTheLastRunsNothing)
 
 	EXPECT_EQ(m_probe.calls, 0);
 
+	// Balances the construction reference so the block is released as it would be.
 	state.release();
 }
 
@@ -109,13 +111,23 @@ TEST_F(CombinatorStateTest, CancelMarksTheWaitReleasedBeforeStoppingTheChildren)
 TEST_F(CombinatorStateTest, CancelIsIdempotent)
 {
 	combinator_state state{0, &m_probe, &deleter_probe::destroy};
+	std::stop_source source;
 	int              invocations = 0;
 
+	state.link(source.get_token());
 	const std::stop_callback observer{state.children_token(), [&] { ++invocations; }};
 
 	state.cancel();
 	state.cancel();
 
+	EXPECT_TRUE(state.cancelled());
+	EXPECT_EQ(invocations, 1);
+
+	// A stop arriving through the link after cancel() reaches the forwarder, which
+	// calls cancel() a third time; the flag stays set and the children are not stopped again.
+	source.request_stop();
+
+	EXPECT_TRUE(state.cancelled());
 	EXPECT_EQ(invocations, 1);
 }
 
@@ -192,5 +204,78 @@ TEST_F(CombinatorStateTest, ARaceBetweenAStopAndTheLastReleaseIsClean)
 		releaser.join();
 
 		EXPECT_EQ(owner.calls.load(), 1);
+	}
+}
+
+TEST_F(CombinatorStateTest, ConcurrentAddRefAndReleaseRunTheDeleterExactlyOnce)
+{
+	constexpr std::size_t threads = 8;
+	constexpr int         rounds  = 2000;
+
+	for(int repeat = 0; repeat < 50; ++repeat)
+	{
+		deleter_probe            probe;
+		combinator_state         state{0, &probe, &deleter_probe::destroy};
+		std::atomic<std::size_t> arrived{0};
+
+		// Every thread holds a reference up front, so the count cannot reach zero
+		// until the construction reference is released after they have all finished.
+		for(std::size_t i = 0; i < threads; ++i)
+		{
+			state.add_ref();
+		}
+
+		std::vector<std::thread> workers;
+		workers.reserve(threads);
+		for(std::size_t i = 0; i < threads; ++i)
+		{
+			workers.emplace_back([&] {
+				alt_test::rendezvous(arrived, threads);
+				for(int round = 0; round < rounds; ++round)
+				{
+					state.add_ref();
+					state.release();
+				}
+				state.release();
+			});
+		}
+		for(auto& worker: workers)
+		{
+			worker.join();
+		}
+
+		EXPECT_EQ(probe.calls, 0);
+		state.release();
+		EXPECT_EQ(probe.calls, 1);
+	}
+}
+
+TEST_F(CombinatorStateTest, ACancelFromAnotherThreadIsObservedThroughCancelled)
+{
+	for(int repeat = 0; repeat < race_repeats; ++repeat)
+	{
+		combinator_state         state{0, &m_probe, &deleter_probe::destroy};
+		std::atomic<std::size_t> arrived{0};
+
+		// A plain write that only the release in cancel() publishes to the reader.
+		int payload = 0;
+
+		std::thread canceller{[&] {
+			alt_test::rendezvous(arrived, 2);
+			payload = 42;
+			state.cancel();
+		}};
+
+		alt_test::rendezvous(arrived, 2);
+		while(!state.cancelled())
+		{
+			std::this_thread::yield();
+		}
+
+		// The acquire in cancelled() saw the release in cancel(), so the write made
+		// before it is visible. Under ThreadSanitizer a missing pair is a data race here.
+		EXPECT_EQ(payload, 42);
+		canceller.join();
+		state.release();
 	}
 }

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <optional>
 #include <stop_token>
+#include <utility>
 
 namespace alt::detail
 {
@@ -70,6 +71,13 @@ namespace alt::detail
 			m_counter.add(children + 1);
 		}
 
+		/**
+		 * @brief Destroys the block, normally by way of the erased destroy function.
+		 *
+		 * Blocks until a cancel() forwarded from a linked token on another thread has
+		 * returned. It does not wait for one running on the calling thread, so the last
+		 * reference must never be released from inside cancel(); see the note on m_link.
+		 */
 		~combinator_state() = default;
 
 		combinator_state(const combinator_state&)            = delete;
@@ -151,12 +159,22 @@ namespace alt::detail
 		// DELICATE. Declaration order is load-bearing here.
 		//
 		// m_link is declared last, so it is destroyed first. std::stop_callback's
-		// destructor blocks until an invocation already running on another thread
-		// returns, so destroying it ahead of every other member is what guarantees no
+		// destructor blocks until an invocation already running on ANOTHER thread
+		// returns, so destroying it ahead of every other member guarantees no such
 		// cancel() is in flight over them. This is wait_awaiter's reason for declaring
 		// m_stop after m_node. Unlike cancellable_task_promise, the hazard is not
 		// removed structurally: the callback really does point into this object, so
 		// nothing but this order protects it, and nothing in the language checks it.
+		//
+		// The protection covers other threads only. For an invocation running on the
+		// CURRENT thread ([stopcallback.cons]) the destructor returns immediately by
+		// design, so the order does not protect a reentrant last release: cancel() ->
+		// request_stop() -> a child's completion hook drives the counter to zero -> the
+		// awaiting chain resumes and drops the last reference -> destroy() -> this
+		// destructor frees the block while the outer request_stop() frame is still
+		// unwinding through it. The combinator that owns this block must prevent that
+		// structurally (for example by holding a reference across cancel()); this class
+		// cannot.
 		//
 		// m_references starts at 1, the awaiter's.
 		std::atomic<std::size_t> m_references{1};
