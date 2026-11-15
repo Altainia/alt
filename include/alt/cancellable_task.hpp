@@ -133,6 +133,8 @@ namespace alt
 	{
 
 		/**
+		 * @brief Fires an alt::completion_handler when destroyed.
+		 *
 		 * Fires an alt::completion_handler when destroyed. A member of the promise,
 		 * so the call happens as the frame is torn down.
 		 */
@@ -268,23 +270,25 @@ namespace alt
 			}
 
 		private:
-			// DELICATE. Read this before changing it.
+			// m_completion is declared first on purpose, so it is destroyed last.
+			// Its destructor runs the owner's completion hook, and that hook may
+			// request a stop on the external token. Destroying m_external
+			// deregisters its std::stop_callback from that token, and the callback's
+			// destructor blocks until a concurrently running invocation returns, so
+			// by the time the hook fires no stop request, from any thread, can route
+			// into this frame.
 			//
-			// m_completion must be declared first, so that it is destroyed last. Its
-			// destructor runs the owner's completion hook, and that hook may resume a
-			// coroutine which requests a stop reaching this very frame's m_external.
-			// Firing last means m_external and m_source are already destroyed, so no
-			// such request can reach anything in this frame. Declared anywhere else,
-			// the hook fires while a std::stop_callback over a half-destroyed promise
-			// is still registered. Nothing but this comment enforces the order.
+			// This is defense in depth, not a fix for a reachable fault. With the
+			// hook last, a stop requested inside it never reaches this frame's source.
+			// With it declared last instead, that stop is forwarded into m_source
+			// first, which is observable but touched no destroyed memory under
+			// AddressSanitizer: stop_forwarder holds a reference-counted copy of the
+			// source. No fault was measured in either order.
 			//
-			// The remaining members carry no ordering requirement among themselves.
-			// They once did: stop_forwarder held a std::stop_source* into this frame,
-			// so m_external had to be destroyed ahead of m_source or a thread inside
-			// the forwarder could dereference a destroyed source while another thread
-			// tore the frame down. The forwarder now holds a reference-counted copy
-			// instead and that hazard is gone structurally. See stop_forwarder above
-			// before changing it back.
+			// The other members carry no ordering requirement among themselves. They
+			// once did: stop_forwarder held a std::stop_source* into this frame, so
+			// m_external had to be destroyed ahead of m_source. That hazard is gone
+			// structurally. See stop_forwarder above before changing it back.
 			completion_notifier                               m_completion;
 			cancellation_context                              m_context{};
 			std::stop_source                                  m_source;

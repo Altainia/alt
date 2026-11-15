@@ -159,9 +159,9 @@ public:
 
 struct start_options
 {
-    std::stop_token   token{};
-    scheduler_ref     home{};
-    exception_handler on_exception{};
+    std::stop_token    token{};
+    scheduler_ref      home{};
+    exception_handler  on_exception{};
     completion_handler on_completion{};
 };
 

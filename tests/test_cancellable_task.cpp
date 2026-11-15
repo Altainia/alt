@@ -6,7 +6,6 @@
 #include <alt/task.hpp>
 #include <coroutine>
 #include <exception>
-#include <optional>
 #include <stdexcept>
 #include <stop_token>
 #include <thread>
@@ -127,6 +126,7 @@ namespace
 		co_await alt::cancellation_point{};
 		reached_end = true;
 	}
+
 	alt::cancellable_task root_that_completes_without_suspending()
 	{
 		const frame_tracker t{1};
@@ -137,9 +137,9 @@ namespace
 	// state is this struct, the same shape exception_handler is used with above.
 	struct completion_probe
 	{
-		int                                     calls{0};
-		int                                     frames_seen{-1};
-		std::optional<alt::cancellation_handle> dying_task;
+		int               calls{0};
+		int               frames_seen{-1};
+		std::stop_source* external{nullptr};
 	};
 
 	void record_completion(void* state) noexcept
@@ -147,9 +147,9 @@ namespace
 		auto& probe = *static_cast<completion_probe*>(state);
 		++probe.calls;
 		probe.frames_seen = live_frames;
-		if(probe.dying_task)
+		if(probe.external != nullptr)
 		{
-			probe.dying_task->request_stop();
+			probe.external->request_stop();
 		}
 	}
 }
@@ -486,7 +486,7 @@ TEST_F(CancellableTaskTest, AnUncancelledResumptionProceedsNormally)
 TEST_F(CancellableTaskTest, TheCompletionHookFiresOnNormalCompletion)
 {
 	completion_probe probe;
-	auto             handle = alt::start(root_that_completes_without_suspending(), {.on_completion = {.invoke = &record_completion, .state = &probe}});
+	const auto       handle = alt::start(root_that_completes_without_suspending(), {.on_completion = {.invoke = &record_completion, .state = &probe}});
 
 	EXPECT_EQ(probe.calls, 1);
 	EXPECT_EQ(live_frames, 0);
@@ -498,18 +498,28 @@ TEST_F(CancellableTaskTest, TheCompletionHookFiresOnCancelledTeardown)
 	auto             handle = alt::start(root_that_parks_then_awaits_a_child(), {.on_completion = {.invoke = &record_completion, .state = &probe}});
 	ASSERT_EQ(probe.calls, 0);
 
+	// The body's frame_tracker is live while the task is parked, so frames_seen
+	// below is 0 only if destroy() ran that local's destructor before the hook.
+	// The standard does not order a frame's live locals against its promise, so
+	// this is the path where the property is a real claim.
+	ASSERT_EQ(live_frames, 1);
+
 	handle.request_stop();
 	resume_parked();
 
 	EXPECT_FALSE(reached_end);
 	EXPECT_EQ(probe.calls, 1);
+	EXPECT_EQ(probe.frames_seen, 0);
 	EXPECT_EQ(live_frames, 0);
 }
 
 TEST_F(CancellableTaskTest, TheCompletionHookFiresAfterTheBodysLocalsAreDestroyed)
 {
+	// Normal completion. co_return destroys the locals before final_suspend, so
+	// this case is guaranteed by the language; the cancelled-teardown test above
+	// is the one that can fail.
 	completion_probe probe;
-	auto             handle = alt::start(root_that_completes(), {.on_completion = {.invoke = &record_completion, .state = &probe}});
+	const auto       handle = alt::start(root_that_completes(), {.on_completion = {.invoke = &record_completion, .state = &probe}});
 	ASSERT_EQ(live_frames, 1);
 
 	resume_parked();
@@ -518,8 +528,28 @@ TEST_F(CancellableTaskTest, TheCompletionHookFiresAfterTheBodysLocalsAreDestroye
 	EXPECT_EQ(probe.frames_seen, 0);
 }
 
+TEST_F(CancellableTaskTest, TheCompletionHookFiresOnlyWhenTheHomeSchedulerDestroysTheFrame)
+{
+	alt::manual_scheduler work;
+	alt::manual_scheduler home;
+	completion_probe      probe;
+
+	auto handle = alt::start(resumes_through_a_scheduler(&work), {.home = alt::scheduler_ref{home}, .on_completion = {.invoke = &record_completion, .state = &probe}});
+
+	handle.request_stop();
+	EXPECT_EQ(work.drain(), 1U); // observes the stop and posts the destruction
+	EXPECT_EQ(probe.calls, 0);   // posted, not yet destroyed
+
+	EXPECT_EQ(home.drain(), 1U);
+	EXPECT_EQ(probe.calls, 1);
+	EXPECT_EQ(probe.frames_seen, 0);
+}
+
 TEST_F(CancellableTaskTest, ANeverStartedTaskFiresNoCompletionHook)
 {
+	// The probe is not connected to the task: a task that was never started was
+	// never configured, so what this covers is that destroying an unconfigured
+	// promise fires nothing, i.e. the handler{} default plus the null check.
 	completion_probe probe;
 	{
 		const auto unstarted = root_that_completes();
@@ -529,27 +559,28 @@ TEST_F(CancellableTaskTest, ANeverStartedTaskFiresNoCompletionHook)
 	EXPECT_EQ(probe.calls, 0);
 }
 
-TEST_F(CancellableTaskTest, ARequestStopFromInsideTheCompletionHookTouchesNoDestroyedMember)
+TEST_F(CancellableTaskTest, AStopRequestedFromInsideTheCompletionHookReachesNothingInTheDyingFrame)
 {
-	// The hook requests a stop on the very task that is dying. An external token
-	// is linked so that m_external, a std::stop_callback over the promise, is
-	// registered and a stop request has something to reach. The hook must fire
-	// after m_external and m_source are gone, which the promise's member order
-	// guarantees.
+	// The hook requests a stop on the external token, the only route that
+	// re-enters m_external, the std::stop_callback registered on it. With the
+	// hook firing last, m_external is already deregistered, so the request cannot
+	// reach this frame and the task's own stop state stays unstopped.
 	//
-	// Mutation check, measured: with m_completion moved to be the last member the
-	// hook fires first, while the callback is still registered, and this test
-	// still passed under debug-asan (no failure observed). The re-entrant
-	// request_stop reaching a still-registered stop_callback is not guaranteed to
-	// fault, so the member order is reasoned, not pinned by this test.
+	// Mutation check, measured: with m_completion moved to be the last member, the
+	// hook fires while m_external is still registered, the forwarder copies the
+	// stop into the task's own source, and the final EXPECT_FALSE fails
+	// (handle.stop_requested() was true). AddressSanitizer reported no memory
+	// error in that order, because stop_forwarder holds a reference-counted copy
+	// of the source. So this test pins the order by its observable effect, not by
+	// a fault; no fault was measured in either order.
 	std::stop_source external;
-	completion_probe probe;
-	auto             handle = alt::start(root_that_completes(), {.token = external.get_token(), .on_completion = {.invoke = &record_completion, .state = &probe}});
-	probe.dying_task        = handle;
+	completion_probe probe{.external = &external};
+	const auto       handle = alt::start(root_that_completes(), {.token = external.get_token(), .on_completion = {.invoke = &record_completion, .state = &probe}});
 
 	resume_parked();
 
 	EXPECT_EQ(probe.calls, 1);
 	EXPECT_EQ(live_frames, 0);
-	EXPECT_TRUE(handle.stop_requested());
+	EXPECT_TRUE(external.stop_requested());
+	EXPECT_FALSE(handle.stop_requested());
 }
