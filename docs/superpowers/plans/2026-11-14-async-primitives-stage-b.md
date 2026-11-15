@@ -383,7 +383,9 @@ Expected: FAIL — no such header.
 
 - [ ] **Step 3: Implement `task_completion_source<T>` in `include/alt/task_completion_source.hpp`**
 
-`ready()` is `m_source->is_set()`, read as the link condition too, so it takes no lock and resumes nothing — the same shape as `async_event::event_awaiter::ready()`.
+`ready()` reads an atomic flag, as the link condition too, so it takes no lock and resumes nothing — the same shape as `async_event::event_awaiter::ready()`.
+
+**Superseded (2026-11-14, task 3 implementation).** This step first read: "`ready()` is `m_source->is_set()`". That is a data race. `detail::result_store::is_set()` reads a `std::variant` index (or, in the `void` specialization, a plain `bool`) non-atomically, and the setter writes it, so a waiter calling it concurrently with `set_value` is UB. The source therefore carries its own `std::atomic<bool>`, release-stored last inside the critical section and read by `ready()`, which is what `async_event` actually does — `is_set()` there is an atomic load, and this step paraphrased it wrongly.
 
 The setters share one private helper that fills the store and detaches the waiter as **one critical section**, the way `async_event::set` does, so the publish has no order to argue about: `detach_one([&]() noexcept { /* fill m_result */ })`, then `resume_claimed(chain, true)` as the last statement. `detach_one` rather than `detach_all`, because a source is awaited once; a second parked waiter is not reachable through the documented API.
 
