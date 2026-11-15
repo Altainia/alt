@@ -110,6 +110,12 @@ namespace alt::detail
 		// 200/200, reported as heap-use-after-free in completion_counter::complete()
 		// with this function one frame above it. Do not read a green debug run as
 		// evidence that the order does not matter.
+		//
+		// The guards of record under AddressSanitizer are
+		// WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock, which
+		// reports it among the combinator tests added for this, and the older
+		// WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown, which
+		// reports it first across the pre-existing suite.
 		shared->counter().complete();
 		shared->release();
 	}
@@ -292,6 +298,32 @@ namespace alt::detail
 				}
 			}
 
+			// DELICATE. The children observe the BLOCK's stop source, not the chain's
+			// token, and the two are not interchangeable even though both are stop
+			// tokens and the chain's token is what ends up stopping the children anyway.
+			//
+			// m_children is the source combinator_state::cancel() holds its counted copy
+			// of. Assign context->token here instead -- which means moving this line up
+			// into the block above, the only place context is in scope -- and each
+			// child's stop_forwarder is registered on the chain's own token, in the same
+			// callback list as this block's m_link. libstdc++ walks that list in reverse
+			// registration order, so the children are torn down before m_link runs; a
+			// child's teardown can then drop the block's last reference, and destroying
+			// the block destroys an m_link whose ~stop_callback releases the last
+			// ownership reference to a stop state whose request_stop() is still on the
+			// stack. cancel()'s counted copy does not save it: that copy is of m_children,
+			// which under such a change nobody is registered on.
+			//
+			// Measured, and only one test in the suite sees it:
+			// WhenAllTest.ANestedWhenAllInsideAChildIsItsOwnRoot fails 0 pass / 91 fail /
+			// 109 hang out of 200 repeats in debug, and 0 pass / 200 fail under
+			// AddressSanitizer, where the report is heap-use-after-free in
+			// _Stop_state_t::_M_lock() reached from stop_forwarder::operator(). The other
+			// four combinator tests added alongside it pass 200/200, and a whole-suite
+			// run reaches 32 of 33 passes before that one test hangs. One level of
+			// nesting is what makes the hazard observable, because what gets freed
+			// mid-walk is a child's own stop state, held alive only by an inner block's
+			// m_link once the child's frame is gone.
 			child_options.token = m_state->shared().children_token();
 
 			// One add_ref per child, before that child is started, for the same reason

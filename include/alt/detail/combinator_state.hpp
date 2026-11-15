@@ -155,8 +155,10 @@ namespace alt::detail
 			// What guards the order is this class's own test, not a combinator's.
 			// Swapping these two statements fails
 			// CombinatorStateTest.CancelMarksTheWaitReleasedBeforeStoppingTheChildren
-			// 200/200, and fails nothing at all in alt::when_all -- 0/200 against every
-			// cancellation test in that suite, 33/33 of them still passing. The reason
+			// 200 times out of 200 repeats, and fails nothing at all in alt::when_all:
+			// 0 failures in 200 repeats of each of the five cancellation-path tests run
+			// one at a time, and in a separate single run of the whole WhenAllTest suite
+			// all 33 of its tests still pass. The reason
 			// is in when_all_awaiter's await_resume note: the chain's own stop claims
 			// the joiner before cancel() ever runs, so the flag is never the deciding
 			// half of that verdict today. It is still stored first, because a

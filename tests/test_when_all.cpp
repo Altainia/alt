@@ -573,6 +573,13 @@ TEST_F(WhenAllTest, CancellingTheAwaitingChainReportsOperationCanceled)
 	EXPECT_EQ(live_frames, 0);
 }
 
+// Also the coverage of record for what the combinators brief planned as
+// CancellingTheChainWhileEveryChildIsStoppedReportsCanceledNotSatisfied: the children's
+// stop drives the counter to zero here, and the verdict below is the cancellation rather
+// than a satisfied wait over unfilled slots. That test was not written separately because
+// this one makes its assertions already. Its stated mechanism -- the cancelled() flag
+// deciding the verdict -- is not the one at work; see the await_resume note in
+// when_all.hpp and the note in combinator_state::cancel().
 TEST_F(WhenAllTest, CancellingTheAwaitingChainRequestsEveryChildsStop)
 {
 	alt::async_event first;
@@ -1335,9 +1342,12 @@ namespace
 		const bool slot_read_is_the_value   = !ran.parent.satisfied || ran.values_seen == 1;
 		const bool verdict_carries_a_reason = ran.parent.satisfied || ran.parent.error == released_error;
 
-		EXPECT_TRUE(value_is_the_satisfiers) << "repeat " << repeat << ": a child the satisfier won read the published value";
-		EXPECT_TRUE(slot_read_is_the_value) << "repeat " << repeat << ": a satisfied verdict read the satisfier's value from slot 0";
-		EXPECT_TRUE(verdict_carries_a_reason) << "repeat " << repeat << ": a released verdict reported operation_canceled";
+		// Each message streams what was seen as well as what was expected, because a
+		// bare EXPECT_TRUE over a derived predicate prints only "false" and a CI failure
+		// in a 200-repeat loop should be diagnosable without rerunning it.
+		EXPECT_TRUE(value_is_the_satisfiers) << "repeat " << repeat << ": a child the satisfier won read the published value; satisfier_won=" << ran.child.satisfier_won << " value=" << ran.child.value;
+		EXPECT_TRUE(slot_read_is_the_value) << "repeat " << repeat << ": a satisfied verdict read the satisfier's value from slot 0; satisfied=" << ran.parent.satisfied << " values_seen=" << ran.values_seen;
+		EXPECT_TRUE(verdict_carries_a_reason) << "repeat " << repeat << ": a released verdict reported operation_canceled; satisfied=" << ran.parent.satisfied << " error=" << ran.parent.error.message();
 	}
 }
 
@@ -1349,7 +1359,11 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	for(int repeat = 0; repeat < stop_race_repeats; ++repeat)
 	{
 		race_record ran;
-		run_one_stop_race(repeat, ran);
+
+		// ASSERT_NO_FATAL_FAILURE, because an ASSERT_* inside run_one_stop_race returns
+		// only from that helper: a fired precondition would otherwise leave the chain it
+		// had already started parked forever and run the remaining repeats anyway.
+		ASSERT_NO_FATAL_FAILURE(run_one_stop_race(repeat, ran));
 		check_the_race_resolved_once(repeat, ran);
 		check_the_race_reported_consistently(repeat, ran);
 
@@ -1393,6 +1407,18 @@ TEST_F(WhenAllTest, AHomeSchedulerDefersTheParentsDestructionPastItsChildrens)
 	// destroying in place whenever the context carries a home, so the chain's own
 	// teardown is deferred -- and it is posted *first*, from the cancellation point the
 	// resumed body reaches, before the children's stop has even been requested.
+	//
+	// That "first" is implementation-order-dependent, in the same way and for the same
+	// reason as TheChildrensStopOutlivesABlockTheLastChildFreed above. Both of this
+	// chain's stop callbacks are registered on its token in await_suspend -- the block's
+	// m_link first, the joiner's waiter_stop_release second -- and this test's ordering
+	// assertion holds because libstdc++ invokes them in reverse registration order, so
+	// the joiner is claimed (resuming the chain, which then reaches its cancellation
+	// point and posts) before m_link runs cancel() and the children are posted. On a
+	// standard library that invokes callbacks forward, the children would be posted
+	// first, destruction_order below would read {2, 1, 0}, and this test would fail with
+	// the design still sound. The deferral itself -- three posts, nothing destroyed in
+	// place -- does not depend on that order; only their sequence does.
 	handle.request_stop();
 
 	EXPECT_EQ(record.resumptions, 1);
@@ -1484,6 +1510,15 @@ TEST_F(WhenAllTest, AStopAfterTheWaitWasSatisfiedRunsOverABlockTheAwaiterHasLeft
 	// gone. AddressSanitizer is the instrument: a link that outlived its block, or a
 	// block whose last reference was the awaiter's rather than the last child's, reads
 	// freed memory here.
+	//
+	// And "the instrument" is literal: this test is a sanitizer-only vehicle, measured
+	// rather than assumed. Against the mutation it exists for -- ~when_all_awaiter
+	// deleting the state instead of calling release(), so the block dies with the
+	// awaiter rather than with its last reference -- it passes 200 out of 200 repeats in
+	// a debug build and fails 200 out of 200 under AddressSanitizer, where the report is
+	// heap-use-after-free in combinator_state::release() called from
+	// on_combinator_child_complete, on the block this awaiter had already freed. A green
+	// debug run of this test therefore says nothing at all; only the ASan preset does.
 	handle.request_stop();
 
 	EXPECT_EQ(live_frames, 0);
@@ -1507,6 +1542,14 @@ TEST_F(WhenAllTest, ANestedWhenAllInsideAChildIsItsOwnRoot)
 	// combinator links to the child's token exactly as the outer one links to the
 	// chain's. Three blocks are in flight -- the outer one and one per child -- each
 	// freed by its own last reference.
+	//
+	// The assertions below cannot tell that route apart from any other that reaches both
+	// levels, so the test's name is earned by a mutation rather than by them: route the
+	// children through the chain's token instead of the block's own stop source -- the
+	// one line this test discriminates, see the DELICATE note on child_options.token in
+	// when_all.hpp -- and this test fails 0 pass / 91 fail / 109 hang out of 200 repeats
+	// while every other test in the suite still passes. It is the only test in the file
+	// that catches it, and one level of nesting is why.
 	handle.request_stop();
 
 	EXPECT_EQ(record.resumptions, 1);
