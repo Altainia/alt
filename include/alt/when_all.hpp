@@ -8,16 +8,19 @@
 #include <alt/detail/combinator_state.hpp>
 #include <alt/detail/completion_counter.hpp>
 #include <cassert>
+#include <concepts>
 #include <coroutine>
 #include <cstddef>
 #include <expected>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <system_error>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace alt::detail
 {
@@ -244,7 +247,7 @@ namespace alt::detail
 		template<typename Promise>
 		bool await_suspend(std::coroutine_handle<Promise> h)
 		{
-			m_state = std::make_unique<when_all_state<Slots>>(child_count).release();
+			m_state = std::make_unique<when_all_state<Slots>>(child_count()).release();
 
 			start_options child_options{};
 			child_options.on_completion = {.invoke = &on_combinator_child_complete, .state = &m_state->shared()};
@@ -286,9 +289,7 @@ namespace alt::detail
 			// point completes inside start() and fires its hook there.
 			// No rollback if start throws, exactly as task_group::spawn records. Here the
 			// consequence is a leaked block, which alt::when_all documents.
-			[&]<std::size_t... I>(std::index_sequence<I...>) {
-				(start_child<I>(child_options), ...);
-			}(std::make_index_sequence<child_count>{});
+			start_children(child_options);
 
 			// Retire the starter. Until this returns no child can have driven the count
 			// to zero, and nothing resumes here either: no joiner is parked yet.
@@ -378,8 +379,52 @@ namespace alt::detail
 		}
 
 	private:
+		/** True for the range form, whose storage is the range itself and not a tuple. */
+		static constexpr bool is_range_form = std::ranges::range<AwaitableTuple>;
+
 		/** How many children this combinator fans out. */
-		static constexpr std::size_t child_count = std::tuple_size_v<AwaitableTuple>;
+		[[nodiscard]] std::size_t child_count() const
+		{
+			if constexpr(is_range_form)
+			{
+				return std::ranges::size(*m_awaitables);
+			}
+			else
+			{
+				return std::tuple_size_v<AwaitableTuple>;
+			}
+		}
+
+		/** Starts every child, in argument order for a tuple and in range order for a range. */
+		void start_children(const start_options& options)
+		{
+			if constexpr(is_range_form)
+			{
+				// The range is iterated here and nowhere else, once. Slot i belongs to the
+				// i-th element, so the children are started, and their slots filled, in
+				// range order and assembly reads them back in that order.
+				using element_type = std::ranges::range_value_t<AwaitableTuple>;
+
+				std::size_t index = 0;
+
+				for(auto it = std::ranges::begin(*m_awaitables); it != std::ranges::end(*m_awaitables); ++it, ++index)
+				{
+					m_state->shared().add_ref();
+
+					// The element is constructed from the iterator's rvalue reference in
+					// place of the child's by-value parameter, so the child's frame owns
+					// it and the caller's range is left holding moved-from elements.
+					static_cast<void>(alt::start(
+					  when_all_child<element_type>(element_type(std::ranges::iter_move(it)), &m_state->slots()[index], &m_state->shared()), options));
+				}
+			}
+			else
+			{
+				[&]<std::size_t... I>(std::index_sequence<I...>) {
+					(start_child<I>(options), ...);
+				}(std::make_index_sequence<std::tuple_size_v<AwaitableTuple>>{});
+			}
+		}
 
 		/** Raises the count for child @p I and starts it. */
 		template<std::size_t I>
@@ -442,6 +487,42 @@ namespace alt::detail
 		awaitables_type m_awaitables;
 	};
 
+	/**
+	 * @brief Owns the range a when_all was given until the await completes.
+	 *
+	 * The range form's counterpart of detail::when_all_awaitable. @p Range is the
+	 * deduced forwarding type: a value type owns the range here, an lvalue reference
+	 * binds the caller's. Either way the elements are moved out, never copied; see
+	 * alt::when_all.
+	 */
+	template<typename Range>
+	class [[nodiscard]] when_all_range_awaitable
+	{
+	public:
+		/** The type each element is moved into a child as. */
+		using element_type = std::ranges::range_value_t<Range>;
+
+		/** The vector of values a satisfied wait yields. */
+		using results_type = std::vector<when_all_value_t<element_type>>;
+
+		/** The vector of result stores the children write into. */
+		using slots_type = std::vector<when_all_slot_t<element_type>>;
+
+		/** Takes the range, moving an rvalue and binding an lvalue. */
+		explicit when_all_range_awaitable(Range&& range): m_range(std::forward<Range>(range))
+		{
+		}
+
+		/** The awaiter, pointing at this object's range. Rvalue-only: it is a temporary. */
+		auto operator co_await() && noexcept
+		{
+			return when_all_awaiter<results_type, slots_type, std::remove_reference_t<Range>>{&m_range};
+		}
+
+	private:
+		std::conditional_t<std::is_lvalue_reference_v<Range>, Range, std::remove_cvref_t<Range>> m_range;
+	};
+
 }
 
 namespace alt
@@ -501,6 +582,43 @@ namespace alt
 	[[nodiscard]] auto when_all(Awaitables&&... awaitables)
 	{
 		return detail::when_all_awaitable<Awaitables...>{std::forward<Awaitables>(awaitables)...};
+	}
+
+	/**
+	 * @brief Awaits every element of @p range concurrently and yields a vector of results.
+	 *
+	 * The range form of the argument-list overload above, with the same children, the
+	 * same cancellation result and the same exception rule. Awaiting the result yields
+	 * @c std::expected<std::vector<V>, std::error_code> with
+	 * @c V = detail::when_all_value_t<std::ranges::range_value_t<R>>, element @c i holding
+	 * what awaiting element @c i produced, in range order. A void element contributes
+	 * @c std::monostate, so the vector's element type is uniform. An empty range yields an
+	 * empty vector, not a cancellation, at the cost of one allocation.
+	 *
+	 * **Every element is moved into its child, so the child owns it.** A
+	 * @c std::vector<alt::task<int>> therefore yields a @c std::vector<int>: the value
+	 * is moved out of the child's frame before it dies. Because of that this overload
+	 * does not inherit the lvalue precondition of the argument-list form -- nothing the
+	 * children run refers into the caller's range. An rvalue range is owned by the
+	 * returned awaitable; an lvalue range is bound, not copied, and is left holding
+	 * moved-from elements, so it must not be awaited twice. A const range is accepted
+	 * only if its elements are copyable, and they are then copied. A range of references
+	 * to awaitables the caller keeps alive is out of scope.
+	 *
+	 * **The range must be a std::ranges::sized_range, not merely an input range.** The
+	 * child count is needed before the first child starts, because the shared block's
+	 * counter is constructed with the children plus the starter. Infinite and streaming
+	 * ranges are a non-goal and are excluded by this. The range is iterated once.
+	 *
+	 * The leak when starting a child throws, and the home and stop-source sharing, are
+	 * the argument-list form's; see there.
+	 */
+	template<std::ranges::sized_range R>
+	  requires awaitable<std::ranges::range_value_t<R>> &&
+	           std::constructible_from<std::ranges::range_value_t<R>, std::ranges::range_rvalue_reference_t<R>>
+	[[nodiscard]] auto when_all(R&& range)
+	{
+		return detail::when_all_range_awaitable<R>{std::forward<R>(range)};
 	}
 
 }

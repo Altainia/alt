@@ -25,6 +25,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "coroutine_test_support.hpp"
 
@@ -696,4 +697,197 @@ TEST_F(WhenAllTest, AChildCompletingOnAnotherThreadDuringTheFanOutDoesNotResumeE
 		EXPECT_TRUE(record.satisfied) << "repeat " << repeat;
 		EXPECT_EQ(live_frames, 0) << "repeat " << repeat;
 	}
+}
+
+// The range form. Its element type is the range's value type, which a when_all owns and
+// moves into the children, so a vector of tasks yields values rather than references.
+using range_of_value_tasks = decltype(alt::when_all(std::declval<std::vector<alt::task<int>>>()));
+using range_of_void_tasks  = decltype(alt::when_all(std::declval<std::vector<alt::task<void>>>()));
+
+static_assert(alt::awaitable<range_of_value_tasks>);
+static_assert(std::same_as<alt::await_result_t<range_of_value_tasks>, std::expected<std::vector<int>, std::error_code>>);
+static_assert(std::same_as<alt::await_result_t<range_of_void_tasks>, std::expected<std::vector<std::monostate>, std::error_code>>);
+
+namespace
+{
+	/** What a move_counted awaitable's moves are tallied into. */
+	struct move_tally
+	{
+		int moves = 0;
+	};
+
+	/** An awaitable that is ready at once, move-only, and counts every move of itself. */
+	class move_counted
+	{
+	public:
+		explicit move_counted(move_tally* tally): m_tally(tally)
+		{
+		}
+
+		move_counted(move_counted&& other) noexcept: m_tally(other.m_tally)
+		{
+			++m_tally->moves;
+		}
+
+		move_counted(const move_counted&)            = delete;
+		move_counted& operator=(const move_counted&) = delete;
+		move_counted& operator=(move_counted&&)      = delete;
+		~move_counted()                              = default;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return 1;
+		}
+
+	private:
+		move_tally* m_tally;
+	};
+
+	/** A sized range that counts how often it is iterated and sized. */
+	struct counting_range
+	{
+		std::vector<move_counted> items;
+		int*                      begins;
+		int*                      sizes;
+
+		[[nodiscard]] auto begin()
+		{
+			++*begins;
+			return items.begin();
+		}
+
+		[[nodiscard]] auto end()
+		{
+			return items.end();
+		}
+
+		[[nodiscard]] std::size_t size() const
+		{
+			++*sizes;
+			return items.size();
+		}
+	};
+
+	/** Parks in a when_all over a vector of tasks that each park on an event of their own. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task range_event_root(alt::async_event& first, alt::async_event& second, wait_record& record)
+	{
+		std::vector<alt::task<alt::wait_result>> children;
+		children.push_back(tracked_wait(first, 1));
+		children.push_back(tracked_wait(second, 2));
+
+		const auto result = co_await alt::when_all(std::move(children));
+		record_outcome(record, result);
+		co_await alt::cancellation_point{};
+	}
+}
+
+TEST_F(WhenAllTest, ARangeOfTasksYieldsAVectorOfResults)
+{
+	std::vector<alt::task<int>> children;
+	children.push_back(make_value_task(1));
+	children.push_back(make_value_task(2));
+	children.push_back(make_value_task(3));
+
+	const auto result = alt::sync_wait(alt::when_all(std::move(children)));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, (std::vector<int>{1, 2, 3})) << "results are in range order";
+}
+
+TEST_F(WhenAllTest, ARangeOfVoidTasksYieldsAVectorOfMonostate)
+{
+	std::vector<alt::task<void>> children;
+	children.push_back(make_void_task());
+	children.push_back(make_void_task());
+
+	const auto result = alt::sync_wait(alt::when_all(std::move(children)));
+
+	ASSERT_TRUE(result.has_value());
+	static_assert(std::same_as<std::remove_cvref_t<decltype(*result)>, std::vector<std::monostate>>);
+	EXPECT_EQ(result->size(), 2U);
+}
+
+TEST_F(WhenAllTest, AnEmptyRangeYieldsAnEmptyVector)
+{
+	// The block is allocated for no children and released by the awaiter alone; ASan
+	// is what reports it if that release is missing.
+	const auto result = alt::sync_wait(alt::when_all(std::vector<alt::task<int>>{}));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_TRUE(result->empty());
+}
+
+TEST_F(WhenAllTest, ARangeChildThatThrewRethrowsAtTheAwait)
+{
+	std::vector<alt::task<int>> children;
+	children.push_back(make_value_task(1));
+	children.push_back(make_throwing_task());
+	children.push_back(make_value_task(3));
+
+	EXPECT_THROW(
+	  {
+		  [[maybe_unused]] const auto result = alt::sync_wait(alt::when_all(std::move(children)));
+	  },
+	  std::runtime_error);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(WhenAllTest, CancellingAChainParkedOnARangeFormStopsEveryChild)
+{
+	alt::async_event first;
+	alt::async_event second;
+	wait_record      record;
+
+	auto handle = alt::start(range_event_root(first, second, record));
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_EQ(live_frames, 2) << "both children are parked on their own event";
+
+	handle.request_stop();
+
+	EXPECT_EQ(live_frames, 0) << "every child's frame is gone";
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_FALSE(record.satisfied);
+	EXPECT_EQ(record.error, released_error);
+}
+
+TEST_F(WhenAllTest, ARangeIsIteratedOnceAndItsElementsAreMovedIntoTheChildren)
+{
+	constexpr int elements = 4;
+
+	move_tally tally;
+	int        begins = 0;
+	int        sizes  = 0;
+
+	counting_range range{.items = {}, .begins = &begins, .sizes = &sizes};
+	range.items.reserve(elements);
+
+	for(int i = 0; i < elements; ++i)
+	{
+		range.items.emplace_back(&tally);
+	}
+
+	ASSERT_EQ(tally.moves, 0) << "emplaced in place, so nothing has moved yet";
+
+	const auto result = alt::sync_wait(alt::when_all(std::move(range)));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(result->size(), static_cast<std::size_t>(elements));
+	EXPECT_EQ(begins, 1) << "the range is iterated exactly once";
+
+	// Measured: three moves per element -- the argument-list form's four for one
+	// rvalue argument, less the tuple stage this form does not have -- and no copies,
+	// which move_counted would not compile. A fourth would be a copy of the range or
+	// of an element made on the way to the child.
+	constexpr int moves_per_element = 3;
+	EXPECT_EQ(tally.moves, elements * moves_per_element);
 }
