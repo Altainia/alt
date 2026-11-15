@@ -45,6 +45,7 @@ namespace alt::detail
 		{
 		}
 
+		/** Destroys the block first and the slots after it. See the note on the members. */
 		~when_all_state() = default;
 
 		when_all_state(const when_all_state&)            = delete;
@@ -194,7 +195,8 @@ namespace alt::detail
 		 * can never reach zero references with a joiner still on the counter: the
 		 * counter is destroyed sixth of the block's seven members, and
 		 * ~completion_counter resumes every still-parked joiner, whose body would then
-		 * run against four already-destroyed members. The joiner is always off the
+		 * run against five already-destroyed members -- among them m_cancelled, which
+		 * await_resume reads. The joiner is always off the
 		 * counter before this runs -- claimed by the zero transition, claimed by the
 		 * chain's cancellation, or never linked at all -- because this destructor runs
 		 * only at the end of the co_await full-expression, after await_resume.
@@ -282,7 +284,8 @@ namespace alt::detail
 			// One add_ref per child, before that child is started, for the same reason
 			// task_group::spawn raises its count before start: a body with no suspension
 			// point completes inside start() and fires its hook there.
-			// No rollback if start throws, exactly as task_group::spawn records.
+			// No rollback if start throws, exactly as task_group::spawn records. Here the
+			// consequence is a leaked block, which alt::when_all documents.
 			[&]<std::size_t... I>(std::index_sequence<I...>) {
 				(start_child<I>(child_options), ...);
 			}(std::make_index_sequence<child_count>{});
@@ -299,7 +302,7 @@ namespace alt::detail
 			// the combinator_state constructor for why the count stays anyway.
 			m_state->shared().counter().complete();
 
-			// Park on the counter. completion_counter::join() is reused as-is rather
+			// Park on the counter. completion_counter::join_awaiter is reused as-is rather
 			// than hand-rolling a single-joiner path: the resumption election between
 			// "the last child retired" and "the chain was cancelled" is exactly what
 			// waiter_list::claim already decides, and a bespoke election would be that
@@ -330,15 +333,25 @@ namespace alt::detail
 		 * that plainly:
 		 *
 		 * - Dropping it alone fails nothing, 0/200 in debug and 0/200 under
-		 *   ThreadSanitizer. Under today's libstdc++ stop callbacks run in reverse
-		 *   registration order, so join_awaiter's waiter_stop_release (registered second)
-		 *   always fires before the block's m_link, the joiner is released before
-		 *   cancel() runs, and !waited has already decided the verdict.
+		 *   ThreadSanitizer. Whenever the chain's token is stopped before the zero
+		 *   transition claims the joiner, the joiner's waiter_stop_release has claimed its
+		 *   node, so the verdict is already !waited: a token stopped before the park
+		 *   (the fan-out test's path, where m_link fired long before any joiner existed)
+		 *   makes registering the callback in wait_awaiter::await_suspend claim the node,
+		 *   waiter_list::link then refuses it in the claim election without evaluating
+		 *   the condition, and m_released is set; a stop after the park claims and
+		 *   resumes the parked node.
 		 * - Nothing in [stopcallback] fixes that order. Register the link after the join
 		 *   park instead -- making cancel() run first, which is what any other order
 		 *   amounts to -- and dropping this test fails 200/200: a satisfied verdict over
 		 *   unfilled slots, then result_store's "reading an alt coroutine result before it
 		 *   was produced" assert. With the test present, that same reordering passes.
+		 *
+		 * A stop that races a completion is reported as a cancellation. If the last child
+		 * retires legitimately, the zero transition wins the claim, and the chain's stop
+		 * then lands before this reads the flag, every slot is filled and the result is
+		 * still std::errc::operation_canceled: the cancelled() test discards a fully
+		 * assembled satisfied result as well as guarding unfilled slots.
 		 *
 		 * May rethrow a child's exception, lowest position first.
 		 */
@@ -459,6 +472,15 @@ namespace alt
 	 *
 	 * A child's exception is rethrown at the await, the lowest position's first, and
 	 * the other children's results are then discarded with the slots.
+	 *
+	 * **A child that fails to start leaks the shared block.** If starting child @c i
+	 * throws -- its coroutine frame allocation failing is the realistic case -- the
+	 * exception propagates out of the await and nothing releases the reference that
+	 * child was given, so the block, its result slots and the children's stop source are
+	 * never freed. Children @c 0 to @c i-1 are already running and run to completion
+	 * unobserved; their results are discarded. There is no hang, because the chain never
+	 * parks. This is the same no-rollback contract as alt::task_group::spawn, and a
+	 * caller sizing an out-of-memory budget should count it as a leak per failed start.
 	 *
 	 * One precondition, in the family's existing shape: **an awaitable passed as an
 	 * lvalue, and everything it refers to, must outlive the children** -- which with an

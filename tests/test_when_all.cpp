@@ -3,6 +3,7 @@
 #include <alt/async_event.hpp>
 #include <alt/awaitable.hpp>
 #include <alt/cancellable_task.hpp>
+#include <alt/scheduler.hpp>
 #include <alt/sync_wait.hpp>
 #include <alt/task.hpp>
 #include <alt/task_completion_source.hpp>
@@ -11,8 +12,10 @@
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
+#include <exception>
 #include <expected>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -75,6 +78,15 @@ namespace
 	alt::task<int> make_throwing_task()
 	{
 		throw std::runtime_error{"child body"};
+		co_return 0;
+	}
+
+	/** A task whose body raises @p thrown and then throws a runtime_error saying @p message. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the flag is owned by the calling test, which joins the thread watching it before leaving its scope.
+	alt::task<int> make_signalling_throwing_task(std::string message, std::atomic<bool>& thrown)
+	{
+		thrown.store(true, std::memory_order_release);
+		throw std::runtime_error{message};
 		co_return 0;
 	}
 
@@ -235,6 +247,45 @@ namespace
 		const auto result = co_await alt::when_all(tracked_wait(first, 1), tracked_wait(second, 2));
 		record_outcome(record, result);
 		co_await alt::cancellation_point{};
+	}
+
+	/** Parks on @p gate and hands back how its wait ended. Untracked. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
+	alt::task<alt::wait_result> wait_on(alt::async_event& gate)
+	{
+		const alt::wait_result result = co_await gate;
+		co_return result;
+	}
+
+	/**
+	 * A task whose lifetime is observable through live_frames: it owns a tracker, and a
+	 * when_all moves it into its child's frame, so the tracker dies exactly when that
+	 * child frame does. The only way to see a child frame's teardown from outside, since
+	 * the child's own body has long finished by the time the frame is destroyed.
+	 */
+	class homed_wait
+	{
+	public:
+		homed_wait(alt::async_event& gate, int tag): m_task(wait_on(gate)), m_tracker(std::make_unique<frame_tracker>(tag))
+		{
+		}
+
+		[[nodiscard]] auto operator co_await() && noexcept
+		{
+			return std::move(m_task).operator co_await();
+		}
+
+	private:
+		alt::task<alt::wait_result>    m_task;
+		std::unique_ptr<frame_tracker> m_tracker;
+	};
+
+	/** Parks in a when_all over two homed_wait children and records how the wait ended. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task home_root(alt::async_event& first, alt::async_event& second, wait_record& record)
+	{
+		const auto result = co_await alt::when_all(homed_wait{first, 1}, homed_wait{second, 2});
+		record_outcome(record, result);
 	}
 
 	/** Parks in a when_all whose second child's teardown satisfies the first child. */
@@ -413,14 +464,72 @@ TEST_F(WhenAllTest, EveryChildAlreadySatisfiedCompletesWithoutSuspending)
 
 TEST_F(WhenAllTest, AChildThatThrewRethrowsAtTheAwait)
 {
-	// The result is bound rather than discarded. It is [[nodiscard]], and a cast to void
-	// does not satisfy clang-tidy-19's bugprone-unused-return-value, whose
-	// AllowCastToVoid defaults off there. The statement throws, so nothing is ever
-	// assigned; the binding exists to name the value the throw replaced.
+	// The result is bound rather than discarded. A cast to void satisfies the compiler's
+	// unused-result warning but not clang-tidy-19's bugprone-unused-return-value, which
+	// was measured firing on the cast form here: that check's default
+	// CheckedReturnTypes includes std::expected, which is what sync_wait returns for a
+	// when_all, and its AllowCastToVoid defaults off. The statement throws, so nothing
+	// is ever assigned; the binding exists to name the value the throw replaced.
 	EXPECT_THROW({ [[maybe_unused]] const auto results = alt::sync_wait(alt::when_all(make_throwing_task(), make_value_task(5))); }, std::runtime_error);
 
 	// The other child's result is discarded with the slots, and every frame is gone.
 	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(WhenAllTest, TwoThrowingChildrenRethrowTheLowestPositionNotTheFirstToThrow)
+{
+	alt::task_completion_source<int> first;
+	std::atomic<bool>                second_threw{false};
+
+	// Position 0 is parked on its source when position 1 is started, so position 1 throws
+	// first. Only once it has thrown does this thread fail position 0, which therefore
+	// completes last. The rethrown exception is position 0's, so the rule is position
+	// order rather than completion order.
+	std::jthread failer{[&] {
+		while(!second_threw.load(std::memory_order_acquire))
+		{
+			std::this_thread::yield();
+		}
+
+		first.set_exception(std::make_exception_ptr(std::runtime_error{"position 0"}));
+	}};
+
+	std::string caught;
+
+	try
+	{
+		[[maybe_unused]] const auto results = alt::sync_wait(alt::when_all(first, make_signalling_throwing_task("position 1", second_threw)));
+		ADD_FAILURE() << "neither child's exception reached the await";
+	}
+	catch(const std::runtime_error& error)
+	{
+		caught = error.what();
+	}
+
+	EXPECT_EQ(caught, "position 0");
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(WhenAllTest, TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown)
+{
+	alt::manual_scheduler home;
+	alt::async_event      first;
+	alt::async_event      second;
+	wait_record           record;
+
+	auto handle = alt::start(home_root(first, second, record), {.home = alt::scheduler_ref{home}});
+	ASSERT_EQ(live_frames, 2) << "both children are parked on their own event";
+
+	handle.request_stop();
+
+	// A child's frame is not destroyed by the stop that cancels it. Its teardown is
+	// posted to the chain's home, the only way the child can have got that home, since
+	// the test sets start_options::home on the root alone. The chain's own frame is not
+	// posted: its body ran to its end.
+	EXPECT_EQ(live_frames, 2) << "posted, not destroyed";
+	EXPECT_EQ(home.drain(), 2U) << "one teardown per child";
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_EQ(record.error, released_error);
 }
 
 TEST_F(WhenAllTest, AnAwaitSuspendThatThrowsIsCaughtByTheChildRatherThanTerminating)
@@ -516,6 +625,12 @@ TEST_F(WhenAllTest, TheChildrensStopOutlivesABlockTheLastChildFreed)
 	// configuration that matters: libstdc++ skips its final relock after the last
 	// callback in the list, so a release during any earlier one is the case that reaches
 	// the state again afterwards. See the DELICATE note on combinator_state::cancel().
+	//
+	// This test is implementation-order-dependent. It relies on libstdc++ invoking stop
+	// callbacks in reverse registration order and skipping the relock after the last
+	// one. On a standard library that invokes them forward, the release lands during the
+	// last callback instead, the use-after-free is no longer reached, and the test still
+	// passes: a green run on another toolchain is not evidence the counted copy works.
 	handle.request_stop();
 
 	EXPECT_EQ(live_frames, 0);

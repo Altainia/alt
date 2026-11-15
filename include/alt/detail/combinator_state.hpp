@@ -177,8 +177,8 @@ namespace alt::detail
 			// simpler cancellation tests do not expose it, because libstdc++ skips that
 			// relock after the LAST callback in the list; the test is built so the release
 			// lands during an earlier one.
-			const std::stop_source children = m_children;
-			children.request_stop();
+			const std::stop_source children_source = m_children;
+			children_source.request_stop();
 		}
 
 		/** Whether cancel() has been called. Pairs with the release in cancel(). */
