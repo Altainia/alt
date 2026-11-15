@@ -23,8 +23,10 @@ cancellation.
 **One case narrows point 6, and it is the case this library's own async
 primitives put a coroutine in.** A chain parked on an
 [`alt::async_event`](async_event.md), [`alt::async_latch`](async_latch.md),
-[`alt::async_semaphore`](async_semaphore.md) or
-[`alt::async_mutex`](async_mutex.md) is not left parked until something
+[`alt::async_semaphore`](async_semaphore.md),
+[`alt::async_mutex`](async_mutex.md),
+[`alt::task_completion_source`](task_completion_source.md) or
+[`alt::task_group::join()`](task_group.md) is not left parked until something
 satisfies it. The awaiter registers a stop callback, and `request_stop()` runs
 that callback, which **releases the parked waiter and resumes its body**, with a
 result reporting that the wait was released rather than satisfied. For such a
@@ -38,13 +40,13 @@ And it executes **on the thread that called `request_stop()`, even when
 scenario above that means body code running on the thread that closed the
 window, synchronously inside `request_stop()`, while the window is on its way
 out — which is the very thing point 6 otherwise rules out. A coroutine that
-awaits one of the four and then touches thread-affine state must check the
+awaits one of these six and then touches thread-affine state must check the
 wait's result and `co_await alt::resume_on(...)` before touching it.
 
 Step 5 is the interesting one. Cancellation is checked on entry to every
 suspension point, and also at the resumptions this library owns: a hop through
 `alt::resume_on`, a child `alt::task` completing and handing control back to its
-parent, and the stop callback a wait on one of the four async primitives
+parent, and the stop callback a wait on one of those six waits
 registers. The first two observe the stop and tear the chain down instead of
 resuming; the third resumes the waiter deliberately, as just described. So the
 resume in step 5 does not happen at all if a stop was requested while the task
@@ -139,6 +141,12 @@ struct exception_handler
     void* state                                           = nullptr;
 };
 
+struct completion_handler
+{
+    void (*invoke)(void* state) noexcept = nullptr;
+    void* state                          = nullptr;
+};
+
 class cancellation_handle
 {
 public:
@@ -153,9 +161,10 @@ public:
 
 struct start_options
 {
-    std::stop_token   token{};
-    scheduler_ref     home{};
-    exception_handler on_exception{};
+    std::stop_token    token{};
+    scheduler_ref      home{};
+    exception_handler  on_exception{};
+    completion_handler on_completion{};
 };
 
 class [[nodiscard]] cancellable_task
@@ -251,8 +260,8 @@ the scenario above). If code after `request_stop()` needs to know teardown
 has actually happened, it needs its own signal for that — `cancellable_task`
 does not provide one.
 
-Note what this does and does not say about a chain parked on one of the four
-async primitives, which is the case the narrowing of point 6 above describes.
+Note what this does and does not say about a chain parked on one of the six
+waits listed at the top of this page, which is the case the narrowing of point 6 above describes.
 There, `request_stop()` really does run body code before it returns, and with no
 `home` it destroys the frames inside the call as well — so for that chain it is
 the *acknowledgement* that is missing rather than the work: nothing tells the
@@ -278,6 +287,38 @@ this teardown work is still queued, leaks the entire chain silently: nothing
 about the deferred path ever raises an error for it, it simply never
 destroys the frames.
 
+## An owner can be told when the task is gone
+
+Set `on_completion` in `start_options` and the task calls it once, as its frame
+is destroyed:
+
+```cpp
+alt::start(job(), {.on_completion = {.invoke = &task_gone, .state = &owner}});
+```
+
+The frame's destruction is the only point that normal completion and cancelled
+teardown both pass through, so the hook fires on either path, on whichever thread
+destroyed the frame. On the toolchains this library
+supports (GCC and Clang) it is observed to run after the body's locals have been
+destroyed, with only the frame storage left; the standard does not order a
+suspended frame's live locals against its promise on the `destroy()` path, so
+that is pinned by `TheCompletionHookFiresOnCancelledTeardown` rather than
+guaranteed. It never fires for a task that was never started.
+
+The hook must not throw. The function pointer is `noexcept` in its type for that
+reason, since it runs from a destructor. It must also not touch the task: the
+frame is already being torn down. A request to stop through a copy of the
+`cancellation_handle` is safe, because the stop state is reference counted and
+outlives the frame.
+
+A caller who wants a per-task notification *inside* the body, while its locals
+are still alive, uses an `alt::scope_exit` local instead. That also runs on both
+paths.
+
+For a set of tasks, [`alt::task_group`](task_group.md) is the teardown point: it
+owns this hook and the stop token, and gives a point at which every task it
+spawned is known gone.
+
 ## Foreign awaitables are checked on entry only
 
 Cancellation is checked in two places. On entry to every suspension point,
@@ -285,8 +326,8 @@ which covers anything you can `co_await`. And at the resumptions this library
 owns, of which there are three: `alt::resume_on` returning from a scheduler, a
 child `alt::task` completing and transferring back to its parent, and the stop
 callback that a wait on `alt::async_event`, `alt::async_latch`,
-`alt::async_semaphore` or `alt::async_mutex` registers
-(`detail::waiter_stop_release`).
+`alt::async_semaphore`, `alt::async_mutex`, `alt::task_completion_source` or
+`alt::task_group::join()` registers (`detail::waiter_stop_release`).
 
 The first two observe the stop and tear the chain down instead of resuming. The
 third does the opposite: it unlinks the parked waiter and **resumes** it, with a
@@ -348,10 +389,11 @@ ago cancellation was requested. This is the same failure mode as the leaked
 home scheduler above, viewed from the awaited side rather than the teardown
 side.
 
-The four async primitives are the exception, and they are the exception
+Those six waits are the exception, and they are the exception
 deliberately. A coroutine parked on an [`alt::async_event`](async_event.md)
 nobody ever sets — or on a latch nobody counts down, a semaphore nobody
-releases, a mutex nobody unlocks — is *not* stuck here: the stop callback its
+releases, a mutex nobody unlocks, a task_completion_source nobody sets, or a
+`group.join()` whose tasks never finish — is *not* stuck here: the stop callback its
 awaiter registered releases the waiter, its body resumes with the released
 result, and the chain tears itself down at the following suspension point. That
 is the whole purpose of those stop callbacks. Everything else an awaitable can

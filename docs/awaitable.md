@@ -77,6 +77,12 @@ else
     report(result.error());  // a std::exception_ptr
 ```
 
+`as_expected` is not meant to be composed over
+[`alt::task_completion_source`](task_completion_source.md). That type keeps its
+own split, rethrowing the exception its setter supplied and carrying
+`std::errc::operation_canceled` in a `std::expected<T, std::error_code>`, so
+wrapping it would capture the first into a second, incompatible error channel.
+
 Only what `await_resume` throws is captured, because that is where
 `alt::task` reports the outcome of its coroutine body. An exception thrown by
 `await_suspend` — the awaited operation failing to start, rather than

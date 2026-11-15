@@ -25,6 +25,21 @@ namespace alt
 	};
 
 	/**
+	 * @brief Where an alt::cancellable_task announces that its frame is gone.
+	 *
+	 * The sibling of alt::exception_handler, in the same allocation-free erased
+	 * shape, for the other thing an owner wants to know. Unlike that handler the
+	 * function pointer is noexcept in its type, because this one fires from a
+	 * destructor, where an exception would terminate the process anyway. An empty
+	 * handler means nobody is told.
+	 */
+	struct completion_handler
+	{
+		void (*invoke)(void* state) noexcept = nullptr;
+		void* state                          = nullptr;
+	};
+
+	/**
 	 * @brief An owner's handle to a running alt::cancellable_task.
 	 *
 	 * Safe to use for as long as the handle exists, including after the task has
@@ -100,12 +115,50 @@ namespace alt
 
 		/** Where an escaped exception goes. Empty means std::terminate. */
 		exception_handler on_exception{};
+
+		/**
+		 * Told once that the task's frame has been destroyed. It fires from the
+		 * frame's own destruction, on whichever thread destroyed it, which covers
+		 * normal completion and cancelled teardown because that destruction is the
+		 * only point both paths pass through. On GCC and Clang the body's locals are
+		 * observed to be gone by then, leaving only the frame storage (the standard
+		 * does not order them against the promise on the destroy() path, and
+		 * TheCompletionHookFiresOnCancelledTeardown pins it), so the hook must not
+		 * touch the task. It
+		 * never fires for a task that was not started. Empty means nobody is told.
+		 */
+		completion_handler on_completion{};
 	};
 
 	class cancellable_task;
 
 	namespace detail
 	{
+
+		/**
+		 * @brief Fires an alt::completion_handler when destroyed.
+		 *
+		 * A member of the promise, so the call happens as the frame is torn down.
+		 */
+		struct completion_notifier
+		{
+			alt::completion_handler handler{};
+
+			completion_notifier() noexcept = default;
+
+			~completion_notifier()
+			{
+				if(handler.invoke != nullptr)
+				{
+					handler.invoke(handler.state);
+				}
+			}
+
+			completion_notifier(const completion_notifier&)            = delete;
+			completion_notifier& operator=(const completion_notifier&) = delete;
+			completion_notifier(completion_notifier&&)                 = delete;
+			completion_notifier& operator=(completion_notifier&&)      = delete;
+		};
 
 		/**
 		 * @brief Forwards an external stop request into the task's own source.
@@ -198,10 +251,11 @@ namespace alt
 			/** Installs the root handle and the options. Must run before the body starts. */
 			void configure(std::coroutine_handle<> root, const alt::start_options& options)
 			{
-				m_context.root  = root;
-				m_context.home  = options.home;
-				m_context.token = m_source.get_token();
-				m_handler       = options.on_exception;
+				m_context.root       = root;
+				m_context.home       = options.home;
+				m_context.token      = m_source.get_token();
+				m_handler            = options.on_exception;
+				m_completion.handler = options.on_completion;
 
 				// The external token is linked rather than adopted, so that the handle
 				// returned by alt::start keeps working in every case. Emplacing this
@@ -218,13 +272,26 @@ namespace alt
 			}
 
 		private:
-			// These members carry no declaration-order requirement. They once did:
-			// stop_forwarder held a std::stop_source* into this frame, so m_external
-			// had to be destroyed ahead of m_source or a thread inside the forwarder
-			// could dereference a destroyed source while another thread tore the
-			// frame down. Nothing checked that ordering, so the forwarder now holds a
-			// reference-counted copy instead and the hazard is gone structurally. See
-			// stop_forwarder above before changing it back.
+			// m_completion is declared first on purpose, so it is destroyed last.
+			// Its destructor runs the owner's completion hook, and that hook may
+			// request a stop on the external token. Destroying m_external
+			// deregisters its std::stop_callback from that token, and the callback's
+			// destructor blocks until a concurrently running invocation returns, so
+			// by the time the hook fires no stop request, from any thread, can route
+			// into this frame.
+			//
+			// This is defense in depth, not a fix for a reachable fault. With the
+			// hook last, a stop requested inside it never reaches this frame's source.
+			// With it declared last instead, that stop is forwarded into m_source
+			// first, which is observable but touched no destroyed memory under
+			// AddressSanitizer: stop_forwarder holds a reference-counted copy of the
+			// source. No fault was measured in either order.
+			//
+			// The other members carry no ordering requirement among themselves. They
+			// once did: stop_forwarder held a std::stop_source* into this frame, so
+			// m_external had to be destroyed ahead of m_source. That hazard is gone
+			// structurally. See stop_forwarder above before changing it back.
+			completion_notifier                               m_completion;
 			cancellation_context                              m_context{};
 			std::stop_source                                  m_source;
 			exception_handler                                 m_handler{};
