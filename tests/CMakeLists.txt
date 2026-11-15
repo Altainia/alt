@@ -64,6 +64,7 @@ add_executable(alt_tests
     test_cancellable_task.cpp
     test_scheduler_integration.cpp
     test_combinator_results.cpp
+    test_when_all.cpp
 )
 
 target_link_libraries(alt_tests

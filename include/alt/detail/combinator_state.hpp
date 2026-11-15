@@ -55,10 +55,26 @@ namespace alt::detail
 		 * @brief Constructs the block with one reference and @p children + 1 outstanding.
 		 *
 		 * The extra outstanding item is the starter's: the party fanning the children
-		 * out holds it until every child has been started, so a child completing
-		 * synchronously during the fan-out cannot drive the count to zero and resume a
-		 * parent that has not finished suspending. This is task_group::spawn's "raise
-		 * the count before the task starts" rule generalized to N starts.
+		 * out holds it until every child has been started, so that no child completing
+		 * synchronously during the fan-out can drive the count to zero. This is
+		 * task_group::spawn's "raise the count before the task starts" rule generalized
+		 * to N starts.
+		 *
+		 * What that buys is **defensive in stage A, not load-bearing**, and this is a
+		 * measurement rather than an argument. alt::when_all parks on the counter strictly
+		 * after its fan-out, so during the fan-out no joiner exists for a zero to resume,
+		 * and join_awaiter::ready() is re-read under the waiter list's mutex, so a count
+		 * that reached zero early merely refuses the later link. Moving the starter's
+		 * retirement above when_all's child-start loop therefore fails nothing:
+		 * 0/200 in debug, 0/200 under ThreadSanitizer, and 0 across the whole WhenAllTest
+		 * suite. Deleting the retirement altogether does fail, 20/20, so what is guarded
+		 * is that the starter is retired, not where. An earlier version of this comment
+		 * claimed the position protected a parent "that has not finished suspending";
+		 * three passes over this file asserted that before anyone measured it.
+		 *
+		 * The count stays, for stage B rather than for today: a combinator that parks
+		 * before its fan-out ends -- which when_any may -- would need it, and removing it
+		 * would change this constructor's semantics for no gain in stage A.
 		 *
 		 * @param children The number of children that will each retire one item.
 		 * @param owner    Passed back to @p destroy when the last reference is released.
@@ -75,8 +91,10 @@ namespace alt::detail
 		 * @brief Destroys the block, normally by way of the erased destroy function.
 		 *
 		 * Blocks until a cancel() forwarded from a linked token on another thread has
-		 * returned. It does not wait for one running on the calling thread, so the last
-		 * reference must never be released from inside cancel(); see the note on m_link.
+		 * returned. It does not wait for one running on the calling thread, and the last
+		 * reference IS released from inside cancel() on the ordinary cancellation path;
+		 * what makes that survivable is the counted copy cancel() holds. See the notes
+		 * there and on m_link.
 		 */
 		~combinator_state() = default;
 
@@ -122,7 +140,9 @@ namespace alt::detail
 		/**
 		 * @brief Marks the wait released and stops the children. Idempotent.
 		 *
-		 * Runs on whichever thread requests the stop.
+		 * Runs on whichever thread requests the stop. Safe against this block being
+		 * freed by the very stop it requests, which is the ordinary case rather than an
+		 * exotic one; see the DELICATE note in the body.
 		 */
 		void cancel() noexcept
 		{
@@ -132,7 +152,33 @@ namespace alt::detail
 			// as false it would report a satisfied wait and assemble results from slots
 			// no child body ever filled.
 			m_cancelled.store(true, std::memory_order_release);
-			m_children.request_stop();
+
+			// DELICATE. The copy is not a style choice. Read this before removing it.
+			//
+			// The stop below frees this block on the ordinary cancellation path: the
+			// children it stops tear their frames down on this thread, inside this call,
+			// and each one's completion hook releases its reference as it goes. When the
+			// awaiting chain has already dropped the awaiter's reference -- which it has,
+			// the chain being released before the children are stopped -- the last child's
+			// release is the last reference, and the erased destroy function runs here,
+			// with request_stop() still on the stack.
+			//
+			// A counted copy makes that survivable. The standard library reference counts
+			// the stop state, so request_stop() runs on state this local keeps alive even
+			// after m_children itself is gone, and nothing in this function touches
+			// *this afterwards. This is detail::stop_forwarder's reason for holding a
+			// std::stop_source rather than a pointer into the promise, and the same trick
+			// at a different level.
+			//
+			// Measured rather than argued: without the copy,
+			// WhenAllTest.TheChildrensStopOutlivesABlockTheLastChildFreed reports
+			// heap-use-after-free under AddressSanitizer, reading the freed state's lock
+			// word in _Stop_state_t::_M_lock() on the way out of the walk below. The
+			// simpler cancellation tests do not expose it, because libstdc++ skips that
+			// relock after the LAST callback in the list; the test is built so the release
+			// lands during an earlier one.
+			const std::stop_source children = m_children;
+			children.request_stop();
 		}
 
 		/** Whether cancel() has been called. Pairs with the release in cancel(). */
@@ -172,9 +218,17 @@ namespace alt::detail
 		// request_stop() -> a child's completion hook drives the counter to zero -> the
 		// awaiting chain resumes and drops the last reference -> destroy() -> this
 		// destructor frees the block while the outer request_stop() frame is still
-		// unwinding through it. The combinator that owns this block must prevent that
-		// structurally (for example by holding a reference across cancel()); this class
-		// cannot.
+		// unwinding through it.
+		//
+		// That chain is reachable, and on the ordinary cancellation path rather than an
+		// exotic one: WhenAllTest.TheChildrensStopOutlivesABlockTheLastChildFreed walks
+		// it. An earlier version of this note said the owning combinator had to prevent
+		// it and that this class could not. The second half was wrong -- cancel() now
+		// holds a counted copy of the stop state across the walk, which is what makes
+		// the destruction survivable, and the note there is the one to read. What this
+		// order still buys is the other-thread case above, and it remains load-bearing
+		// for it: it is the only thing standing between a cancel() in flight on another
+		// thread and the members it reads.
 		//
 		// m_references starts at 1, the awaiter's.
 		std::atomic<std::size_t> m_references{1};
