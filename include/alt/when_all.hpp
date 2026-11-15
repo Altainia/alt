@@ -375,12 +375,14 @@ namespace alt::detail
 			// finish before the rethrow. Measured by replacing the park with
 			// `return false`, in debug: WhenAllTest.ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows
 			// fails 200/200, on its EXPECT_FALSE(returned) assertion -- the await returning
-			// while the sibling is still parked -- and not on the exception or live_frames
-			// assertions. Its first revision raced a releasing thread against the rethrow
-			// and failed only 8/200 and 4/200 of the same mutation, on its
-			// sibling-finished assertion, which is why it is single-threaded now. 15 of the
-			// 34 WhenAllTest tests abort under the same mutation, each run alone; the
-			// per-test list is in the task 6 fix report.
+			// while the sibling is still parked -- and on its frames_at_return assertion,
+			// which reads live_frames at the instant the await returned and finds the
+			// sibling's frame still alive. Not on the exception assertions. Its first
+			// revision raced a releasing thread against the rethrow and failed only 8/200
+			// and 4/200 of the same mutation, on its sibling-finished assertion, which is
+			// why it is single-threaded now. 15 of the 34 WhenAllTest tests abort under
+			// the same mutation, each run alone; the per-test list is in the task 6 fix
+			// report.
 			m_join.emplace(m_state->shared().counter());
 			return m_join->await_suspend(h);
 		}

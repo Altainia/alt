@@ -91,10 +91,18 @@ namespace
 		co_return 0;
 	}
 
-	/** A task that parks on @p source, then raises @p done and yields 7: a sibling that must outlive another's throw. */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both objects are owned by the calling test, which joins the thread feeding the source before leaving its scope.
+	/**
+	 * A task that parks on @p source, then raises @p done and yields 7: a sibling that
+	 * must outlive another's throw.
+	 *
+	 * Tracked, so that live_frames reports this frame rather than nothing: it is the
+	 * frame whose liveness the sibling test is about, alive while the await is parked
+	 * and gone once the await has returned.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both objects are owned by the calling test, which holds them until live_frames is back to zero.
 	alt::task<int> make_finishing_task(alt::task_completion_source<int>& source, std::atomic<bool>& done)
 	{
+		const frame_tracker         tracker{1};
 		[[maybe_unused]] const auto result = co_await source;
 		done.store(true, std::memory_order_release);
 		co_return 7;
@@ -331,18 +339,27 @@ namespace
 		co_await alt::cancellation_point{};
 	}
 
-	/** Awaits a throwing child beside one parked on @p source, and records how the await ended. */
+	/**
+	 * Awaits a throwing child beside one parked on @p source, and records how the await
+	 * ended.
+	 *
+	 * @p frames_at_return takes live_frames as read at the instant the await returned,
+	 * which is the only place that instant is observable. The test asserts it is zero:
+	 * no child frame is left alive once the await has returned.
+	 */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which outlives the whole chain.
-	alt::cancellable_task throwing_sibling_root(alt::task_completion_source<int>& source, std::atomic<bool>& finished, std::string& caught, bool& returned)
+	alt::cancellable_task throwing_sibling_root(alt::task_completion_source<int>& source, std::atomic<bool>& finished, std::string& caught, bool& returned, int& frames_at_return)
 	{
 		try
 		{
 			[[maybe_unused]] const auto results = co_await alt::when_all(make_throwing_task(), make_finishing_task(source, finished));
+			frames_at_return                    = live_frames.load(std::memory_order_acquire);
 			ADD_FAILURE() << "the throwing child's exception did not reach the await";
 		}
 		catch(const std::runtime_error& error)
 		{
-			caught = error.what();
+			frames_at_return = live_frames.load(std::memory_order_acquire);
+			caught           = error.what();
 		}
 
 		returned = true;
@@ -542,7 +559,8 @@ TEST_F(WhenAllTest, ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows)
 	alt::task_completion_source<int> source;
 	std::atomic<bool>                sibling_finished{false};
 	std::string                      caught;
-	bool                             returned = false;
+	bool                             returned         = false;
+	int                              frames_at_return = -1;
 
 	// Single-threaded, so there is no race to hope for. Position 0 throws inside the
 	// fan-out, and position 1 is parked on a source that only this thread can set, so
@@ -550,10 +568,15 @@ TEST_F(WhenAllTest, ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows)
 	// has not finished. An await that parked only until the first failure -- or that
 	// returned without parking -- would rethrow into the body right here, before the
 	// sibling's completion.
-	const auto handle = alt::start(throwing_sibling_root(source, sibling_finished, caught, returned));
+	const auto handle = alt::start(throwing_sibling_root(source, sibling_finished, caught, returned, frames_at_return));
 
 	EXPECT_FALSE(returned) << "the await returned while a child was still running";
 	EXPECT_FALSE(sibling_finished.load(std::memory_order_acquire));
+
+	// The sibling is the only tracked frame, and it is parked: the thrower's frame was
+	// built and unwound inside the fan-out, so a count of 1 says the throw at position 0
+	// did not keep position 1 from being started and reaching its suspension point.
+	EXPECT_EQ(live_frames, 1) << "the sibling's frame should be alive and parked here";
 
 	// Releasing the sibling resumes it on this thread; its completion retires the last
 	// child, which resumes the chain, which rethrows.
@@ -562,7 +585,12 @@ TEST_F(WhenAllTest, ASuccessfulSiblingRunsToItsEndAfterAnotherChildThrows)
 	EXPECT_TRUE(returned);
 	EXPECT_EQ(caught, "child body");
 	EXPECT_TRUE(sibling_finished.load(std::memory_order_acquire));
-	EXPECT_EQ(live_frames, 0);
+
+	// No child frame is left alive once the await has returned, read at the instant the
+	// await returned rather than here: by the time this thread is back, the sibling has
+	// finished either way, so a live_frames read here cannot tell the two apart. An
+	// await that returned while the sibling was still parked leaves this at 1.
+	EXPECT_EQ(frames_at_return, 0) << "the await returned with a child frame still alive";
 }
 
 TEST_F(WhenAllTest, TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown)
