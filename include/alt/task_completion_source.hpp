@@ -97,6 +97,16 @@ namespace alt
 	 * relies on the family's rule that a primitive outlives its own resumption walk.
 	 * A waiter may destroy the source from its body once it has read the value.
 	 *
+	 * Two things a waiter's body may not do, both inherited from
+	 * detail::wait_awaiter, which cannot enforce them, and both stated for
+	 * alt::async_latch. A coroutine parked here may not have its frame destroyed
+	 * from outside, because the node it is parked on lives in that frame; destroying
+	 * the source instead releases it, which is the supported teardown. And a
+	 * resumed waiter may not destroy a later waiter of the same source. That second
+	 * rule has nothing to apply to while the single-await precondition holds, since
+	 * there is no later waiter; it is stated because the precondition is only
+	 * asserted in a debug build.
+	 *
 	 * @tparam T The value delivered: void by default, a value type, or a reference.
 	 */
 	template<typename T = void>
@@ -112,10 +122,11 @@ namespace alt
 		/**
 		 * @brief Releases a waiter still parked, unsatisfied.
 		 *
-		 * A backstop rather than the expected path, as async_event's destructor is,
-		 * and done here for the same reason it is there: ahead of the waiter_list
-		 * member's own destructor, so a waiter that awaits again from inside the walk
-		 * parks in a list that is still whole.
+		 * A backstop rather than the expected path, and an explicit release ahead of
+		 * the waiter_list member's own destructor for symmetry with the rest of the
+		 * family. async_event's reason for that, a waiter awaiting again from inside
+		 * the walk, does not apply: a waiter of this type cannot legitimately await
+		 * the source twice, since operator co_await asserts on the second await.
 		 */
 		~task_completion_source()
 		{

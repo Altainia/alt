@@ -605,9 +605,14 @@ TEST_F(TaskGroupTest, ASpawnRacingACompletionNeverUndercountsOrOvercounts)
 	// is an unconditional fetch_sub, so the count wraps to the maximum and the
 	// mutation's trailing add() brings it back to zero, and the final count and
 	// live_frames both come out right. It was therefore blind to the mutation without
-	// the assert. With the joiner it failed 4 of 100 runs (live_frames came out 1; the
-	// cause was not investigated), so it is only weakly sensitive. The test that
-	// detects the mutation independently of the assert is
+	// the assert. With the joiner it first failed 4 of 100 runs, live_frames coming
+	// out 1, while live_frames was a plain int. The mutated build loses the acq_rel
+	// edge that orders the two threads' frame_tracker destructors, so that was
+	// almost certainly a lost non-atomic decrement: detection by undefined behavior
+	// in the mutated build, not by the property under test. With live_frames made
+	// std::atomic<int> the same mutation under NDEBUG failed 0 of 100 runs, so this
+	// test does not detect the mutation without the assert. The detection that
+	// survives, independent of the assert, lives in
 	// ATaskCompletingSynchronouslyInsideSpawnLeavesTheCountCorrect, which failed 100 of
 	// 100 runs under NDEBUG through record.resumptions.
 	int raise_first           = 0;

@@ -434,11 +434,12 @@ TEST_F(TaskCompletionSourceTest, ASetValueLandingAsTheWaiterLinksIsNeverLost)
 	// 100 runs under debug-tsan and 33 of 200 under debug, each run ending at its
 	// first failing repeat (the test asserts, so one run reports one repeat): every
 	// failure was record.resumptions == 0, the lost waiter, and none was anything
-	// else. At 100 repeats per run that is a per-repeat rate of roughly 0.2 percent
-	// at the lowest, which agrees with the parked path being the rare one below.
-	// One machine, one compiler, one sample; a detector built on a race is never
-	// certain. It also measures how much weight this test carries: it catches the
-	// real defect only about one run in six, and ThreadSanitizer plus the
+	// else. At 100 repeats per run that is a per-repeat rate of roughly 0.05 percent
+	// (TSan) to 0.2 percent (debug), which agrees with the parked path being the
+	// rare one below. One machine, one compiler, one sample; a detector built on a
+	// race is never certain. It also measures how much weight this test carries: it
+	// catches the real defect about one run in six under debug and one in twenty
+	// under ThreadSanitizer. ThreadSanitizer's own reports and the
 	// satisfied-with-the-value check on every path are what it adds besides.
 	//
 	// Which paths it reaches, instrumented for one session and then removed: in 300

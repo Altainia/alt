@@ -120,8 +120,11 @@ namespace alt
 		 * Told once that the task's frame has been destroyed. It fires from the
 		 * frame's own destruction, on whichever thread destroyed it, which covers
 		 * normal completion and cancelled teardown because that destruction is the
-		 * only point both paths pass through. By then the body's locals are gone and
-		 * only the frame storage is left, so the hook must not touch the task. It
+		 * only point both paths pass through. On GCC and Clang the body's locals are
+		 * observed to be gone by then, leaving only the frame storage (the standard
+		 * does not order them against the promise on the destroy() path, and
+		 * TheCompletionHookFiresOnCancelledTeardown pins it), so the hook must not
+		 * touch the task. It
 		 * never fires for a task that was not started. Empty means nobody is told.
 		 */
 		completion_handler on_completion{};
@@ -135,8 +138,7 @@ namespace alt
 		/**
 		 * @brief Fires an alt::completion_handler when destroyed.
 		 *
-		 * Fires an alt::completion_handler when destroyed. A member of the promise,
-		 * so the call happens as the frame is torn down.
+		 * A member of the promise, so the call happens as the frame is torn down.
 		 */
 		struct completion_notifier
 		{

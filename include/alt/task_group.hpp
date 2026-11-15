@@ -38,6 +38,9 @@ namespace alt
 	class task_group
 	{
 	public:
+		/** What co_await group.join() is awaited through. Yields alt::wait_result. */
+		using join_awaiter = detail::completion_counter::join_awaiter;
+
 		/** Constructs an empty group with no stop requested. */
 		task_group();
 
@@ -101,7 +104,7 @@ namespace alt
 		 * includes anyway to hold the counter by value, and awaiter construction lives
 		 * in the header for the same reason in alt::async_event and alt::async_mutex.
 		 */
-		[[nodiscard]] detail::completion_counter::join_awaiter join() noexcept
+		[[nodiscard]] join_awaiter join() noexcept
 		{
 			return m_counter.join();
 		}

@@ -17,6 +17,8 @@ caller can wait for.
 class task_group
 {
 public:
+    using join_awaiter = detail::completion_counter::join_awaiter;
+
     task_group();
     ~task_group();
 
@@ -30,7 +32,7 @@ public:
     bool                             request_stop() noexcept;
     [[nodiscard]] bool               stop_requested() const noexcept;
     [[nodiscard]] std::size_t        outstanding() const noexcept;
-    [[nodiscard]] /* join_awaiter */ join() noexcept;   // co_await yields alt::wait_result
+    [[nodiscard]] join_awaiter       join() noexcept;   // co_await yields alt::wait_result
 };
 ```
 
@@ -49,12 +51,17 @@ public:
   a value when the count reached zero, and `std::errc::operation_canceled` when
   the awaiting chain was cancelled. Any number of coroutines may join at once and
   all are released together.
+- A task spawned into the group must not `co_await group.join()`. Its own
+  completion is part of the outstanding count and is retired only when its frame
+  is destroyed, so such a join can never reach zero and can only end in
+  `std::errc::operation_canceled`, through the group's own stop. A supervisor
+  that waits for the group belongs outside it.
 
 `spawn` racing a task's completion on another thread is tested, under
 ThreadSanitizer. The other members' thread safety is not separately tested: it
 follows from `std::stop_source` and from the counter's own contract, and only the
-destructor is excluded from it. The group is neither copyable nor movable, since the completion hook inside every task holds
-its address.
+destructor is excluded from it. The group is neither copyable nor movable, since
+the completion hook inside every task holds its address.
 
 ## What the group supplies, and what stays yours
 
@@ -95,9 +102,16 @@ alt::task_group  group;     // after, so it is destroyed first
 
 Locals and members are destroyed in reverse order of declaration, so a group
 declared after the primitives its tasks use is destroyed before them, while those
-primitives still exist. By inspection, that makes the destructor's debug assert
-the signal for an unjoined group at a point where nothing it would report on has
-been destroyed yet.
+primitives still exist. The reason to want that order is what the reverse does to
+the one diagnostic there is. With the order reversed and no `home`
+scheduler, the primitive is destroyed first, which releases the parked waiter,
+whose teardown retires the count. The group is then destroyed with
+`outstanding() == 0`, and the destructor's assert does not fire at all. A scratch
+program in a debug build confirmed it: one task parked on an `alt::async_event`,
+the group never stopped or joined. Declared event first, it aborted on the
+destructor's assert; declared group first, it exited cleanly. So the reversed
+order can silence the only signal that the group was destroyed unjoined, and the
+prescribed order cannot.
 
 Nothing enforces the order at compile time, and the sanitizers were measured not
 to tell the two orders apart. In a scratch program with a `home` scheduler that is
@@ -105,9 +119,10 @@ drained after the scope ends, so a task is still live when the group is destroye
 both orders behaved identically: a debug build aborted on the destructor's assert
 (under ASan+UBSan and under TSan); with `NDEBUG` AddressSanitizer reported
 `stack-use-after-scope` in `completion_counter::complete()` for both orders, and
-ThreadSanitizer reported nothing for either. What those catch is the group
-destroyed unjoined, not the declaration order, so the order has to be read for,
-and the destructor's assert is the only mechanical signal.
+ThreadSanitizer reported nothing for either. So in that setup the assert fires
+for either order and is no signal of the *order*. What those catch is the group
+destroyed unjoined, which is the mistake the order merely decides whether the
+assert can see. The order has to be read for.
 
 ## From code that is not a coroutine
 

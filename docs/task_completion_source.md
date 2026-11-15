@@ -89,7 +89,11 @@ namespace alt
 Setting twice, and awaiting twice, are preconditions rather than supported
 operations. Each is an assertion in a debug build. A second set is then a no-op in a
 release build; a second await would read a value the first already moved out, so
-there is nothing safe to fall back to.
+there is nothing safe to fall back to. By inspection of the code, a release
+build does one of two things with it. Made while the source is still unset, the
+second waiter parks behind the first, the setter releases only one waiter, and
+only the source's destructor releases the other, unsatisfied. Made after the
+set, it does not park and reads the moved-out value.
 
 Waiters are not queued: the source has one consumer, so a second parked waiter is
 not reachable through the documented interface. For several consumers of one

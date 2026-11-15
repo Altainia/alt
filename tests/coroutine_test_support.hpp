@@ -10,10 +10,17 @@
 namespace alt_test
 {
 
-	/** Count of frame_tracker instances currently alive. */
-	inline int live_frames = 0;
+	/**
+	 * Count of frame_tracker instances currently alive. Atomic because tests that
+	 * race two threads' frame teardowns mutate it from both; a plain int would lose
+	 * a decrement and report a failure that is the counter's, not the code under test.
+	 */
+	inline std::atomic<int> live_frames{0};
 
-	/** Tags of destroyed frame_tracker instances, in destruction order. */
+	/**
+	 * Tags of destroyed frame_tracker instances, in destruction order.
+	 * Single-threaded tests only: a vector shared across threads would need a mutex.
+	 */
 	inline std::vector<int> destruction_order;
 
 	/** Tracks a coroutine frame's lifetime for the tests in this suite. */

@@ -35,6 +35,16 @@ namespace alt::detail
 	 * must not be called with a lock held that a joiner might take. Like
 	 * alt::async_event, neither copyable nor movable, and a joiner's body may destroy
 	 * the counter: complete() reads nothing from it after resuming.
+	 *
+	 * Two things a joiner's body may not do, both inherited from
+	 * detail::wait_awaiter, which cannot enforce them, and both shared with
+	 * alt::async_latch. It may not destroy another joiner of the same counter: the
+	 * releasing complete() takes the whole queue before it resumes anyone, so a
+	 * frame destroyed from inside one resumption may be one that call is already
+	 * committed to resuming. And a coroutine parked here may not have its frame
+	 * destroyed from outside, because the node it is parked on lives in that frame;
+	 * destroying this counter instead releases them all, which is the supported
+	 * teardown. Both matter because any number of coroutines may join at once.
 	 */
 	class completion_counter
 	{
@@ -61,6 +71,13 @@ namespace alt::detail
 		/** Records @p n more outstanding items. */
 		void add(std::size_t n = 1) noexcept
 		{
+			// acq_rel rather than relaxed, though the count alone needs only relaxed:
+			// read-modify-writes of one atomic are totally ordered whatever their
+			// ordering. The acquire half is there so that a spawner whose add() follows
+			// a complete() in that order also sees what the completing party wrote
+			// before it retired; the release half publishes the spawner's own writes
+			// to the complete() that eventually retires this item. No test depends on
+			// either half, and weakening it was not measured.
 			m_outstanding.fetch_add(n, std::memory_order_acq_rel);
 		}
 
@@ -68,7 +85,9 @@ namespace alt::detail
 		 * @brief Retires one outstanding item, releasing every joiner if it was the last.
 		 *
 		 * Completing with nothing outstanding is a precondition violation, asserted in
-		 * debug builds.
+		 * debug builds. A release build is left with the decrement already made: the
+		 * count has wrapped to the maximum, so the counter is permanently busy, no
+		 * join() completes through it again, and the owner can never be joined.
 		 *
 		 * Joiner bodies run on this thread before this returns.
 		 */
@@ -101,6 +120,9 @@ namespace alt::detail
 			//   needed and why detach_all is called only on the zero transition. A
 			//   complete() that did not reach zero has nothing to release: any joiner it
 			//   could race read a non-zero count.
+			//
+			// Of any number of concurrent calls, exactly one fetch_sub returns 1, so
+			// exactly one call reaches the walk below and the rest return above.
 			//
 			// The resumption is last, and nothing may be read from *this after it: a
 			// resumed joiner runs its body, and that may destroy whatever owns this
