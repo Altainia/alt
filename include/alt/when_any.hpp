@@ -109,12 +109,17 @@ namespace alt::detail
 		//
 		// The election is on that list as well as the slots, and for a reason that is
 		// this component's rather than when_all's: a child that cancel() stops while it
-		// is parked is resumed released rather than torn down, so it runs on, writes its
-		// slot and then calls m_election.elect(). What
+		// is parked is resumed released rather than torn down, so -- WHEN
+		// when_any_child AWAITS THAT CHILD'S AWAITABLE DIRECTLY -- it runs on, writes
+		// its slot and then calls m_election.elect(). What
 		// WhenAnyTest.ACancelledRaceReportsOperationCanceled observes is the body
-		// running on; the step from there to elect() is straight-line code. See
-		// when_any_child. Both members are therefore touched from inside cancel()'s
-		// walk, and both must outlive it.
+		// running on; the step from there to elect() is straight-line code, and that
+		// test's children are awaited directly. A child whose awaitable is a nested
+		// alt::task reaches neither the store nor the election, dying at that task's
+		// final suspend instead; when_any_child's note holds the condition and its
+		// mechanism, and nothing here rests on which kind a child is. One released
+		// direct child is enough to touch both members from inside cancel()'s walk, so
+		// both must outlive it.
 		Slots               m_slots;
 		combinator_election m_election;
 		combinator_state    m_shared;
@@ -262,30 +267,52 @@ namespace alt::detail
 	 * not unwritten. No slot is shared: each child has its own, so two children
 	 * writing concurrently write to different objects.
 	 *
-	 * A stopped child does not always skip the election, and the two cases differ. One
-	 * already PARKED on an alt wait primitive is resumed *released* rather than torn
-	 * down -- that is what those primitives do with a parked waiter -- so it runs on,
-	 * writes a released value into its slot and reaches this election too. One stopped
-	 * before it reached any suspension point is torn down at its first one and never
-	 * resumes, so it reaches neither the store nor the election; that is the child
-	 * started after a winner has already stopped the source. The first case is why a
-	 * winner is elected on the cancelled path as well, and why
+	 * A stopped child does not always skip the election, and THE CASES ARE THREE RATHER
+	 * THAN TWO. **This is the component's one condition on "a released child still
+	 * elects", and every other statement of that claim in this file points here rather
+	 * than restating it.**
+	 *
+	 * - PARKED ON AN ALT WAIT PRIMITIVE THAT THIS FRAME AWAITS DIRECTLY. It is resumed
+	 *   *released* rather than torn down -- that is what those primitives do with a
+	 *   parked waiter -- so it runs on, writes a released value into its slot and
+	 *   reaches this election too. Only this case elects.
+	 * - PARKED, BUT THROUGH A NESTED alt::task. The waiter is released the same way and
+	 *   the nested task's body does run on past its wait, but the child dies at that
+	 *   task's final suspend before control ever gets back here: alt::task's
+	 *   final_awaiter reads the stop and calls abandon_chain, which destroys ctx.root --
+	 *   and for a when_any_child the root IS this cancellable_task frame, so the whole
+	 *   child frame goes, with a home scheduler merely posting the destruction rather
+	 *   than changing it. The slot write below and the election after it never run. The child still RETIRES: the
+	 *   completion hook fires from the frame's destruction, which is the one point both
+	 *   paths pass through.
+	 * - STOPPED BEFORE IT REACHED ANY SUSPENSION POINT. Torn down at its first one and
+	 *   never resumed, so it reaches neither the store nor the election; that is the
+	 *   child started after a winner has already stopped the source.
+	 *
+	 * The first case is why a winner is elected on the cancelled path as well, and why
 	 * when_any_awaiter::await_resume tests the cancellation flag ahead of the election
-	 * rather than after it.
+	 * rather than after it. The second is why a test over this claim has to be built on
+	 * a direct awaitable, and it is MEASURED rather than reasoned: rebuild
+	 * WhenAnyTest.ACompletedLosersResultIsDiscarded and ALosersExceptionIsDiscarded with
+	 * their losers as nested alt::tasks and both PASS under the unconditional-election
+	 * mutation that otherwise fails them, because such a loser has no result to discard.
+	 * The test file's park_then_yield_value and counting_event_wait carry that
+	 * measurement and exist for this reason.
 	 *
 	 * That first case is OBSERVED rather than asserted:
 	 * WhenAnyTest.ACancelledRaceReportsOperationCanceled races two children whose
 	 * bodies increment a counter in the statement after their wait, and both increments
 	 * land on the cancelled path. From there to the election is the straight-line code
-	 * below -- store, then elect, with no suspension point between -- so both children
-	 * reached it.
+	 * below -- store, then elect, with no suspension point between, and those children
+	 * being awaited directly, no nested task's final suspend either -- so both children
+	 * reached it. That is the first case above and not the second.
 	 *
 	 * That test cannot also show the elected winner being DISCARDED, because on its path
 	 * the elections happen after the await has returned.
 	 * WhenAnyTest.ACancellationDiscardsAWinnerAlreadyElected is the one that does, by
 	 * leaving a sibling outstanding that no stop can resume so the election is settled
 	 * while the chain is still parked. See await_resume's note for which half of its
-	 * verdict each of the two pins, and for the one half that still has no test.
+	 * verdict each of the two pins, and for the third test that pins the other half.
 	 *
 	 * A child that completes by throwing stores the exception in its slot and still
 	 * elects, so it can win: the exception is then rethrown at the await, by
@@ -405,11 +432,11 @@ namespace alt::detail
 	 * discovered from a red build.
 	 *
 	 * This component also parks STRICTLY AFTER its fan-out, as when_all does. That
-	 * settles a question combinator_state's constructor note leaves open: it keeps the
-	 * starter's outstanding item "for stage B rather than for today: a combinator that
-	 * parks before its fan-out ends -- which when_any may -- would need it". when_any
-	 * as built does not, so the starter's item is still defensive here and not
-	 * load-bearing. The measurement is in await_suspend below.
+	 * settles the question combinator_state's constructor note used to leave open, where
+	 * it kept the starter's outstanding item for "a combinator that parks before its
+	 * fan-out ends -- which when_any may". when_any as built does not, so the starter's
+	 * item is still defensive here and not load-bearing, and that note now records the
+	 * answer rather than the candidate. The measurement is in await_suspend below.
 	 */
 	template<typename Result, typename Slots, typename Storage>
 	class when_any_awaiter
@@ -622,9 +649,14 @@ namespace alt::detail
 			//
 			// Moving this above the loop therefore fails nothing here either: 0 of 200
 			// repeats in debug and 0 of 20 under each of AddressSanitizer and
-			// ThreadSanitizer, for each of the five WhenAnyTest tests run alone, plus one
-			// whole-suite run of all 788 tests green in each of the three presets. So the
-			// POSITION is defensive and not load-bearing. DELETING the retirement is what
+			// ThreadSanitizer, for each of the five WhenAnyTest tests that existed then
+			// run alone, plus one whole-suite run of the suite as it then stood, all 788
+			// tests green in each of the three presets. The suite is 799 now, and that
+			// figure is a measurement about the smaller one; what makes the POSITION
+			// defensive rather than load-bearing is the mechanism above, that this
+			// component parks after its fan-out, which no test can change.
+			//
+			// DELETING the retirement is what
 			// fails, and that is the same instrument reporting: TheFirstChildToComplete...
 			// and NoChildIsRunning... fail 5 of 5, EveryChildAlreadyComplete... HANGS 5 of
 			// 5 -- the counter never reaches zero, so the chain parks forever -- and only
@@ -661,21 +693,25 @@ namespace alt::detail
 		 * The cancellation flag outranks the election: a cancellation that arrives after
 		 * a winner was elected reports std::errc::operation_canceled and discards the
 		 * winner. The flag and a winner are not alternatives, because a cancelled race
-		 * really does elect one: a child already PARKED on an alt wait primitive is
-		 * resumed released rather than torn down, so it runs on, writes whatever a
-		 * released wait is worth into its slot and reaches its election. (A child
-		 * stopped before it reached any suspension point is torn down at its first one
-		 * and reaches neither.)
+		 * really does elect one: a child already PARKED on an alt wait primitive THAT
+		 * when_any_child AWAITS DIRECTLY is resumed released rather than torn down, so
+		 * it runs on, writes whatever a released wait is worth into its slot and reaches
+		 * its election. (Two kinds of child reach neither: one stopped before it reached
+		 * any suspension point, torn down at its first one, and one whose awaitable is a
+		 * nested alt::task, which dies at that task's final suspend ahead of its slot
+		 * write. when_any_child's note is where all three cases are set out, and the
+		 * condition is not restated below.)
 		 *
 		 * WHICH HALF OF THE TEST BELOW ACTUALLY DECIDES depends on things outside this
 		 * function, so it is set out as an invariant, then the conclusion that invariant
-		 * yields, then the two cases it does not cover, then what witnesses each. This
+		 * yields, then the cases it does not cover, then what witnesses each. This
 		 * note has been rewritten once for that structure, after three rounds of review
 		 * each found a different claim here too strong: a citation to a test that could
 		 * not exhibit the shape, then "no path elects before the flag is read" (false --
 		 * every ordinary successful race does), then "the flag is never the half that
-		 * decides" (false in the two cases below). No sentence here is meant to be
-		 * stronger than the case analysis under it.
+		 * decides" (false in the cases below), and once since for a fourth -- a measured
+		 * zero quoted without the suite it was taken against. No sentence here is meant to
+		 * be stronger than the case analysis under it.
 		 *
 		 * THE INVARIANT. Two facts, one of which needs one thing from this component:
 		 *
@@ -710,16 +746,23 @@ namespace alt::detail
 		 * while this chain is parked runs the joiner's callback BEFORE m_link: that
 		 * library walks a token's callbacks in reverse registration order, and m_link is
 		 * registered in await_suspend, ahead of the park. The claim attempt therefore
-		 * always runs first, and **on every single-threaded path the FIRST half of the
-		 * test below is what returns the error.** That is the whole of the conclusion,
-		 * and it is scoped to single-threaded because the suite is.
+		 * always runs first, and **on every single-threaded path whose chain relays ONE
+		 * token -- which is every alt::cancellable_task chain, and so all of production --
+		 * the FIRST half of the test below is what returns the error.** That is the whole
+		 * of the conclusion. It is scoped to single-threaded because the suite is, and to
+		 * one token because the clause above needs a claim attempt to EXIST: a chain that
+		 * answered this awaiter's context read and the joiner's with two different tokens
+		 * leaves the joiner with no stop callback and so no claim attempt, which is the
+		 * third case below. An earlier draft of this sentence said "every single-threaded
+		 * path" without that qualification, and the suite now holds a single-threaded path
+		 * it is false of.
 		 *
 		 * It rests on an order [stopcallback] does not fix. Name it rather than rely on
 		 * it quietly, because when_all's own fan-out note and
 		 * WhenAllTest.TheChildrensStopOutlivesABlockTheLastChildFreed both depend on the
 		 * same reverse walk and say so.
 		 *
-		 * THE TWO CASES THE CONCLUSION DOES NOT COVER, in both of which cancelled() is
+		 * THE THREE CASES THE CONCLUSION DOES NOT COVER, in each of which cancelled() is
 		 * the half that decides -- which is why the test below is not dead code:
 		 *
 		 * - A STANDARD LIBRARY THAT WALKS CALLBACKS FORWARD, where this is not a
@@ -745,8 +788,19 @@ namespace alt::detail
 		 *   before this line reads the flag. Then waited is true and the flag is true.
 		 *   Single-threaded that window does not exist, await_resume running in the same
 		 *   resumption await_suspend returned from, and nothing in the suite races for it.
+		 *   That is this ROUTE to a satisfied-and-flagged read, not the only one: the case
+		 *   below reaches the same state on one thread, which is what the suite does.
+		 * - A CHAIN WHOSE JOINER HAS NO STOP CALLBACK, because the two reads of its
+		 *   cancellation context answered with two different tokens: the stoppable one for
+		 *   this awaiter's m_link, an empty one for the joiner. Then no claim attempt
+		 *   exists, the invariant's clause is not satisfied, cancel() runs with the chain
+		 *   still parked, the released child elects and the zero transition resumes this
+		 *   chain SATISFIED with the flag set. No alt component builds such a chain --
+		 *   alt::cancellable_task keeps one context per chain -- but the suite builds one
+		 *   deliberately, and it is what gives the flag half a witness on this toolchain.
+		 *   See the witness list below.
 		 *
-		 * Four shapes are illustrations of the invariant rather than a list to be
+		 * Five shapes are illustrations of the invariant rather than a list to be
 		 * completed, and they are kept because each was reasoned about wrongly at some
 		 * point -- the second of them in this very note, through three rounds of review:
 		 *
@@ -767,8 +821,8 @@ namespace alt::detail
 		 *
 		 *   The verdict there is still !waited, through the first half: the park emplaces
 		 *   its callback on an already-stopped token, the claim finds the node, and
-		 *   m_released is set. And because nothing elects, this shape is **a third reason
-		 *   the statement below exists**, one neither of the two cases above covers and
+		 *   m_released is set. And because nothing elects, this shape is **a further reason
+		 *   the statement below exists**, one none of the cases above covers and
 		 *   one nothing else in this file claims: the verdict has to be settled BEFORE the
 		 *   election is read at all, because here there is no position to read.
 		 *
@@ -785,9 +839,16 @@ namespace alt::detail
 		 * - A winner elected and a sibling still outstanding when the stop arrives. This
 		 *   is the shape ACancellationDiscardsAWinnerAlreadyElected holds.
 		 * - A stop landing mid-fan-out after an early election.
+		 * - A STOP THAT REACHES cancel() WITH NO CLAIM ATTEMPT AHEAD OF IT, because the
+		 *   joiner's node has no stop callback watching it at all. The invariant's clause is
+		 *   then simply not satisfied, so it does not yield !waited: the released child
+		 *   elects, the zero transition resumes this chain SATISFIED, and the FLAG half is
+		 *   what decides. This is the fifth shape the sentence below anticipated, and
+		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner holds it on one
+		 *   thread.
 		 *
-		 * The invariant answers all four the same way, and would answer a fifth nobody has
-		 * thought of.
+		 * The invariant answers all five the same way, including the one it was written
+		 * before, and would answer a sixth nobody has thought of.
 		 *
 		 * WHAT WITNESSES WHAT, which is three things and not one:
 		 *
@@ -803,38 +864,65 @@ namespace alt::detail
 		 *   when_any_child. What makes it a witness rather than an arrangement is a
 		 *   measurement: let an elected winner outrank the whole verdict -- return the
 		 *   assembled result ahead of both halves -- and that test fails 5 of 5 in debug
-		 *   on its satisfied assertion, ALONE in the 789-test suite.
-		 * - THE FLAG HALF HAS NO TEST, and the two routes to it are the two cases above.
-		 *   Neither is in the suite: the forward walk is not reachable on this toolchain,
-		 *   and the reordering that imitates it is a SOURCE MUTATION rather than a shape a
-		 *   test can set up, so do not go looking for a test that takes it. The
-		 *   cross-thread route would need a child driving the counter to zero on one
-		 *   thread while another requests the chain's stop, repeated until the
-		 *   interleaving lands.
+		 *   on its satisfied assertion. It was ALONE in the suite under that mutation when
+		 *   that figure was taken, against 789 tests; the suite stands at 799 now and
+		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner fails under it too,
+		 *   so the count is two and the witness is unchanged.
+		 * - THE FLAG HALF IS WITNESSED TOO, by
+		 *   WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, through
+		 *   the THIRD of the cases above. It drives the race from a hand-built
+		 *   chain whose two reads of its cancellation context answer with two different
+		 *   tokens: the stoppable one for this awaiter's link, an empty one for the joiner,
+		 *   so the block is linked to a stop that nothing but the counter can answer. The
+		 *   stop then runs cancel() with no claim attempt ahead of it -- the clause above is
+		 *   not satisfied -- the released child elects, its retirement drives the counter to
+		 *   zero, and the zero transition resumes this chain SATISFIED with the flag set. So
+		 *   this function reads waited true, cancelled() true and a winner elected, and the
+		 *   second half is what returns the error. The ARRANGEMENT is synthetic, which that
+		 *   test's split_token_chain says plainly; the STATE is production-reachable, by the
+		 *   cross-thread case above, sampled at 3 hits in 500,000 debug repeats of a
+		 *   one-child race and far too rare to assert on.
+		 *
+		 *   THE FIRST TWO CASES ARE STILL UNWITNESSED, and that is unchanged: the forward
+		 *   walk is not reachable on this toolchain, the reordering that imitates it is a
+		 *   SOURCE MUTATION rather than a shape a test can set up, and the cross-thread
+		 *   window is sampled for nothing. So do not go looking for a test that takes
+		 *   either of those two.
 		 * - WhenAnyTest.ACancelledRaceReportsOperationCanceled witnesses NEITHER of those.
 		 *   It witnesses the PREMISE: both children resumed released and ran the statement
-		 *   after their co_await, so both reached their election. It cannot tell "no
-		 *   winner" from "winner discarded", because on its path the elections happen
-		 *   after this function has returned.
+		 *   after their co_await -- they are awaited directly, so the step on to their
+		 *   election is straight-line code -- and both reached their election. It cannot
+		 *   tell "no winner" from "winner discarded", because on its path the elections
+		 *   happen after this function has returned.
 		 *
-		 * DO NOT delete or reorder the cancelled() test as dead code, and do not read the
-		 * measurement below as saying it is. What it says is narrower:
+		 * DO NOT delete or reorder the cancelled() test as dead code. The suite now fails on
+		 * either:
 		 *
-		 * - Moving the cancelled() test below the winner check, so that an elected
-		 *   winner outranks the flag, fails nothing in the suite: 0 of 200 repeats in
-		 *   debug and 0 of 20 under each of AddressSanitizer and ThreadSanitizer, for
-		 *   each of the five WhenAnyTest tests run alone, plus one whole-suite run of all
-		 *   788 tests green in each of the three presets. That zero is the conclusion
-		 *   above restated as a measurement rather than a second finding: **on a
-		 *   single-threaded path**, which is all the suite has, the first half returns the
-		 *   error wherever the flag is true, so the second half is never the deciding one
-		 *   THERE. It says nothing about either case the conclusion does not cover. The
-		 *   figure predates ACancellationDiscardsAWinnerAlreadyElected, and that test does
-		 *   not change it: it too discards through the first half.
-		 * - Nothing in [stopcallback] fixes the walk order, which is why the flag is
-		 *   stored ahead of the children's stop in combinator_state::cancel() and read
-		 *   ahead of the election here. Both orders exist for the forward-walking
-		 *   implementation, not for libstdc++.
+		 * - Moving the cancelled() test below the winner check, so that an elected winner
+		 *   outranks the flag, fails exactly one test:
+		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, alone in the suite at
+		 *   its current 799 tests, in a debug build and again under AddressSanitizer + UBSan.
+		 *   Dropping the flag half outright fails the same test and nothing else.
+		 *
+		 *   AN EARLIER FIGURE HERE RECORDED THAT SAME MUTATION AS FAILING NOTHING -- 0 of
+		 *   200 debug repeats and 0 of 20 under each of AddressSanitizer and
+		 *   ThreadSanitizer, plus a green whole-suite run in each of the three presets --
+		 *   and it was honest when taken: the suite then held 788 tests and not one of them
+		 *   reached this function with the wait satisfied and the flag set. **Quote a
+		 *   measured zero with the suite it was taken against**, which that figure did not
+		 *   do; read without one it says the branch is unnecessary, which is a stronger
+		 *   claim than any measurement here has ever supported. What the zero really said
+		 *   survives, scoped: on a single-threaded path that reaches this function through
+		 *   ONE cancellation context, the first half returns the error wherever the flag is
+		 *   true, so the second half is not the deciding one there. The test above reaches it
+		 *   through two.
+		 * - Nothing in [stopcallback] fixes the walk order, and that is why the flag is read
+		 *   ahead of the election HERE. The forward-walking implementation is what the read
+		 *   order was put in for; it is NOT only for that implementation any more, the third
+		 *   case above making it load-bearing on libstdc++ too, which is what the figure
+		 *   above fails on. The STORE order in combinator_state::cancel() is a separate rule
+		 *   with its own reasons -- swapping it is a use-after-free on this toolchain,
+		 *   measured -- so do not collapse the two into one. That note is in cancel().
 		 *
 		 * A stop that races a completion is therefore reported as a cancellation, and a
 		 * fully assembled winner is discarded with it. That is deliberate: a caller that
@@ -1080,14 +1168,31 @@ namespace alt
 	 * @c std::move(result).template get<I>(), which is the only form that can take a
 	 * move-only value out.
 	 *
-	 * The winner stops its siblings, and the await returns only once every child has
-	 * retired, so no child is still running when a won await returns. The losers'
-	 * results are discarded.
+	 * The winner stops its siblings, and **the await returns only once every child has
+	 * retired**, not when the winner is elected -- so no child of the caller's is still
+	 * running when a won await returns. That is what keeps the lvalue precondition below
+	 * enforceable: a caller's referents need only outlive the await, which it can
+	 * observe, rather than a teardown it cannot. It costs latency, the winner's value
+	 * being held back until the losers have unwound.
+	 *
+	 * **TWO WAYS A LOSER'S RESULT IS DISCARDED, and the second is an asymmetry with
+	 * alt::when_all.** A loser that completes with a valid value loses it: every child
+	 * writes its own slot, because a child cannot know it has won until it has elected,
+	 * and only the elected slot is ever read. And a loser that completes by THROWING
+	 * loses its exception the same way -- a when_all rethrows the lowest-position child's
+	 * exception, a when_any rethrows only the winner's, and nothing anywhere reports a
+	 * loser's. Behind both sits the loss alt::when_all documents on its cancellation
+	 * path: a loser stopped before it completed loses whatever its work had already
+	 * consumed, a semaphore permit taken and not returned or a task_completion_source
+	 * value set and never read. An alt::async_mutex loser is harmless, its guard
+	 * unlocking on destruction.
 	 *
 	 * Cancellation is an observable *result*, as for alt::when_all: when the awaiting
 	 * chain is cancelled the await yields @c std::errc::operation_canceled, even if a
-	 * winner had already been elected, and nothing is rethrown. A winner that completed
-	 * by throwing rethrows its exception at the await.
+	 * winner had already been elected -- that winner is discarded -- and nothing is
+	 * rethrown, a winner's exception included. A winner that completed by throwing is a
+	 * completed child and wins; its exception is rethrown at the await, after the losers
+	 * have retired like any other winner's result.
 	 *
 	 * **At least one awaitable is required, and that is checked at the call site.** A
 	 * race over no awaitables has no winner to yield, so the call is ill formed: the
@@ -1098,6 +1203,15 @@ namespace alt
 	 * children; one passed as an rvalue is moved into its child's frame. Passing the
 	 * same awaitable object twice is a precondition violation. The leak when starting a
 	 * child throws is alt::when_all's, unchanged: see there, and for the allocations.
+	 *
+	 * ONE THING A FUTURE CHANGE TO THIS COMPONENT MUST DECIDE DELIBERATELY. Exactly one
+	 * joiner parks on a race's completion counter, and detail::waiter_list::claim's
+	 * liveness assert sits ahead of its election because of it, so that even a claim
+	 * which would lose aborts on a destroyed list instead of returning quietly. A change
+	 * that parked a SECOND joiner on one race's counter would make a late losing claim on
+	 * a freed list a normal shape and that assert would fire on a benign race. It would
+	 * re-open where the assert belongs, which is a decision about waiter_list rather than
+	 * about this header. detail::when_any_awaiter's note holds the enumeration.
 	 */
 	template<typename... Awaitables>
 	  requires(awaitable<Awaitables> && ...) && (sizeof...(Awaitables) > 0)
@@ -1133,8 +1247,8 @@ namespace alt
 	 * and a sized range select the argument-list overload, as one awaitable child,
 	 * rather than being ambiguous between the two.
 	 *
-	 * Cancellation, exceptions, and the leak when starting a child throws are the
-	 * argument-list form's; see there.
+	 * Cancellation, the two loss modes, exceptions, the wait for every child to retire
+	 * and the leak when starting a child throws are the argument-list form's; see there.
 	 */
 	template<std::ranges::sized_range R>
 	  requires(!awaitable<R>) && awaitable<std::ranges::range_value_t<R>> &&

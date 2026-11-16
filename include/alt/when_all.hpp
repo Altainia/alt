@@ -373,9 +373,11 @@ namespace alt::detail
 		 *   resumption to a scheduler would decouple the resumer's reference from this
 		 *   destructor, and the satisfied path would gain the window the same way.
 		 * - A second claimer on the counter's list: a combinator that parks more than one
-		 *   joiner on it, or one that parks before its fan-out has ended -- which when_any
-		 *   may -- has a claimer that is neither this thread's own callback nor an
-		 *   already-retired child.
+		 *   joiner on it, or one that parks before its fan-out has ended, has a claimer that
+		 *   is neither this thread's own callback nor an already-retired child. No shipped
+		 *   combinator does either -- alt::when_any was the candidate for the second and
+		 *   parks strictly after its fan-out, measured there -- so this is a condition on a
+		 *   future one.
 		 * - A CALLER whose co_await full-expression holds a SECOND suspension point. This
 		 *   one is not a change to the library: consume(co_await when_all(a, b), co_await
 		 *   other) is legal C++ today. This awaiter is a temporary of that full-expression
@@ -393,8 +395,8 @@ namespace alt::detail
 		 * In all four the window above is a use-after-free with nothing left to argue
 		 * about. Keep the reset first.
 		 *
-		 * AND FOR WHOEVER WRITES when_any. If it parks more than one joiner on a counter,
-		 * or parks before its fan-out has ended, every enumeration in this note -- the two
+		 * AND FOR THE NEXT COMBINATOR. If one parks more than one joiner on a counter, or
+		 * parks before its fan-out has ended, every enumeration in this note -- the two
 		 * complete() calls, the one resume_claimed that writes satisfied, the three
 		 * unsatisfied resumers, the four parties that touch the counter's list -- must be
 		 * RE-DERIVED FROM SCRATCH rather than cited. Each of them is correct today, for
@@ -403,6 +405,12 @@ namespace alt::detail
 		 * bullet turned out to be. An enumeration over call sites is the instrument that
 		 * already failed once in stage A, and citing one of these from a component with a
 		 * different parking shape repeats that failure at greater length.
+		 *
+		 * alt::when_any, which this paragraph was addressed to before it existed, parks one
+		 * joiner strictly after its fan-out, so the derivation does carry to it -- and
+		 * ~when_any_awaiter re-derived all four enumerations against its own call sites
+		 * anyway rather than taking them on trust. That is the standard for the one after
+		 * it too.
 		 *
 		 * The ordering is also still what satisfies detail::wait_awaiter's stated
 		 * precondition locally, "the primitive must outlive every claim on its waiters":
@@ -907,16 +915,21 @@ namespace alt
 	 * cancels a single child on its own.
 	 *
 	 * **Each child is its own cancellation root**, and the reason this is safe rests on
-	 * three invariants. (A) The combinator never owns or destroys a child frame; it only
-	 * ever requests stops, and the children are self-owning alt::cancellable_task
-	 * roots. (B) The claim election cannot free an already-claimed node: a loser whose
-	 * node a satisfier already won loses the compare-and-swap in waiter_list::claim, so
-	 * its waiter_stop_release resumes and frees nothing; the only way a child frame dies
-	 * is the child itself running, which happens only when the walk reaches it. (C) The
-	 * combinator never destroys a child, though it may resume the awaiting chain while
-	 * children are still alive; (A) is what makes that safe for the sibling hazard. The
+	 * three invariants. **(A) Ownership.** No combinator owns or destroys a child frame;
+	 * the children are self-owning alt::cancellable_task roots, and a combinator only
+	 * ever requests their stop. **(B) The claim election cannot free an already-claimed
+	 * node:** a loser whose node a satisfier already won loses the compare-and-swap in
+	 * waiter_list::claim, so its waiter_stop_release resumes and frees nothing; the only
+	 * way a child frame dies is the child itself running, which happens only when the
+	 * walk reaches it. **(C) Lifetime overlap.** A combinator may resume the awaiting
+	 * chain -- and so let that chain destroy the combinator's own frame -- while children
+	 * are still alive; this is why the shared state is reference counted off the frame
+	 * instead of owned by it, and (A) is what keeps the sibling hazard away across that
+	 * overlap, the children that outlive the frame destroying nothing but themselves. The
 	 * argument is recorded where the hazard is: see the note on alt::async_latch, which
-	 * states the same three under the same labels.
+	 * states the same three under the same labels, and which also says why alt::when_any
+	 * -- where that overlap is the success path rather than the cancellation path -- fits
+	 * the same argument.
 	 *
 	 * A when_all awaited in a promise with no cancellation context -- an alt::task
 	 * driven by alt::sync_wait, with no alt::cancellable_task root above it -- is simply

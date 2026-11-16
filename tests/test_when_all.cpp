@@ -2390,8 +2390,14 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// callbacks in reverse registration order, so the joiner is claimed and released
 	// first, await_resume short-circuits on !waited, and the flag is never read.
 	// combinator_state's own note says as much -- swapping cancel()'s two statements fails
-	// nothing in when_all for exactly this reason. The flag decides the verdict only for a
-	// combinator that parks before its fan-out ends, which is when_any's business.
+	// no when_all test IN A DEBUG BUILD for exactly this reason. Two riders belong with
+	// that, and both are stated once, in cancel()'s note: under AddressSanitizer the same
+	// swap is a heap-use-after-free, which aborts
+	// WhenAllTest.CancellingTheAwaitingChainReportsOperationCanceled, so the order is
+	// load-bearing here as well and not only elsewhere; and the flag decides a VERDICT for
+	// a combinator that reaches await_resume with the wait satisfied and the flag set,
+	// which is when_any's business and which
+	// WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner holds.
 	//
 	// The overlap the satisfier-pinned phase is built around is ARRANGED BUT UNWITNESSED,
 	// and the stop-pinned phase deliberately has no overlap to witness: it holds the

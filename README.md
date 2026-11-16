@@ -183,3 +183,4 @@ Then include headers as needed:
 | `<alt/task_completion_source.hpp>` | The bridge from a callback to an await: `task_completion_source`, `completion_result` | [docs/task_completion_source.md](docs/task_completion_source.md) |
 | `<alt/task_group.hpp>` | The owner's teardown point for spawned tasks: `task_group` | [docs/task_group.md](docs/task_group.md) |
 | `<alt/when_all.hpp>` | Awaits several awaitables concurrently and yields every result: `when_all` | [docs/when_all.md](docs/when_all.md) |
+| `<alt/when_any.hpp>` | Races several awaitables and yields the first to complete: `when_any` | [docs/when_any.md](docs/when_any.md) |

@@ -66,20 +66,24 @@ namespace alt
 	 * chain (detach_all) instead of one detach_one at a time. An ordinary awaiting
 	 * chain cannot create the sibling hazard, because a task is lazy and owns only the
 	 * child it awaits, and a task_group's tasks are self-owning roots it never destroys.
-	 * alt::when_all (see include/alt/when_all.hpp) adds a combinator to that picture and
-	 * does not create the hazard either. Three invariants carry that, labeled as
-	 * alt::when_all's own documentation and docs/when_all.md label them, so that a
-	 * reader arriving from either can check the one they came for:
+	 * alt::when_all (see include/alt/when_all.hpp) and alt::when_any
+	 * (include/alt/when_any.hpp) add combinators to that picture and do not create the
+	 * hazard either. Three invariants carry that, labeled as those components' own
+	 * documentation and docs/when_all.md label them, so that a reader arriving from any
+	 * of them can check the one they came for:
 	 *
-	 * - (A) The combinator never owns or destroys a child frame; it only ever requests
-	 *   stops, and the children are self-owning alt::cancellable_task roots.
-	 * - (B) The claim election cannot free an already-claimed node: a loser whose node a
-	 *   satisfier already won loses the compare-and-swap in waiter_list::claim, so its
+	 * - **(A) Ownership.** No combinator owns or destroys a child frame. The children are
+	 *   self-owning alt::cancellable_task roots, and a combinator only ever requests
+	 *   their stop.
+	 * - **(B) The claim election cannot free an already-claimed node.** A loser whose node
+	 *   a satisfier already won loses the compare-and-swap in waiter_list::claim, so its
 	 *   waiter_stop_release resumes and frees nothing; the only way a child frame dies is
 	 *   the child itself running, which happens only when the walk reaches it.
-	 * - (C) The combinator never destroys a child, though it may resume the awaiting
-	 *   chain while children are still alive; (A) is what makes that safe for the
-	 *   sibling hazard.
+	 * - **(C) Lifetime overlap.** A combinator may resume the awaiting chain -- and so let
+	 *   that chain destroy the combinator's own frame -- while children are still alive.
+	 *   This is why the shared state is reference counted off the frame instead of owned
+	 *   by it, and (A) is what keeps the sibling hazard away across that overlap: the
+	 *   children that outlive the frame destroy nothing but themselves.
 	 *
 	 * The four components that resume a multi-node chain are async_event::set, this
 	 * count_down, async_semaphore::release -- which wins its waiters one detach_one at a
@@ -87,10 +91,24 @@ namespace alt
 	 * ~waiter_list backstop each of them runs ahead of, which walks a multi-node chain
 	 * of its own and is reachable only through those four. What protects them is (A) and
 	 * (B) -- those two facts about ownership and the claim -- not the absence of a
-	 * combinator, so the arrival of one did not force a revisit. A change to
-	 * waiter_list::claim or to resume_claimed would: resuming one node per detach, and
-	 * not holding the next node across a resumption, is what each of them would then
-	 * have to change to.
+	 * combinator, so the arrival of one did not force a revisit.
+	 *
+	 * **THE SECOND COMBINATOR FITS THAT ARGUMENT, and it is worth saying why rather than
+	 * leaving it to the count.** alt::when_any's children are the same self-owning roots
+	 * it can only stop, so (A) holds verbatim, and it destroys no child, so (C)'s first
+	 * clause does too. What it changes is how OFTEN the overlap in (C) happens: in
+	 * when_all the chain resumes with children still holding block references only on a
+	 * cancellation, while a when_any resumes that way on every successful race, the
+	 * losers retiring behind the winner. That is a change of frequency, not of kind, and
+	 * (A) is indifferent to frequency -- the children that outlive the frame still
+	 * destroy nothing but themselves. So a reader need not re-derive this per combinator.
+	 *
+	 * What WOULD break it is not another combinator but a change to who claims. A change
+	 * to waiter_list::claim or to resume_claimed would: resuming one node per detach, and
+	 * not holding the next node across a resumption, is what each of the four would then
+	 * have to change to. So would a combinator that parked a second joiner on one
+	 * completion counter, which is a different enumeration again and is recorded in
+	 * detail::when_any_awaiter's note.
 	 */
 	class async_latch
 	{

@@ -73,9 +73,15 @@ namespace alt::detail
 		 * claimed the position protected a parent "that has not finished suspending";
 		 * three passes over this file asserted that before anyone measured it.
 		 *
-		 * The count stays, for stage B rather than for today: a combinator that parks
-		 * before its fan-out ends -- which when_any may -- would need it, and removing it
-		 * would change this constructor's semantics for no gain in stage A.
+		 * The count stays, and it stays defensive: a combinator that parks before its
+		 * fan-out ends would need it, and removing it would change this constructor's
+		 * semantics for no gain. **alt::when_any is not that combinator.** An earlier
+		 * version of this note kept the item for one that "may", naming when_any as the
+		 * candidate; it parks on the counter strictly after its fan-out, exactly as
+		 * when_all does, and when_any_awaiter::await_suspend re-measured the retirement's
+		 * position against its own tests rather than inheriting the figure above. So no
+		 * shipped combinator needs this item, and the next one that parks early is who it
+		 * is kept for.
 		 *
 		 * @param children The number of children that will each retire one item.
 		 * @param owner    Passed back to @p destroy when the last reference is released.
@@ -153,17 +159,40 @@ namespace alt::detail
 			// as false it would report a satisfied wait and assemble results from slots
 			// no child body ever filled.
 			//
-			// What guards the order is this class's own test, not a combinator's.
 			// Swapping these two statements fails
 			// CombinatorStateTest.CancelMarksTheWaitReleasedBeforeStoppingTheChildren
-			// 200 times out of 200 repeats, and fails nothing at all in alt::when_all:
-			// 0 failures in 200 repeats of each of the five cancellation-path tests run
-			// one at a time, and in a separate single run of the whole WhenAllTest suite
-			// all 35 of its tests still pass. The reason is in when_all_awaiter's
-			// await_resume note: the chain's own stop claims the joiner before cancel()
-			// ever runs, so the flag is never the deciding half of that verdict today. It
-			// is still stored first, because a combinator that parks before its fan-out
-			// ends would make it the deciding half.
+			// 200 times out of 200 repeats, and that was for a while the only test that
+			// guarded the order. Two measurements have been added to it since, and the
+			// three together are what the order rests on.
+			//
+			// **IN alt::when_all IT FAILS NOTHING -- IN A DEBUG BUILD.** 0 failures in 200
+			// repeats of each of the five cancellation-path tests run one at a time, and in
+			// a separate single run of the whole WhenAllTest suite all 35 of its tests still
+			// pass. That figure names a preset because the preset is the whole of its
+			// scope: UNDER ADDRESSSANITIZER THE SAME SWAP IS A HEAP-USE-AFTER-FREE, reported
+			// at the flag store in this function, with
+			// WhenAllTest.CancellingTheAwaitingChainReportsOperationCanceled the first test
+			// to walk into it and the run aborting there. The children's stop frees this
+			// block -- the last child's completion hook drops the last reference, which is
+			// cancel()'s ordinary path and the DELICATE note below -- so a flag stored
+			// afterwards is stored into freed memory. The order is therefore load-bearing
+			// for this block's LIFETIME on this toolchain, and not only for some other
+			// implementation's verdict.
+			//
+			// The debug reason the flag is not the deciding half in when_all is in
+			// when_all_awaiter's await_resume note: the chain's own stop claims the joiner
+			// before cancel() ever runs, so that verdict is settled on !waited. That is a
+			// fact about one cancellation context relaying one stop, and a combinator can
+			// reach await_resume with the wait SATISFIED and this flag SET by other routes:
+			// WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner does it
+			// with two contexts answering one chain's two reads, and a cross-thread stop
+			// landing after the counter's zero transition does it in production. That test
+			// is the FIRST TEST AT COMBINATOR LEVEL TO CATCH THIS SWAP AT ALL: in debug the
+			// swap fails it and the CombinatorStateTest above and nothing else in the
+			// 799-test suite; under AddressSanitizer the suite never reaches it, the
+			// use-after-free above aborting the run in the when_all test first. A
+			// combinator that parks before its fan-out ends would be a third route; none
+			// does today, which is the constructor note's business rather than this one's.
 			m_cancelled.store(true, std::memory_order_release);
 
 			// DELICATE. The copy is not a style choice. Read this before removing it.
