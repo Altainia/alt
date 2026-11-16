@@ -163,6 +163,11 @@ find_package(Alt 1.11.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
+Headers and the installed library must come from the same minor release: the inline
+sizes of the async primitives (`async_event`, `async_mutex`, `task_group`, ...) can
+change between minors. The package config enforces this, so `find_package(Alt 1.11.0)`
+accepts 1.11.0 and later 1.11.x releases and rejects 1.12.0 and 1.10.x.
+
 ## Coding guidelines
 
 **Naming**

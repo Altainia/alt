@@ -134,6 +134,11 @@ find_package(Alt 1.11.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
+Headers and the installed library must come from the same minor release, because the
+inline sizes of the async primitives can change between minors. The package config
+enforces this: requesting `1.11.0` accepts 1.11.0 and later 1.11.x releases and rejects 1.12.0 and
+1.10.x, so update the requested version when you upgrade across a minor release.
+
 Then include headers as needed:
 
 ```cpp
