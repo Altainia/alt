@@ -70,10 +70,28 @@ namespace alt
 		 * @tparam I The position to read, which must equal index().
 		 */
 		template<std::size_t I>
-		[[nodiscard]] decltype(auto) get() const
+		[[nodiscard]] decltype(auto) get() const&
 		{
 			assert(I == index() && "reading an alt when_any result for a position that did not win");
 			return std::get<I>(m_value);
+		}
+
+		/**
+		 * Takes the winning value out of an rvalue result, so a move-only winner such as
+		 * a std::unique_ptr can be had: std::move(result).template get<0>(). The same
+		 * position requirement as the const form applies.
+		 *
+		 * There is deliberately no non-const lvalue overload: reading is the const form
+		 * and taking is this one, and no caller needs a mutable reference into the
+		 * winner's storage.
+		 *
+		 * @tparam I The position to take, which must equal index().
+		 */
+		template<std::size_t I>
+		[[nodiscard]] decltype(auto) get() &&
+		{
+			assert(I == index() && "reading an alt when_any result for a position that did not win");
+			return std::get<I>(std::move(m_value));
 		}
 
 	private:
@@ -111,9 +129,19 @@ namespace alt
 		}
 
 		/** The value the winning element produced. */
-		[[nodiscard]] const V& value() const noexcept
+		[[nodiscard]] const V& value() const& noexcept
 		{
 			return m_value;
+		}
+
+		/**
+		 * Takes the winning element's value out of an rvalue result, so a move-only value
+		 * can be had: std::move(result).value(). As with when_any_result::get, there is
+		 * no non-const lvalue overload.
+		 */
+		[[nodiscard]] V&& value() && noexcept
+		{
+			return std::move(m_value);
 		}
 
 	private:

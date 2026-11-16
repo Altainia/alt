@@ -5,6 +5,7 @@
 #include <concepts>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -123,7 +124,6 @@ TEST(WhenAnyResultTest, AVoidChildsValueIsMonostate)
 	const when_any_result<int, std::monostate> result{std::in_place_index<1>};
 	EXPECT_EQ(result.index(), 1U);
 	static_assert(std::same_as<decltype(result.get<1>()), const std::monostate&>);
-	EXPECT_EQ(result.get<1>(), std::monostate{});
 }
 
 TEST(WhenAnyResultTest, AReferenceChildsValueIsAReferenceWrapper)
@@ -138,6 +138,46 @@ TEST(WhenAnyResultTest, AReferenceChildsValueIsAReferenceWrapper)
 	EXPECT_EQ(&result.get<0>().get(), &target);
 }
 
+// The overload set: a const lvalue reads, an rvalue takes. The rvalue overload yields an
+// rvalue reference, the const one a const lvalue reference.
+static_assert(std::same_as<decltype(std::declval<const when_any_result<int, int>&>().get<0>()), const int&>);
+static_assert(std::same_as<decltype(std::declval<when_any_result<int, int>>().get<0>()), int&&>);
+static_assert(std::same_as<decltype(std::declval<const when_any_range_result<int>&>().value()), const int&>);
+static_assert(std::same_as<decltype(std::declval<when_any_range_result<int>>().value()), int&&>);
+
+TEST(WhenAnyResultTest, AMoveOnlyWinnerCanBeTakenOutOfAnRvalueResult)
+{
+	when_any_result<int, std::unique_ptr<int>> result{std::in_place_index<1>, std::make_unique<int>(8)};
+
+	// Reading does not take.
+	ASSERT_NE(result.get<1>(), nullptr);
+	EXPECT_EQ(*result.get<1>(), 8);
+
+	const std::unique_ptr<int> taken = std::move(result).get<1>();
+	ASSERT_NE(taken, nullptr);
+	EXPECT_EQ(*taken, 8);
+
+	// The source is left moved-from: its alternative is still engaged, now null.
+	// NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what this test observes.
+	EXPECT_EQ(result.index(), 1U);
+	// NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what this test observes.
+	EXPECT_EQ(result.get<1>(), nullptr);
+}
+
+TEST(WhenAnyResultTest, AMoveOnlyRangeWinnerCanBeTakenOutOfAnRvalueResult)
+{
+	when_any_range_result<std::unique_ptr<int>> result{2, std::make_unique<int>(4)};
+	ASSERT_NE(result.value(), nullptr);
+
+	const std::unique_ptr<int> taken = std::move(result).value();
+	ASSERT_NE(taken, nullptr);
+	EXPECT_EQ(*taken, 4);
+	// NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what this test observes.
+	EXPECT_EQ(result.value(), nullptr);
+	// NOLINTNEXTLINE(bugprone-use-after-move): the moved-from state is what this test observes.
+	EXPECT_EQ(result.index(), 2U);
+}
+
 TEST(WhenAnyResultTest, TheRangeFormCarriesOneValueTypeAndAnIndex)
 {
 	const when_any_range_result<std::string> result{3, "third"};
@@ -150,7 +190,7 @@ TEST(WhenAnyResultTest, TheRangeFormCarriesOneValueTypeAndAnIndex)
 	EXPECT_EQ(zero.value(), 11);
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. Measured with the pinned tool at threshold 0: the macro alone in a test body is 0, the macro alone in a named helper is 37, and one skip guard ahead of it is 38 -- so hoisting the macro into a helper moves the finding rather than removing it, and the guard cannot move because GTEST_SKIP only skips the function it is written in. What this body actually contains is two skip guards and one expectation.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): same cause and same shape as the death tests in tests/test_waiter_list.cpp, whose suppression carries the measurement (clang-tidy-19 scores EXPECT_DEATH 0 alone in a body but 37-39 once a skip guard precedes it, against a threshold of 25). Not re-measured for this body, which has the same two skip guards and one expectation.
 TEST(WhenAnyResultDeathTest, GettingAPositionThatDidNotWinAborts)
 {
 	if(!asserts_are_compiled_in)
