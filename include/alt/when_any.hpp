@@ -48,7 +48,8 @@ namespace alt::detail
 	 * the same erased destroy function, which is what makes the block's reference count
 	 * the lifetime of the slots and of the election too.
 	 *
-	 * Allocated by when_any_awaiter::await_suspend and freed by nothing else: the last
+	 * Allocated by when_any_awaiter::await_suspend, for a race with at least one child,
+	 * and freed by nothing else: the last
 	 * reference to the block frees it, whichever party drops it.
 	 */
 	template<typename Slots>
@@ -353,7 +354,7 @@ namespace alt::detail
 	 *                 the argument-list form, or the range itself for the range form,
 	 *                 whose Slots is then a vector.
 	 *
-	 * Allocates the shared block on suspension, fans the children out as self-owning
+	 * Allocates the shared block in await_suspend, fans the children out as self-owning
 	 * alt::cancellable_task roots, and parks the awaiting chain on the block's
 	 * completion counter. detail::when_all_awaiter's shape exactly, with the election
 	 * added and the assembly replaced. Neither copyable nor assignable; moved exactly
@@ -494,8 +495,10 @@ namespace alt::detail
 		/**
 		 * Unconditionally false, so the block is allocated and the children started in
 		 * await_suspend, which is the only place that has the awaiting handle. A race
-		 * therefore always enters a suspension point, even one it returns from without
-		 * parking.
+		 * therefore always reaches await_suspend, even one it returns from without
+		 * parking. Whether the chain actually suspends is await_suspend's answer: it
+		 * does not for an empty range, which is returned from before anything is
+		 * allocated.
 		 */
 		// NOLINTNEXTLINE(readability-convert-member-functions-to-static): the compiler calls this through an awaiter instance at every co_await of a when_any; static here would move readability-static-accessed-through-instance to those call sites instead.
 		[[nodiscard]] bool await_ready() const noexcept
@@ -515,9 +518,9 @@ namespace alt::detail
 		 * child options, the park after everything -- and this function follows it.
 		 * Do not re-derive those here; read them there before moving anything.
 		 *
-		 * Nothing precedes the allocation, deliberately, and which no-children case that
-		 * leaves room for is worth being exact about, because the two forms fail
-		 * differently and only one of them can be answered from here:
+		 * Only the range form's empty check precedes the allocation, deliberately, and
+		 * which no-children case that leaves room for is worth being exact about, because
+		 * the two forms fail differently and only one of them can be answered from here:
 		 *
 		 * - AN ARGUMENT-LIST when_any OVER NO AWAITABLES IS A COMPILE ERROR, and no
 		 *   early return can change that. Its Slots is an empty std::tuple, so
@@ -537,8 +540,9 @@ namespace alt::detail
 		 * call site, with a constraint; the range overload cannot, since a range's size is
 		 * not part of its type.
 		 *
-		 * @return False when the race is already over -- every child retired before the
-		 *         join could link -- so the awaiting coroutine carries straight on.
+		 * @return False when the chain should carry straight on: the range was empty and
+		 *         nothing was allocated, or every child retired before the join could
+		 *         link. True when the chain parked on the counter.
 		 */
 		template<typename Promise>
 		bool await_suspend(std::coroutine_handle<Promise> h)
@@ -857,8 +861,10 @@ namespace alt::detail
 				}
 			}
 
-			// m_join is engaged by await_suspend, which always runs first: await_ready is
-			// unconditionally false, so there is no path to a resumption without it.
+			// Past the empty-range return above, m_join is engaged by await_suspend, which
+			// always runs first: await_ready is unconditionally false, so there is no path
+			// to a resumption without it, and only the empty range returns before the
+			// join is built.
 			// Asserted rather than left implicit because clang-tidy-19's
 			// bugprone-unchecked-optional-access cannot see across the two functions.
 			assert(m_join.has_value() && "resuming an alt when_any that never suspended");
@@ -975,7 +981,11 @@ namespace alt::detail
 		/** The caller's awaitables or range, owned by the awaitable object this came from. */
 		Storage* m_storage;
 
-		/** The shared block, from await_suspend until this awaiter is destroyed. */
+		/**
+		 * The shared block, from await_suspend until this awaiter is destroyed. Null
+		 * before await_suspend, and for good when the range was empty and nothing was
+		 * allocated.
+		 */
 		when_any_state<Slots>* m_state = nullptr;
 
 		/** This chain's place in the block's completion counter. The only joiner on it. */
@@ -1110,8 +1120,11 @@ namespace alt
 	 * without allocating. The argument-list overload rejects zero awaitables at compile
 	 * time instead; the two are different mechanisms.
 	 *
-	 * Every element is moved into its child, so the child owns it, and an lvalue range
-	 * is bound, not copied, and is left holding moved-from elements. A const range is
+	 * Every element is moved into its child, so the child owns it. This overload
+	 * therefore does not inherit the argument-list form's lvalue precondition: nothing
+	 * the children run refers into the caller's range. An rvalue range is owned by the
+	 * returned awaitable; an lvalue range is bound, not copied, and is left holding
+	 * moved-from elements, so it must not be awaited twice. A const range is
 	 * accepted only if its elements are copyable, and they are then copied. The range
 	 * must be a std::ranges::sized_range, since the child count is needed before the
 	 * first child starts; it is iterated once.

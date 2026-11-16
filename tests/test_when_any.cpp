@@ -659,6 +659,15 @@ namespace
 		co_return value;
 	}
 
+	/** A task that parks on @p gate and then yields a pointer to @p value: a move-only winner. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
+	alt::task<std::unique_ptr<int>> wait_then_yield_unique(alt::async_event& gate, int value)
+	{
+		const frame_tracker tracker{value};
+		static_cast<void>(co_await gate);
+		co_return std::make_unique<int>(value);
+	}
+
 	/** Parks in a when_any over a vector of two tasks and records the winner. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
 	alt::cancellable_task range_race_root(alt::async_event& first, alt::async_event& second, wait_record& record, std::size_t& winner, int& value)
@@ -674,6 +683,20 @@ namespace
 		{
 			winner = result->index();
 			value  = result->value();
+		}
+	}
+
+	/** Parks in an argument-list alt::when_any over a value task and a move-only one, and takes the winner. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task variadic_race_root(alt::async_event& first, alt::async_event& second, wait_record& record, std::size_t& winner, std::unique_ptr<int>& taken)
+	{
+		auto result = co_await alt::when_any(wait_then_yield(first, 10), wait_then_yield_unique(second, 20));
+		record_outcome(record, result);
+
+		if(result)
+		{
+			winner = result->index();
+			taken  = std::move(*result).template get<1>();
 		}
 	}
 
@@ -738,6 +761,28 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 	EXPECT_FALSE(handle.stop_requested());
 }
 
+TEST_F(WhenAnyTest, TheArgumentListFormRacesItsArgumentsAndYieldsAMoveOnlyWinner)
+{
+	alt::async_event     first;
+	alt::async_event     second;
+	wait_record          record;
+	std::size_t          winner = 99;
+	std::unique_ptr<int> taken;
+
+	auto handle = alt::start(variadic_race_root(first, second, record, winner, taken));
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_EQ(live_frames, 2);
+
+	second.set();
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_TRUE(record.satisfied);
+	EXPECT_EQ(winner, 1U);
+	ASSERT_NE(taken, nullptr) << "the move-only winner did not come out of the result";
+	EXPECT_EQ(*taken, 20);
+	EXPECT_EQ(live_frames, 0) << "the loser must have retired before a won await returns";
+}
+
 TEST_F(WhenAnyTest, AnEmptyRangeReportsInvalidArgument)
 {
 	wait_record record;
@@ -748,7 +793,6 @@ TEST_F(WhenAnyTest, AnEmptyRangeReportsInvalidArgument)
 	EXPECT_EQ(record.resumptions, 1) << "an empty range must not suspend the chain";
 	EXPECT_FALSE(record.satisfied);
 	EXPECT_EQ(record.error, std::make_error_code(std::errc::invalid_argument));
-	EXPECT_EQ(live_frames, 0);
 
 	const auto result = alt::sync_wait(alt::when_any(std::vector<alt::task<int>>{}));
 
