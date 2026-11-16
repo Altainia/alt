@@ -206,6 +206,22 @@ namespace alt::detail
 			children_source.request_stop();
 		}
 
+		/**
+		 * @brief Stops the children without marking the wait cancelled. Idempotent.
+		 *
+		 * For a winner stopping the losers on the success path, where setting the flag
+		 * would make cancelled() true on every successful wait and so no longer mean
+		 * "the chain was cancelled". Safe against this block being freed by the stop it
+		 * requests, for the reason in cancel()'s DELICATE note.
+		 */
+		void request_children_stop() noexcept
+		{
+			// The counted copy cancel() holds, for the reason its DELICATE note gives.
+			// The one difference: this never touches m_cancelled.
+			const std::stop_source children_source = m_children;
+			children_source.request_stop();
+		}
+
 		/** Whether cancel() has been called. Pairs with the release in cancel(). */
 		[[nodiscard]] bool cancelled() const noexcept
 		{
