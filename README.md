@@ -136,8 +136,10 @@ target_link_libraries(my_target PRIVATE alt::alt)
 
 Headers and the installed library must come from the same minor release, because the
 inline sizes of the async primitives can change between minors. The package config
-enforces this: requesting `1.11.0` accepts 1.11.0 and later 1.11.x releases and rejects 1.12.0 and
-1.10.x, so update the requested version when you upgrade across a minor release.
+enforces this: requesting `1.11.0` accepts 1.11.0 and later 1.11.x releases, but rejects
+1.12.0 and 1.10.x, and a request for a higher patch than the installed one (1.11.1
+against 1.11.0) also fails. Update the requested version when you upgrade across a minor
+release.
 
 Then include headers as needed:
 
