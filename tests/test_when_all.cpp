@@ -1659,7 +1659,19 @@ namespace
 
 			++*m_opened;
 			m_reached->store(true, std::memory_order_release);
-			spin_until(*m_stopped);
+
+			// Bounded for the same reason the stop thread's wait on `reached` is: that
+			// thread gives up after teardown_rendezvous_limit, and if it gave up just
+			// before this store nothing will ever publish `stopped`, so an unbounded
+			// wait here would hang the suite in a narrower window than the one the stop
+			// thread's bound closes. ADD_FAILURE is safe in a destructor: it records
+			// the failure and returns, and throws only if the run was started with
+			// --gtest_throw_on_failure, which this suite does not use. Each side's wait
+			// is bounded on its own, so neither can strand the other.
+			if(!spin_until_for(*m_stopped, teardown_rendezvous_limit))
+			{
+				ADD_FAILURE() << "the stop thread gave up or never ran, so the block's teardown was not held open and this repeat guarded nothing";
+			}
 		}
 
 		/** The tag this value carries, which travels with it through both moves. */
@@ -1790,9 +1802,10 @@ namespace
 			// Bounded, because `reached` is published only by the tripwire whose hop
 			// count equals tripwire_block_hops. If a change moves the slot's copy off
 			// that count nothing publishes it, and an unbounded wait would hang the
-			// suite instead of failing it. The tripwire's own wait on `stopped` is
-			// entered only after it published `reached`, so giving up here strands
-			// nobody.
+			// suite instead of failing it. Giving up here strands nobody: the tripwire
+			// returns early on a hop mismatch and never waits, and if it published
+			// `reached` just after this wait expired, its own wait on `stopped` is
+			// bounded too and fails the repeat instead of hanging.
 			if(!spin_until_for(reached, teardown_rendezvous_limit))
 			{
 				ADD_FAILURE() << "the teardown tripwire never matched tripwire_block_hops, so the window was never opened and this repeat guarded nothing; "
