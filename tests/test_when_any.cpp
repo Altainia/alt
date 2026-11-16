@@ -3,6 +3,7 @@
 #include <alt/async_event.hpp>
 #include <alt/awaitable.hpp>
 #include <alt/cancellable_task.hpp>
+#include <alt/detail/cancellation.hpp>
 #include <alt/detail/when_any_result.hpp>
 #include <alt/sync_wait.hpp>
 #include <alt/task.hpp>
@@ -13,9 +14,11 @@
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -192,29 +195,70 @@ namespace
 	}
 
 	/**
-	 * A tracked task that parks on @p gate and counts its own resumption past the wait.
+	 * @brief A wait on @p gate that when_any_child awaits DIRECTLY, counting its own
+	 *        resumption.
 	 *
 	 * The counter is the observable for the claim when_any_child and
-	 * when_any_awaiter::await_resume both rest on: a child already PARKED on an alt
-	 * wait primitive is resumed *released* rather than torn down, so its body runs on
-	 * past the co_await even on the cancelled path. The increment is the first
-	 * statement after the wait, so it cannot run for a child that was torn down at its
-	 * suspension point instead.
+	 * when_any_awaiter::await_resume both rest on: a child already PARKED on an alt wait
+	 * primitive is resumed *released* rather than torn down, so it runs on past its wait
+	 * even on the cancelled path, writes its slot and reaches its election.
+	 *
+	 * **Direct rather than a nested alt::task, and that is what makes the claim's second
+	 * half observable at all.** An earlier version of this held an alt::task parked on
+	 * the event, and that task's final_awaiter abandons the chain once a stop has been
+	 * requested -- abandon_chain destroys the context's root, which for a child IS the
+	 * when_any_child frame -- so a released task child ran past its wait and was then
+	 * destroyed ahead of its slot write and its election. The increment was real and the
+	 * step from it to elect() was not. Awaited here instead, there is no final suspend
+	 * between the two: the increment below is the last statement before
+	 * when_any_child's slot write, and store-then-elect is the straight-line code after
+	 * it. See park_then_yield_value for the mutation that measures the difference.
+	 *
+	 * The tracker is held by pointer because frame_tracker is immovable and this object
+	 * is moved into the child's frame, which is test_when_all.cpp's homed_wait's reason
+	 * for the same indirection. It is constructed with the awaitable rather than with the
+	 * child frame, so live_frames counts from the co_await expression to the child frame's
+	 * destruction.
 	 */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both objects are owned by the calling test, which holds them until live_frames is back to zero.
-	alt::task<alt::wait_result> wait_then_count(alt::async_event& gate, std::atomic<int>& resumed, int tag)
+	class counting_event_wait
 	{
-		const frame_tracker    tracker{tag};
-		const alt::wait_result result = co_await gate;
-		resumed.fetch_add(1, std::memory_order_acq_rel);
-		co_return result;
-	}
+	public:
+		counting_event_wait(alt::async_event& gate, std::atomic<int>& resumed, int tag):
+		  m_waiter(gate),
+		  m_resumed(&resumed),
+		  m_tracker(std::make_unique<frame_tracker>(tag))
+		{
+		}
+
+		[[nodiscard]] bool await_ready() const
+		{
+			return m_waiter.await_ready();
+		}
+
+		template<typename Promise>
+		bool await_suspend(std::coroutine_handle<Promise> h)
+		{
+			return m_waiter.await_suspend(h);
+		}
+
+		/** Counted here, which is the last step before when_any_child writes the slot. */
+		[[nodiscard]] alt::wait_result await_resume() const noexcept
+		{
+			m_resumed->fetch_add(1, std::memory_order_acq_rel);
+			return m_waiter.await_resume();
+		}
+
+	private:
+		alt::async_event::event_awaiter m_waiter;
+		std::atomic<int>*               m_resumed;
+		std::unique_ptr<frame_tracker>  m_tracker;
+	};
 
 	/** Races two counting children and records how the wait ended. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds it until live_frames is back to zero.
 	alt::cancellable_task counting_race_root(alt::async_event& first, alt::async_event& second, std::atomic<int>& resumed, wait_record& record, std::size_t& winner)
 	{
-		const auto result = co_await make_race(wait_then_count(first, resumed, 1), wait_then_count(second, resumed, 2));
+		const auto result = co_await make_race(counting_event_wait{first, resumed, 1}, counting_event_wait{second, resumed, 2});
 		record_outcome(record, result);
 
 		if(result)
@@ -484,6 +528,121 @@ namespace
 		}
 	}
 
+	/**
+	 * @brief A hand-built awaiting chain whose two reads of its cancellation context
+	 *        answer with two different tokens.
+	 *
+	 * THE SEAM, and why this type exists. detail::when_any_awaiter::await_suspend reads
+	 * cancellation_context_pointer() once, to link the block's m_link and take the
+	 * children's home; detail::wait_awaiter::await_suspend reads it a SECOND time, to
+	 * register the joiner's own waiter_stop_release. alt::cancellable_task keeps one
+	 * context per chain, so in production both reads see one token and a stop always
+	 * reaches the joiner's node before it reaches cancel() -- libstdc++ walking a token's
+	 * callbacks in reverse registration order. A promise that answers the two calls
+	 * differently, with a stoppable token for the link and an empty one for the joiner,
+	 * leaves the block linked to a stop that NOTHING BUT THE COUNTER can answer. That is
+	 * the only way a single thread reaches when_any_awaiter::await_resume with the wait
+	 * SATISFIED and the cancellation flag SET, which is the half of its verdict the note
+	 * there records as arranged but unwitnessed.
+	 *
+	 * SYNTHETIC ARRANGEMENT, PRODUCTION-REACHABLE STATE, and the distinction is the whole
+	 * justification. No alt component builds such a context, and nothing here says one
+	 * does. The STATE is reached in production by a cross-thread stop landing after the
+	 * counter's zero transition has claimed the joiner's node and before the flag is read
+	 * -- measured at 3 hits in 500,000 debug repeats of a one-child race, which is far too
+	 * rare and too build-dependent to assert on, and which carries no observable that
+	 * distinguishes it from a stop that landed one instruction later. So the window is
+	 * sampled for nothing and pinned here instead. Reaching a real state through an
+	 * arrangement production would not construct is this suite's established move:
+	 * tracked_park above is one, test_async_semaphore.cpp's two hand-driven
+	 * wait_awaiter::await_suspend tests are two more.
+	 *
+	 * Resumed by hand rather than started: initial_suspend is suspend_always so the test
+	 * can set link_token before the body runs, and final_suspend is suspend_never so the
+	 * frame frees itself when the body ends. The handle therefore dangles once the race
+	 * is over, and the test must read the promise before it requests its stop.
+	 *
+	 * No await_transform, deliberately: this chain awaits the awaiter raw rather than
+	 * through detail::cancellation_checked, so nothing here can abandon it and the only
+	 * party that resumes it is the one under test.
+	 */
+	struct split_token_chain
+	{
+		struct promise_type
+		{
+			split_token_chain get_return_object() noexcept
+			{
+				const auto self = std::coroutine_handle<promise_type>::from_promise(*this);
+				context.root    = self;
+				return split_token_chain{self};
+			}
+
+			std::suspend_always initial_suspend() noexcept
+			{
+				return {};
+			}
+
+			std::suspend_never final_suspend() noexcept
+			{
+				return {};
+			}
+
+			void return_void() noexcept
+			{
+			}
+
+			/** Nothing in this chain throws; terminating beats resuming a broken frame. */
+			void unhandled_exception() const
+			{
+				std::terminate();
+			}
+
+			/**
+			 * The context, with the token chosen by which read this is: the FIRST is
+			 * when_any_awaiter's, for m_link, and gets the stoppable token; every later one
+			 * is the joiner's, and gets an empty token, which registers no callback. The
+			 * count is public so the test can refuse to draw a conclusion if a future
+			 * change collapses the two reads into one.
+			 */
+			[[nodiscard]] alt::detail::cancellation_context* cancellation_context_pointer() noexcept
+			{
+				context.token = (reads == 0) ? link_token : std::stop_token{};
+				++reads;
+				return &context;
+			}
+
+			/** The token the block's m_link is linked to. Set by the test before the first resume. */
+			std::stop_token link_token;
+
+			/** How many times the context has been read. Two on the path this chain drives. */
+			int reads = 0;
+
+			/**
+			 * The one context both reads answer with, its token rewritten per read. Public
+			 * like everything else here, because a single private member would put this
+			 * promise under cppcoreguidelines-non-private-member-variables-in-classes; the
+			 * m_ prefix is this project's mark for a private member, so it does not carry one.
+			 */
+			alt::detail::cancellation_context context{};
+		};
+
+		/** Valid until the body ends, which frees the frame. See the note above. */
+		std::coroutine_handle<promise_type> handle;
+	};
+
+	/** Races one counting child from a split-token chain, and records how the wait ended. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds them until live_frames is back to zero.
+	split_token_chain split_token_root(alt::async_event& gate, std::atomic<int>& resumed, wait_record& record, std::size_t& winner)
+	{
+		const auto result = co_await make_race(counting_event_wait{gate, resumed, 1});
+		record_outcome(record, result);
+
+		if(result)
+		{
+			winner = result->index();
+		}
+	}
+
 	/** Races two children that both complete inside the fan-out. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the record is owned by the calling test, which blocks in sync_wait until this completes.
 	alt::task<void> ready_children_probe(wait_record& record, std::size_t& winner, int& value)
@@ -720,20 +879,94 @@ TEST_F(WhenAnyTest, ACancellationDiscardsAWinnerAlreadyElected)
 	// Nothing else can release position 0, and it holds the block's last reference.
 	release_the_parked_child();
 
-	// Its body ran on, lost its own election and retired, and its hook released that
-	// last reference -- with no awaiter and no chain left, which is the half of the
-	// lifetime argument only the sanitizers can check. Nothing is asserted here about a
-	// second resumption of the chain: its frame was destroyed at the cancellation
-	// point, so a second resumption would resume freed storage rather than increment a
-	// counter, and this test could not report it either way.
+	// Its body ran on and retired, and its hook released that last reference -- with no
+	// awaiter and no chain left, which is the half of the lifetime argument only the
+	// sanitizers can check. Nothing is claimed about its ELECTION: tracked_park is a
+	// nested alt::task, and such a child is abandoned at its own final suspend once a
+	// stop has been requested, ahead of its slot write. See counting_event_wait. Nothing
+	// is asserted here about a second resumption of the chain either: its frame was
+	// destroyed at the cancellation point, so a second resumption would resume freed
+	// storage rather than increment a counter, and this test could not report it either
+	// way.
+	EXPECT_EQ(live_frames, 0);
+}
+
+// The flag half of await_resume's verdict: the wait SATISFIED and the cancellation flag
+// SET, so the first half of the test (!waited) says nothing and the second decides. Read
+// split_token_chain's note for the seam that reaches it and for why a synthetic
+// arrangement is the right instrument for a production-reachable state.
+//
+// Measured, in debug and under AddressSanitizer + UBSan:
+//
+// - Drop `m_state->shared().cancelled()` from the verdict, leaving `if(!waited)`: this
+//   test FAILS and is the ONLY test in the 799-test suite that does. It comes back
+//   satisfied with position 0's winner, which is the fault decision 2 forbids -- a caller
+//   that cancelled a race handed a result it may no longer have anywhere to put.
+// - Move the cancelled() test BELOW the winner check, so that an elected winner outranks
+//   the flag: this test FAILS, again alone in the suite. await_resume's note records that
+//   mutation as failing nothing in 200 debug repeats and 20 under each sanitizer, taken
+//   before this test existed; that figure is now stale and Task 6 should replace it.
+//
+// So this is also the suite's one direct witness that A CANCELLED RACE ELECTS A WINNER AT
+// ALL. The second measurement is what shows it: an elected position comes back, from a
+// child that was parked when the stop arrived and reached its election only because
+// cancel() released it. ACancelledRaceReportsOperationCanceled witnesses the premise --
+// the child runs on -- but on its path the elections all happen after the await has
+// returned, so it cannot show the election itself.
+TEST_F(WhenAnyTest, ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner)
+{
+	// The event is declared LAST so it is destroyed FIRST, and that is ordering rather
+	// than tidying: the ASSERT below returns from the test with the child parked and the
+	// chain parked behind it, and ~async_event is then what releases them, so the chain
+	// runs on after this scope starts unwinding and must still have a live record to
+	// write. run_one_concurrent_race carries the same note for the same reason.
+	wait_record      record;
+	std::size_t      winner = 99;
+	std::atomic<int> resumed{0};
+	std::stop_source source;
+	alt::async_event gate;
+
+	const auto chain = split_token_root(gate, resumed, record, winner);
+
+	// Before the first resume, which is the whole point of the suspend_always initial
+	// suspend: the link has not been made yet, so this is the token it will be made on.
+	chain.handle.promise().link_token = source.get_token();
+	chain.handle.resume();
+
+	EXPECT_EQ(record.resumptions, 0) << "the chain should be parked on the counter";
+	EXPECT_EQ(live_frames, 1) << "the child should be parked on the event";
+	EXPECT_EQ(resumed.load(std::memory_order_acquire), 0);
+
+	// The arrangement's own precondition, and the reason it is asserted rather than
+	// assumed: the seam is two reads of one accessor, and a change that collapsed them
+	// into one would leave this test quietly measuring an ordinary cancellation instead.
+	// Read before the stop, because the frame frees itself when the body ends.
+	ASSERT_EQ(chain.handle.promise().reads, 2) << "the chain's context was not read twice, so the joiner's token was not the second read";
+
+	// Everything happens inside this call, on this thread. cancel() stores the flag and
+	// then stops the children; the child is parked on an alt primitive, so it is resumed
+	// RELEASED, runs on, writes its slot and wins its election unopposed; its retirement
+	// drives the counter to zero; and the zero transition claims the joiner's node --
+	// which no stop callback is watching -- and resumes the chain SATISFIED. await_resume
+	// therefore reads waited true and cancelled() true.
+	source.request_stop();
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_FALSE(record.satisfied) << "a satisfied wait with the cancellation flag set returned its winner";
+	EXPECT_EQ(record.error, released_error);
+
+	// No assertion on `winner`: the body writes it only on the satisfied branch, so with
+	// EXPECT_FALSE above it cannot fail independently. It is recorded because it is what
+	// the two mutations above print.
+	EXPECT_EQ(resumed.load(std::memory_order_acquire), 1) << "the child was torn down rather than released, so it reached no election";
 	EXPECT_EQ(live_frames, 0);
 }
 
 // Measured: give when_any_child's catch clause a co_return, so a child that completed by
 // throwing stores its exception and then skips its election. This is the only test in the
-// 798-test suite that fails under that, and it fails in each of debug, AddressSanitizer,
-// ThreadSanitizer and release-tests -- the exception never reaches the await, the parked
-// sibling wins instead, and the caught message stays empty.
+// 799-test suite that fails under that, in debug and under AddressSanitizer + UBSan -- the
+// exception never reaches the await, the parked sibling wins instead, and the caught
+// message stays empty.
 TEST_F(WhenAnyTest, AThrowingFirstChildWinsAndRethrowsAfterTheLosersRetire)
 {
 	alt::async_event gate;
@@ -779,22 +1012,21 @@ TEST_F(WhenAnyTest, AThrowingFirstChildWinsAndRethrowsAfterTheLosersRetire)
 	// teardown ordered rather than coincidentally so.
 	EXPECT_EQ(frames_at_throw, 0) << "a child body was still running when the winner's exception was rethrown";
 	EXPECT_EQ(live_frames, 0);
-	EXPECT_FALSE(handle.stop_requested()) << "the chain itself was never cancelled";
 }
 
 // The two modes below are measured together, by one mutation: an UNCONDITIONAL ELECTION,
 // combinator_election::elect storing the position and returning true for every caller, so
-// the LAST completer takes the race. Seven tests in the 798-test suite fail under it in
-// each of debug, AddressSanitizer, ThreadSanitizer and release-tests, these two among
-// them -- the first on the winner's index and value, the second with "a loser's exception
-// reached the await: loser body", which is the mode it exists for.
+// the LAST completer takes the race. Seven tests in the 799-test suite fail under it, in
+// debug and under AddressSanitizer + UBSan, these two among them -- the first on the
+// winner's index and value, the second with "a loser's exception reached the await: loser
+// body", which is the mode it exists for.
 //
 // And the measurement that says these two witness a loser's slot write at all, rather
 // than arranging one: with each loser built as a nested alt::task parked on alt_test::park
-// instead of as the direct awaitable it is, BOTH TESTS PASS under that same mutation, in
-// every preset. The task's final_awaiter abandons the chain once a stop has been
-// requested, so such a loser is destroyed before it writes its slot and before it
-// elects -- it has no result to discard. See park_then_yield_value.
+// instead of as the direct awaitable it is, BOTH TESTS PASS under that same mutation. The
+// task's final_awaiter abandons the chain once a stop has been requested, so such a loser
+// is destroyed before it writes its slot and before it elects -- it has no result to
+// discard. See park_then_yield_value and counting_event_wait.
 TEST_F(WhenAnyTest, ACompletedLosersResultIsDiscarded)
 {
 	std::atomic<int> resumed{0};
@@ -824,7 +1056,6 @@ TEST_F(WhenAnyTest, ACompletedLosersResultIsDiscarded)
 	EXPECT_TRUE(record.satisfied);
 	EXPECT_EQ(winner, 1U) << "the first child to complete is the winner, whatever a loser completes with afterwards";
 	EXPECT_EQ(value, 20);
-	EXPECT_FALSE(handle.stop_requested()) << "the chain itself was never cancelled";
 }
 
 TEST_F(WhenAnyTest, ALosersExceptionIsDiscarded)
@@ -856,7 +1087,6 @@ TEST_F(WhenAnyTest, ALosersExceptionIsDiscarded)
 	EXPECT_EQ(winner, 1U);
 	EXPECT_EQ(value, 20);
 	EXPECT_TRUE(caught.empty()) << "a loser's exception reached the await: " << caught;
-	EXPECT_FALSE(handle.stop_requested()) << "the chain itself was never cancelled";
 }
 
 // The public overloads. Each test above this line drives the awaiter through the
@@ -1067,10 +1297,21 @@ namespace
 		// instant it returned. An await that returned on the election would read one here.
 		EXPECT_EQ(counts.completed_at_return, 2) << "repeat " << repeat << ": a child was still running when the won await returned";
 
-		// Fatal, so a result whose index is no position of the race does not index the
-		// tally below with it. The run's total then fails as well, which is the intended
-		// pair of failures rather than a second fault.
-		ASSERT_LT(winner, wins.size()) << "repeat " << repeat << ": the result's index is not a position of the race";
+		// A READABLE-MESSAGE GUARD, not an independent check: a result whose index is no
+		// position of the race cannot get past EXPECT_TRUE(record.satisfied) above, which
+		// fails first on the only path that produces one -- an unsatisfied result, whose
+		// index the body never writes. It is here so that path names itself instead of
+		// throwing out of race_child_values.at() below.
+		//
+		// NON-FATAL, and that is load-bearing for the total the caller asserts. A fatal
+		// failure here would propagate out of TestBody through ASSERT_NO_FATAL_FAILURE and
+		// the total would never be read, which is exactly what made an earlier version of
+		// that total incapable of failing.
+		if(winner >= wins.size())
+		{
+			ADD_FAILURE() << "repeat " << repeat << ": the result's index is not a position of the race";
+			return;
+		}
 
 		++wins.at(winner);
 
@@ -1216,8 +1457,8 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 // narrow one and a comment nobody can trust is worse than a number.
 //
 // It catches nothing that another test does not catch first. Three mutations were run
-// against it, each in debug, under AddressSanitizer, under ThreadSanitizer and in the
-// release-tests preset:
+// against it, in debug and under AddressSanitizer + UBSan, and the first and third also
+// under ThreadSanitizer and in the release-tests preset:
 //
 // - A NON-ATOMIC ELECTION -- combinator_election::elect reading m_winner and then storing
 //   it, which is exactly the "a load followed by a store would let both see no_winner"
@@ -1225,14 +1466,18 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 //   CombinatorElectionTest.ConcurrentElectionsYieldExactlyOneWinner and by nothing else.
 //   This test passes under it: one run in each of the four presets, plus 20 repeats of
 //   the whole WhenAnyTest suite in each of the three debug presets, which is 2,000
-//   contended races apiece. The reason is worth keeping:
-//   every child writes its OWN slot, so a second winner changes only which position the
-//   last store names, and that position's value still agrees with it. So "exactly one
-//   winner" in the name is exactly one RESUMPTION with one coherent result, and the
-//   election's own exactly-one-winner is pinned by that test and not by this one.
+//   contended races apiece. Two reasons, and the first is the bigger one. Its children
+//   are nested alt::tasks, so on any repeat where the winner's request_children_stop()
+//   beats the loser's final suspend, the loser is abandoned there and reaches no election
+//   at all -- see counting_event_wait -- so there is frequently no second election for a
+//   broken one to race. And when there is, every child writes its OWN slot, so a second
+//   winner changes only which position the last store names, and that position's value
+//   still agrees with it. So "exactly one winner" in the name is exactly one RESUMPTION
+//   with one coherent result, and the election's own exactly-one-winner is pinned by that
+//   test and not by this one.
 // - AN UNCONDITIONAL ELECTION (every caller wins, last completer takes it) is caught by
-//   seven tests in all four presets, the two loser tests above among them. This one
-//   passes under it, for the same reason.
+//   seven tests, the two loser tests above among them. This one passes under it, for the
+//   same reason.
 // - SWAPPING complete() AND release() in on_when_any_child_complete aborts
 //   ACancelledRaceReportsOperationCanceled on waiter_list's liveness assert in debug and
 //   reports heap-use-after-free under both sanitizers, and passes the whole suite in
@@ -1253,8 +1498,16 @@ TEST_F(WhenAnyTest, TwoChildrenCompletingConcurrentlyYieldExactlyOneWinner)
 	}
 
 	// The equality the whole run comes down to: every repeat elected exactly one winner,
-	// and it was one of the two positions. A repeat that elected none leaves its position
-	// untallied, and one that somehow reported a third leaves the ASSERT above to say so.
+	// and it was one of the two positions.
+	//
+	// WHAT MAKES THIS FAIL, which an earlier version of it could not. A repeat is tallied
+	// only on the path through tally_the_one_winner that gets past the index guard, and
+	// that guard is non-fatal: a repeat whose race came back unsatisfied -- no winner, so
+	// no index the body would write -- returns from the tally untallied and leaves this
+	// total short by one. The two checks that DO end the run early are the arrangement's
+	// own preconditions in run_one_concurrent_race, a chain that was already resumed or a
+	// child that never reached its event, and a run that cannot set its race up has
+	// nothing to total.
 	EXPECT_EQ(wins[0] + wins[1], concurrent_race_repeats);
 }
 
