@@ -657,14 +657,13 @@ namespace alt::detail
 		 * decides" (false in the two cases below). No sentence here is meant to be
 		 * stronger than the case analysis under it.
 		 *
-		 * THE INVARIANT. Two facts, and nothing in this component's own code is needed to
-		 * state them:
+		 * THE INVARIANT. Two facts, one of which needs one thing from this component:
 		 *
 		 *     cancelled() can be true only because cancel() ran, and cancel() runs only
 		 *     from the block's m_link, so only because the CHAIN'S TOKEN WAS STOPPED.
 		 *
-		 *     The joiner's node is claimed exactly once, by one of two parties.
-		 *     waiter_list's election decides which: either the joiner's own
+		 *     The joiner's node is claimed exactly once, and in practice by one of two
+		 *     parties. waiter_list's election decides which: either the joiner's own
 		 *     waiter_stop_release, which resumes the chain RELEASED, or the counter's
 		 *     zero transition, which resumes it SATISFIED. So ANY STOP WHOSE
 		 *     waiter_stop_release CLAIM ATTEMPT HAS RUN BEFORE THE ZERO TRANSITION
@@ -672,6 +671,16 @@ namespace alt::detail
 		 *     chain released, or claims a node not yet linked, in which case
 		 *     waiter_list::link tests the election before the condition and refuses the
 		 *     park with m_released set.
+		 *
+		 * "IN PRACTICE BY ONE OF TWO" rather than two by construction, and the gap is this
+		 * component's to close. ~completion_counter and ~waiter_list can claim a parked
+		 * node too -- the destructor note below enumerates them as the second and third
+		 * unsatisfied resumers -- and what makes them unreachable here is that THIS
+		 * AWAITER HOLDS A BLOCK REFERENCE FOR AS LONG AS THE CHAIN IS PARKED, so the
+		 * counter cannot be destroyed with a joiner still on it. That is a fact about the
+		 * code below, not about waiter_list, which is why it is named rather than assumed.
+		 * The conclusion is unaffected either way: both of those resume unsatisfied, so
+		 * the first half of the test still returns the error.
 		 *
 		 * "WHOSE CLAIM ATTEMPT HAS RUN" is the load-bearing clause. A stop *requested*
 		 * earlier than the zero transition but whose callback has not yet run does not
@@ -698,14 +707,20 @@ namespace alt::detail
 		 *   flag and stop the children, the children would run on and elect, the last
 		 *   one's zero transition would claim the joiner and resume this chain SATISFIED
 		 *   from inside cancel(), and this function would then read waited true,
-		 *   cancelled() true and a winner elected. Without the flag test that is a
-		 *   satisfied result assembled from a released child's slot. when_all's
-		 *   await_resume note measures the reordering that imitates that walk --
-		 *   registering the link after the join park -- and records dropping its own flag
-		 *   test as 200 failures in 200 under it. **That figure is when_all's and was not
-		 *   repeated here**, because the reordering is not safely expressible in this
-		 *   function: the chain's token is in scope only inside the if constexpr above,
-		 *   and nothing may touch *this* once the park has returned.
+		 *   cancelled() true and a winner elected. What the flag test discards there
+		 *   depends on when the election happened, and both are decision 2 violations: a
+		 *   satisfied result assembled from a RELEASED child's slot where the stop is what
+		 *   made the children run on, or a GENUINE winner where one was elected before the
+		 *   stop arrived. when_all's await_resume note measures the reordering that
+		 *   imitates that walk -- registering the link after the join park -- and records
+		 *   dropping its own flag test as 200 failures in 200 under it. **That figure is
+		 *   when_all's and was not repeated here**, and the reason is a choice rather than
+		 *   an impossibility: expressing that reordering means reading *this* after the
+		 *   park has returned, which is undefined behavior, and a number produced from a
+		 *   mutation that is itself undefined behavior is not worth having. The same
+		 *   objection applies to when_all_awaiter::await_suspend, which is where that
+		 *   figure was taken, so treat it as when_all's record of its own mutation and not
+		 *   as a fact about this component.
 		 * - A CROSS-THREAD STOP LANDING AFTER THE ZERO TRANSITION CLAIMED THE NODE and
 		 *   before this line reads the flag. Then waited is true and the flag is true.
 		 *   Single-threaded that window does not exist, await_resume running in the same
@@ -713,12 +728,46 @@ namespace alt::detail
 		 *
 		 * Four shapes are illustrations of the invariant rather than a list to be
 		 * completed, and they are kept because each was reasoned about wrongly at some
-		 * point: a stop while the joiner is parked; a token already stopped when
-		 * await_suspend runs, where link() fires cancel() inline before the fan-out and a
-		 * child with no suspension point then elects during it; a winner elected and a
-		 * sibling still outstanding when the stop arrives; and a stop landing mid-fan-out
-		 * after an early election. The invariant answers all four the same way, and would
-		 * answer a fifth nobody has thought of.
+		 * point -- the second of them in this very note, through three rounds of review:
+		 *
+		 * - A stop while the joiner is parked. Its own callback claims the node.
+		 * - A TOKEN ALREADY STOPPED WHEN await_suspend RUNS, where link() fires cancel()
+		 *   inline before the fan-out. **NOTHING ELECTS ON THIS SHAPE**, and three earlier
+		 *   drafts of this sentence said a child with no suspension point elects during
+		 *   the fan-out. It cannot: the children's source is stopped before
+		 *   start_children, so each child's context token is stopped before its body runs,
+		 *   and detail::cancellation_checked::await_ready returns false whenever the stop
+		 *   is requested -- even for an already-ready inner awaitable, deliberately, so
+		 *   that await_suspend gets the chance to destroy. abandon_chain then tears the
+		 *   child down at its first suspension point, before the store and before
+		 *   elect(). when_any_child's note and
+		 *   WhenAnyTest.EveryChildAlreadyCompleteYieldsAWinnerWithoutSuspending both say
+		 *   this already, and WhenAllTest.AStopDuringTheFanOutStopsTheChildrenStartedAfterIt
+		 *   is the suite's evidence for it.
+		 *
+		 *   The verdict there is still !waited, through the first half: the park emplaces
+		 *   its callback on an already-stopped token, the claim finds the node, and
+		 *   m_released is set. And because nothing elects, this shape is **a third reason
+		 *   the statement below exists**, one neither of the two cases above covers and
+		 *   one nothing else in this file claims: the verdict has to be settled BEFORE the
+		 *   election is read at all, because here there is no position to read.
+		 *
+		 *   Measured rather than argued, and the two symptoms come apart exactly along
+		 *   the two reasons. Delete the whole verdict statement below -- not just the flag
+		 *   half -- and in debug:
+		 *   ACancelledRaceReportsOperationCanceled, whose children have not elected when
+		 *   this function runs, ABORTS 3 of 3 on assert(winner != no_winner) with "an alt
+		 *   when_any was satisfied with no child elected"; while
+		 *   ACancellationDiscardsAWinnerAlreadyElected, where a winner HAS been elected,
+		 *   FAILS 3 of 3 instead, returning that winner. A third test with no cancellation
+		 *   at all passes. So the statement guards two different faults, and the assert is
+		 *   the backstop for the one with nothing elected.
+		 * - A winner elected and a sibling still outstanding when the stop arrives. This
+		 *   is the shape ACancellationDiscardsAWinnerAlreadyElected holds.
+		 * - A stop landing mid-fan-out after an early election.
+		 *
+		 * The invariant answers all four the same way, and would answer a fifth nobody has
+		 * thought of.
 		 *
 		 * WHAT WITNESSES WHAT, which is three things and not one:
 		 *

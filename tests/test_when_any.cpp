@@ -487,10 +487,13 @@ TEST_F(WhenAnyTest, ACancelledRaceReportsOperationCanceled)
 
 	handle.request_stop();
 
+	// No assertion on `winner`, for the reason
+	// ACancellationDiscardsAWinnerAlreadyElected gives: the awaiting body writes it only
+	// on the satisfied branch, so with EXPECT_FALSE(record.satisfied) above it cannot
+	// fail independently.
 	EXPECT_EQ(record.resumptions, 1);
 	EXPECT_FALSE(record.satisfied);
 	EXPECT_EQ(record.error, released_error);
-	EXPECT_EQ(winner, 99U) << "a cancelled race reports no winner";
 	EXPECT_EQ(live_frames, 0);
 
 	// The one half of "a cancelled race still elects a winner" that a test can
