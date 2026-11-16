@@ -543,7 +543,8 @@ namespace
 	 * leaves the block linked to a stop that NOTHING BUT THE COUNTER can answer. That is
 	 * the only way a single thread reaches when_any_awaiter::await_resume with the wait
 	 * SATISFIED and the cancellation flag SET, which is the half of its verdict the note
-	 * there records as arranged but unwitnessed.
+	 * there STILL describes as arranged but unwitnessed -- a description this test makes
+	 * false, and which the two tests' own comments flag for whoever next edits that note.
 	 *
 	 * SYNTHETIC ARRANGEMENT, PRODUCTION-REACHABLE STATE, and the distinction is the whole
 	 * justification. No alt component builds such a context, and nothing here says one
@@ -818,9 +819,10 @@ TEST_F(WhenAnyTest, ACancelledRaceReportsOperationCanceled)
 
 	// The one half of "a cancelled race still elects a winner" that a test can
 	// observe, and the load-bearing half: both children were resumed RELEASED rather
-	// than torn down, and both ran the statement after their co_await. From there to
+	// than torn down, and both ran their own await_resume past the wait. From there to
 	// elect() is straight-line code in when_any_child -- store, then elect, with no
-	// suspension point between -- so both children reached their election.
+	// suspension point and, counting_event_wait being no nested task, no final suspend
+	// between -- so both children reached their election.
 	//
 	// What this test CANNOT show, and does not claim to: that an elected winner is
 	// discarded by await_resume's cancelled() test. On this path the elections happen
@@ -828,8 +830,14 @@ TEST_F(WhenAnyTest, ACancelledRaceReportsOperationCanceled)
 	// registration order, so the joiner's own waiter_stop_release -- registered at the
 	// park, after the block's m_link -- resumes the chain first, await_resume takes its
 	// verdict from !waited, and only then does m_link fire cancel() and let these two
-	// children run on. So winner() still reads no_winner where the flag is read, which
-	// is exactly why the measurement in await_resume's note is a zero. See that note.
+	// children run on. So winner() still reads no_winner where the flag is read, and
+	// this test's verdict comes from the FIRST half of it.
+	//
+	// That is a fact about this path, not about the suite. await_resume's note turns it
+	// into a measured zero for the whole suite -- "moving the cancelled() test below the
+	// winner check fails nothing" -- and that zero is now stale:
+	// ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner fails under exactly that
+	// mutation. Read the note for the mechanism and not for the figure.
 	EXPECT_EQ(resumed.load(std::memory_order_acquire), 2) << "a stopped child that was parked is resumed released and runs on";
 }
 
@@ -857,23 +865,33 @@ TEST_F(WhenAnyTest, ACancellationDiscardsAWinnerAlreadyElected)
 	// before the await returns. What is observed is the winning child's body running to
 	// its end, and store-then-elect is straight-line code in when_any_child with no
 	// suspension point between. What makes this test a witness rather than an
-	// arrangement is the mutation recorded in await_resume's note: it is the only test
-	// in the suite that fails when an elected winner is allowed to outrank the verdict.
+	// arrangement is the mutation recorded in await_resume's note: let an elected winner
+	// outrank the whole verdict and this test fails, returning that winner. It was the
+	// only test in the suite that did; there are two now, measured in debug and under
+	// AddressSanitizer + UBSan, the other being
+	// ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner below.
 	expect_a_winner_with_a_child_outstanding(completed, record);
 
 	handle.request_stop();
 
-	// Decision 2's promise, and the only place in the suite that holds it: a winner WAS
-	// elected, and the cancelled await reports the cancellation rather than returning
-	// it. ACancelledRaceReportsOperationCanceled cannot show this -- on its path every
-	// election happens after the await has returned, so it cannot tell "no winner" from
-	// "winner discarded".
+	// Decision 2's promise: a winner WAS elected, and the cancelled await reports the
+	// cancellation rather than returning it.
+	// ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner below holds the same
+	// promise through the other half of the verdict, so this is no longer the only place
+	// in the suite that holds it; what is still only here is the promise held on a
+	// cancellation shaped the way production delivers one, through a single
+	// cancellable_task context. ACancelledRaceReportsOperationCanceled shows neither --
+	// on its path every election happens after the await has returned, so it cannot tell
+	// "no winner" from "winner discarded".
 	//
 	// Which half of await_resume's verdict this pins: the FIRST one. The joiner's
 	// waiter_stop_release is registered after the block's m_link and libstdc++ walks a
 	// token's callbacks in reverse, so the joiner's release resumes the chain before
-	// cancel() has run and await_resume reads the flag as false. The flag half has no
-	// test at all; see that note for the two routes to it.
+	// cancel() has run and await_resume reads the flag as false. The FLAG half is pinned
+	// by ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner below, which reaches
+	// it by a route that note does not list -- the two reads of the chain's cancellation
+	// context, answered with two different tokens -- rather than by either of the two it
+	// does.
 	expect_the_elected_winner_was_discarded(record, frames_at_return);
 
 	// Nothing else can release position 0, and it holds the block's last reference.
@@ -905,7 +923,23 @@ TEST_F(WhenAnyTest, ACancellationDiscardsAWinnerAlreadyElected)
 // - Move the cancelled() test BELOW the winner check, so that an elected winner outranks
 //   the flag: this test FAILS, again alone in the suite. await_resume's note records that
 //   mutation as failing nothing in 200 debug repeats and 20 under each sanitizer, taken
-//   before this test existed; that figure is now stale and Task 6 should replace it.
+//   before this test existed; that figure is now stale and the note is what needs
+//   correcting, not the figure re-taking.
+// - Let an elected winner outrank the WHOLE verdict, returning the assembled result ahead
+//   of both halves: this test and ACancellationDiscardsAWinnerAlreadyElected fail, and
+//   nothing else does. That note calls the latter the only test that fails under it; it is
+//   one of two now.
+// - Swap combinator_state::cancel()'s two statements, so it stops the children BEFORE it
+//   sets the flag -- the order that class's own note calls load-bearing. In debug this test
+//   fails on its satisfied assertion, beside
+//   CombinatorStateTest.CancelMarksTheWaitReleasedBeforeStoppingTheChildren, and it is the
+//   first test at COMBINATOR level to catch it: cancel()'s note records that swap as
+//   failing nothing in alt::when_all, and the when_any tests that existed before this one
+//   take their verdict from !waited, where the flag is not read. Under AddressSanitizer the
+//   mutation is worse than a wrong verdict -- the flag store lands on a block the stop has
+//   already freed, which ASan reports inside cancel() itself, in this test run alone and in
+//   WhenAllTest.CancellingTheAwaitingChainReportsOperationCanceled before the suite gets
+//   this far.
 //
 // So this is also the suite's one direct witness that A CANCELLED RACE ELECTS A WINNER AT
 // ALL. The second measurement is what shows it: an elected position comes back, from a
@@ -933,7 +967,14 @@ TEST_F(WhenAnyTest, ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner)
 	chain.handle.promise().link_token = source.get_token();
 	chain.handle.resume();
 
-	EXPECT_EQ(record.resumptions, 0) << "the chain should be parked on the counter";
+	// FATAL, and that is a liveness predicate rather than strictness. final_suspend is
+	// suspend_never, so a chain that has already been resumed has already freed its
+	// frame, and the promise read below would then be a read of freed storage -- ASan
+	// noise on top of the real diagnosis, and silent in a plain debug build. This is the
+	// exact predicate for the frame still being there, so it ends the test instead. The
+	// declaration order above exists for the same reason, one scope out.
+	ASSERT_EQ(record.resumptions, 0) << "the chain was already resumed, so its frame is gone and nothing below can be read";
+
 	EXPECT_EQ(live_frames, 1) << "the child should be parked on the event";
 	EXPECT_EQ(resumed.load(std::memory_order_acquire), 0);
 
@@ -1457,8 +1498,10 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 // narrow one and a comment nobody can trust is worse than a number.
 //
 // It catches nothing that another test does not catch first. Three mutations were run
-// against it, in debug and under AddressSanitizer + UBSan, and the first and third also
-// under ThreadSanitizer and in the release-tests preset:
+// against it, in debug and under AddressSanitizer + UBSan; the ThreadSanitizer and
+// release-tests figures below were taken against the revision of this file that preceded
+// its two cancellation tests, and were not re-taken, nothing in those two touching the
+// concurrent race:
 //
 // - A NON-ATOMIC ELECTION -- combinator_election::elect reading m_winner and then storing
 //   it, which is exactly the "a load followed by a store would let both see no_winner"
