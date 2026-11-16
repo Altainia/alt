@@ -232,8 +232,11 @@ namespace
 	 * resume or tear down this frame once it is parked -- not the winner's
 	 * request_children_stop(), not the chain's own cancellation. That is what lets a
 	 * race sit with its election already settled and a child still outstanding, which
-	 * is the one shape in which a cancellation can discard a winner single-threaded.
-	 * The test must resume it by hand; it holds a reference to the shared block.
+	 * is the shape used here to reach a cancellation that discards a winner. It is not
+	 * the only shape that reaches it -- a stop landing mid-fan-out after an early
+	 * election is another, and when_any_awaiter::await_resume lists both -- only the one
+	 * a single-threaded test can hold still. The test must resume this frame by hand; it
+	 * holds a reference to the shared block.
 	 */
 	alt::task<void> tracked_park(int tag)
 	{
@@ -265,6 +268,59 @@ namespace
 		}
 
 		co_await alt::cancellation_point{};
+	}
+
+	/**
+	 * @brief Checks the state a discarded winner needs: elected, with a child still
+	 *        outstanding.
+	 *
+	 * Split out of ACancellationDiscardsAWinnerAlreadyElected's body, with the two
+	 * below, for the reason test_when_all.cpp's run_one_stop_race records: one function
+	 * holding the whole scenario and all of its assertions is over clang-tidy's
+	 * readability-function-cognitive-complexity threshold. Measured at 37 against a
+	 * threshold of 25 before the split.
+	 */
+	void expect_a_winner_with_a_child_outstanding(const std::atomic<int>& completed, const wait_record& record)
+	{
+		EXPECT_EQ(completed.load(std::memory_order_acquire), 1) << "the winning child's body did not run to its end";
+		EXPECT_EQ(record.resumptions, 0) << "the await returned before the race was over";
+		EXPECT_EQ(live_frames, 1) << "the outstanding child's frame should still be parked";
+	}
+
+	/**
+	 * @brief Checks that the cancelled verdict came back rather than the elected winner.
+	 *
+	 * @p frames_at_return is live_frames as read at the instant the await returned: a
+	 * child was still outstanding then, which is what makes this a discard rather than
+	 * a race that had already finished. Nothing asserts on the winner's position --
+	 * the awaiting body reads it only on the satisfied branch, so it carries nothing
+	 * the satisfied check does not already say.
+	 */
+	void expect_the_elected_winner_was_discarded(const wait_record& record, const int frames_at_return)
+	{
+		EXPECT_EQ(record.resumptions, 1);
+		EXPECT_FALSE(record.satisfied) << "a cancelled race returned a winner it should have discarded";
+		EXPECT_EQ(record.error, released_error);
+		EXPECT_EQ(frames_at_return, 1);
+	}
+
+	/**
+	 * @brief Resumes the one child nothing in the library can, so no failure leaks it.
+	 *
+	 * Guarded rather than asserted, and every check in that test is an EXPECT for the
+	 * same reason: an ASSERT returns from the test, which would skip this and leak both
+	 * the parked frame and the shared block's last reference.
+	 * WhenAllTest.AStopDuringTheFanOutStopsTheChildrenStartedAfterIt guards the same
+	 * cleanup the same way.
+	 */
+	void release_the_parked_child()
+	{
+		EXPECT_TRUE(parked) << "the outstanding child never reached its awaitable";
+
+		if(parked)
+		{
+			resume_parked();
+		}
 	}
 
 	/** Races two children that both complete inside the fan-out. */
@@ -469,14 +525,18 @@ TEST_F(WhenAnyTest, ACancellationDiscardsAWinnerAlreadyElected)
 
 	// The state this test needs, and the reason it is reachable at all. Position 1 ran
 	// past its wait and to the end of its body, so it wrote its slot and reached
-	// elect(), which it won unopposed -- store-then-elect is straight-line code in
-	// when_any_child. Position 0 is parked on an awaitable that registers no stop
-	// callback, so the winner's request_children_stop() cannot resume it: it is still
-	// outstanding, the counter has not drained, and the chain is parked with the
-	// election already settled.
-	ASSERT_EQ(completed.load(std::memory_order_acquire), 1) << "the winning child's body did not run to its end";
-	ASSERT_EQ(record.resumptions, 0) << "the await returned before the race was over";
-	ASSERT_EQ(live_frames, 1) << "the outstanding child's frame should still be parked";
+	// elect(), which it won unopposed. Position 0 is parked on an awaitable that
+	// registers no stop callback, so the winner's request_children_stop() cannot resume
+	// it: it is still outstanding, the counter has not drained, and the chain is parked
+	// with the election already settled.
+	//
+	// The election being settled is INFERRED, not read -- nothing exposes the winner
+	// before the await returns. What is observed is the winning child's body running to
+	// its end, and store-then-elect is straight-line code in when_any_child with no
+	// suspension point between. What makes this test a witness rather than an
+	// arrangement is the mutation recorded in await_resume's note: it is the only test
+	// in the suite that fails when an elected winner is allowed to outrank the verdict.
+	expect_a_winner_with_a_child_outstanding(completed, record);
 
 	handle.request_stop();
 
@@ -485,25 +545,22 @@ TEST_F(WhenAnyTest, ACancellationDiscardsAWinnerAlreadyElected)
 	// it. ACancelledRaceReportsOperationCanceled cannot show this -- on its path every
 	// election happens after the await has returned, so it cannot tell "no winner" from
 	// "winner discarded".
-	EXPECT_EQ(record.resumptions, 1);
-	EXPECT_FALSE(record.satisfied) << "a cancelled race returned a winner it should have discarded";
-	EXPECT_EQ(record.error, released_error);
-	EXPECT_EQ(winner, 99U) << "no winner is reported, though one was elected";
-
-	// A child was still outstanding at the instant the await returned, which is what
-	// makes this a discard and not a race that had already finished.
-	EXPECT_EQ(frames_at_return, 1);
-
+	//
 	// Which half of await_resume's verdict this pins: the FIRST one. The joiner's
 	// waiter_stop_release is registered after the block's m_link and libstdc++ walks a
 	// token's callbacks in reverse, so the joiner's release resumes the chain before
-	// cancel() has run and await_resume reads the flag as false. The flag half needs a
-	// cross-thread race and has no test; see the note on await_resume.
+	// cancel() has run and await_resume reads the flag as false. The flag half has no
+	// test at all; see that note for the two routes to it.
+	expect_the_elected_winner_was_discarded(record, frames_at_return);
 
-	// Nothing else can release this child, and it holds the block's last reference.
-	ASSERT_TRUE(parked) << "the outstanding child never reached its awaitable";
-	resume_parked();
+	// Nothing else can release position 0, and it holds the block's last reference.
+	release_the_parked_child();
 
+	// Its body ran on, lost its own election and retired, and its hook released that
+	// last reference -- with no awaiter and no chain left, which is the half of the
+	// lifetime argument only the sanitizers can check. Nothing is asserted here about a
+	// second resumption of the chain: its frame was destroyed at the cancellation
+	// point, so a second resumption would resume freed storage rather than increment a
+	// counter, and this test could not report it either way.
 	EXPECT_EQ(live_frames, 0);
-	EXPECT_EQ(record.resumptions, 1) << "and the chain was not resumed a second time";
 }

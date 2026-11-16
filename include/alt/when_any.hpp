@@ -647,88 +647,125 @@ namespace alt::detail
 		 * stopped before it reached any suspension point is torn down at its first one
 		 * and reaches neither.)
 		 *
-		 * BUT THE FLAG IS NEVER THE HALF THAT DECIDES, and that is the honest statement
-		 * of what the order below is for. Not "no path elects before the flag is read" --
-		 * every ordinary successful race elects before the read, and an earlier draft of
-		 * this note said the false thing in capitals. The claim is narrower: **wherever
-		 * cancelled() is true at this line, !waited has already returned the error.**
+		 * WHICH HALF OF THE TEST BELOW ACTUALLY DECIDES depends on things outside this
+		 * function, so it is set out as an invariant, then the conclusion that invariant
+		 * yields, then the two cases it does not cover, then what witnesses each. This
+		 * note has been rewritten once for that structure, after three rounds of review
+		 * each found a different claim here too strong: a citation to a test that could
+		 * not exhibit the shape, then "no path elects before the flag is read" (false --
+		 * every ordinary successful race does), then "the flag is never the half that
+		 * decides" (false in the two cases below). No sentence here is meant to be
+		 * stronger than the case analysis under it.
 		 *
-		 * ONE INVARIANT CARRIES THAT, rather than an enumeration of paths that would have
-		 * to be complete to be sound:
+		 * THE INVARIANT. Two facts, and nothing in this component's own code is needed to
+		 * state them:
 		 *
-		 *     cancelled() can only be true because cancel() ran, and cancel() runs only
+		 *     cancelled() can be true only because cancel() ran, and cancel() runs only
 		 *     from the block's m_link, so only because the CHAIN'S TOKEN WAS STOPPED.
-		 *     And ANY STOP BEFORE THE JOINER'S NODE IS CLAIMED YIELDS !waited -- the
-		 *     joiner's own waiter_stop_release is registered on that same token before
-		 *     the link is attempted, so it either claims a parked node and resumes the
+		 *
+		 *     The joiner's node is claimed exactly once, by one of two parties.
+		 *     waiter_list's election decides which: either the joiner's own
+		 *     waiter_stop_release, which resumes the chain RELEASED, or the counter's
+		 *     zero transition, which resumes it SATISFIED. So ANY STOP WHOSE
+		 *     waiter_stop_release CLAIM ATTEMPT HAS RUN BEFORE THE ZERO TRANSITION
+		 *     CLAIMS THE NODE YIELDS !waited -- it claims a parked node and resumes the
 		 *     chain released, or claims a node not yet linked, in which case
 		 *     waiter_list::link tests the election before the condition and refuses the
 		 *     park with m_released set.
 		 *
-		 * So the only way to this line with the flag true and the wait SATISFIED is a
-		 * stop that lands after the claim and before this read. Single-threaded that
-		 * window does not exist: await_resume runs in the same resumption await_suspend
-		 * returned from. It is a cross-thread window, and nothing in the suite races for
-		 * it.
+		 * "WHOSE CLAIM ATTEMPT HAS RUN" is the load-bearing clause. A stop *requested*
+		 * earlier than the zero transition but whose callback has not yet run does not
+		 * satisfy it.
 		 *
-		 * Four shapes are illustrations of that invariant rather than a list to be
-		 * completed, and they are kept because each one was reasoned about wrongly at
-		 * some point: a stop while the joiner is parked; a token already stopped when
+		 * WHAT IT YIELDS HERE, AND WHAT THAT RESTS ON. On libstdc++, a stop requested
+		 * while this chain is parked runs the joiner's callback BEFORE m_link: that
+		 * library walks a token's callbacks in reverse registration order, and m_link is
+		 * registered in await_suspend, ahead of the park. The claim attempt therefore
+		 * always runs first, and **on every single-threaded path the FIRST half of the
+		 * test below is what returns the error.** That is the whole of the conclusion,
+		 * and it is scoped to single-threaded because the suite is.
+		 *
+		 * It rests on an order [stopcallback] does not fix. Name it rather than rely on
+		 * it quietly, because when_all's own fan-out note and
+		 * WhenAllTest.TheChildrensStopOutlivesABlockTheLastChildFreed both depend on the
+		 * same reverse walk and say so.
+		 *
+		 * THE TWO CASES THE CONCLUSION DOES NOT COVER, in both of which cancelled() is
+		 * the half that decides -- which is why the test below is not dead code:
+		 *
+		 * - A STANDARD LIBRARY THAT WALKS CALLBACKS FORWARD, where this is not a
+		 *   cross-thread matter at all. m_link would fire first, cancel() would set the
+		 *   flag and stop the children, the children would run on and elect, the last
+		 *   one's zero transition would claim the joiner and resume this chain SATISFIED
+		 *   from inside cancel(), and this function would then read waited true,
+		 *   cancelled() true and a winner elected. Without the flag test that is a
+		 *   satisfied result assembled from a released child's slot. when_all's
+		 *   await_resume note measures the reordering that imitates that walk --
+		 *   registering the link after the join park -- and records dropping its own flag
+		 *   test as 200 failures in 200 under it. **That figure is when_all's and was not
+		 *   repeated here**, because the reordering is not safely expressible in this
+		 *   function: the chain's token is in scope only inside the if constexpr above,
+		 *   and nothing may touch *this* once the park has returned.
+		 * - A CROSS-THREAD STOP LANDING AFTER THE ZERO TRANSITION CLAIMED THE NODE and
+		 *   before this line reads the flag. Then waited is true and the flag is true.
+		 *   Single-threaded that window does not exist, await_resume running in the same
+		 *   resumption await_suspend returned from, and nothing in the suite races for it.
+		 *
+		 * Four shapes are illustrations of the invariant rather than a list to be
+		 * completed, and they are kept because each was reasoned about wrongly at some
+		 * point: a stop while the joiner is parked; a token already stopped when
 		 * await_suspend runs, where link() fires cancel() inline before the fan-out and a
 		 * child with no suspension point then elects during it; a winner elected and a
 		 * sibling still outstanding when the stop arrives; and a stop landing mid-fan-out
 		 * after an early election. The invariant answers all four the same way, and would
 		 * answer a fifth nobody has thought of.
 		 *
-		 * WHAT IS WITNESSED AND WHAT IS NOT, which is two things and not one:
+		 * WHAT WITNESSES WHAT, which is three things and not one:
 		 *
-		 * - THE DISCARD IS WITNESSED, single-threaded, by
+		 * - THE DISCARD ITSELF IS WITNESSED, single-threaded, by
 		 *   WhenAnyTest.ACancellationDiscardsAWinnerAlreadyElected: a child completes and
 		 *   wins while a sibling that registers no stop callback stays outstanding, so the
 		 *   chain is still parked with the election settled, and the stop then makes this
 		 *   function report the cancellation instead of the winner. That is decision 2's
-		 *   actual promise -- an elected winner is discarded rather than returned -- and
-		 *   it discards through the FIRST half of the test below. Measured, so that it is
-		 *   known to be a witness rather than merely arranged as one: let an elected
-		 *   winner outrank the whole verdict -- return the assembled result ahead of both
-		 *   halves -- and that test fails 5 of 5 in debug, on its satisfied assertion,
-		 *   while it is the ONLY failure in the 789-test suite. Nothing else held this.
-		 * - THE FLAG HALF IS ARRANGED BUT UNWITNESSED, and only the flag half. Reaching
-		 *   it needs the cross-thread window above: a child driving the counter to zero on
-		 *   one thread while another requests the chain's stop, repeated until the
-		 *   interleaving lands. The alternative route is not a test anyone could write but
-		 *   a SOURCE MUTATION -- registering the link after the join park, the reordering
-		 *   the second bullet below names -- so do not go looking for a test that takes it.
+		 *   promise -- an elected winner is discarded rather than returned -- and it
+		 *   discards through the FIRST half. That the election was settled is INFERRED
+		 *   there rather than read: the test sees the winning child's body run past its
+		 *   wait to its end, and store-then-elect is straight-line code in
+		 *   when_any_child. What makes it a witness rather than an arrangement is a
+		 *   measurement: let an elected winner outrank the whole verdict -- return the
+		 *   assembled result ahead of both halves -- and that test fails 5 of 5 in debug
+		 *   on its satisfied assertion, ALONE in the 789-test suite.
+		 * - THE FLAG HALF HAS NO TEST, and the two routes to it are the two cases above.
+		 *   Neither is in the suite: the forward walk is not reachable on this toolchain,
+		 *   and the reordering that imitates it is a SOURCE MUTATION rather than a shape a
+		 *   test can set up, so do not go looking for a test that takes it. The
+		 *   cross-thread route would need a child driving the counter to zero on one
+		 *   thread while another requests the chain's stop, repeated until the
+		 *   interleaving lands.
+		 * - WhenAnyTest.ACancelledRaceReportsOperationCanceled witnesses NEITHER of those.
+		 *   It witnesses the PREMISE: both children resumed released and ran the statement
+		 *   after their co_await, so both reached their election. It cannot tell "no
+		 *   winner" from "winner discarded", because on its path the elections happen
+		 *   after this function has returned.
 		 *
-		 * WhenAnyTest.ACancelledRaceReportsOperationCanceled witnesses neither of those.
-		 * It witnesses the PREMISE: both children resumed released and ran the statement
-		 * after their co_await, so both reached their election, store-then-elect being
-		 * straight-line code in when_any_child. It cannot tell "no winner" from "winner
-		 * discarded", because on its path the elections happen after this function has
-		 * returned.
-		 *
-		 * DO NOT delete or reorder the cancelled() test as dead code, and do not read
-		 * the measurement below as saying it is. What it says is narrower:
+		 * DO NOT delete or reorder the cancelled() test as dead code, and do not read the
+		 * measurement below as saying it is. What it says is narrower:
 		 *
 		 * - Moving the cancelled() test below the winner check, so that an elected
 		 *   winner outranks the flag, fails nothing in the suite: 0 of 200 repeats in
 		 *   debug and 0 of 20 under each of AddressSanitizer and ThreadSanitizer, for
 		 *   each of the five WhenAnyTest tests run alone, plus one whole-suite run of all
-		 *   788 tests green in each of the three presets. That zero is the invariant above
-		 *   restated as a measurement rather than a second finding: the FIRST half of the
-		 *   test returns the error wherever the flag is true, so the second half is never
-		 *   the deciding one. The figure predates
-		 *   ACancellationDiscardsAWinnerAlreadyElected, and that test does not change it:
-		 *   it too discards through the first half. There is no guard of record for the
-		 *   FLAG half, which is the state of it rather than an omission. The reason it
-		 *   still holds here is detail::when_all_awaiter::await_resume's, unchanged.
-		 * - Nothing in [stopcallback] fixes that order, which is why the flag is stored
-		 *   ahead of the children's stop in combinator_state::cancel() and read ahead of
-		 *   the election here. when_all's await_resume note measures a reordering that
-		 *   makes its own flag test the deciding half -- registering the link after the
-		 *   join park. That is a SOURCE MUTATION, not a shape a test can set up, and the
-		 *   figure attached to it is when_all's: it was NOT repeated here, so do not read
-		 *   it as a number for this component.
+		 *   788 tests green in each of the three presets. That zero is the conclusion
+		 *   above restated as a measurement rather than a second finding: **on a
+		 *   single-threaded path**, which is all the suite has, the first half returns the
+		 *   error wherever the flag is true, so the second half is never the deciding one
+		 *   THERE. It says nothing about either case the conclusion does not cover. The
+		 *   figure predates ACancellationDiscardsAWinnerAlreadyElected, and that test does
+		 *   not change it: it too discards through the first half.
+		 * - Nothing in [stopcallback] fixes the walk order, which is why the flag is
+		 *   stored ahead of the children's stop in combinator_state::cancel() and read
+		 *   ahead of the election here. Both orders exist for the forward-walking
+		 *   implementation, not for libstdc++.
 		 *
 		 * A stop that races a completion is therefore reported as a cancellation, and a
 		 * fully assembled winner is discarded with it. That is deliberate: a caller that
