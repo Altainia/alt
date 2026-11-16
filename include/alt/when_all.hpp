@@ -94,6 +94,19 @@ namespace alt::detail
 	 * @p state is the detail::combinator_state the child shares with its siblings and
 	 * with the awaiting chain. Fired from the child's frame destruction, which is the
 	 * only point both the normal and the cancelled path pass through.
+	 *
+	 * **THIS FUNCTION HAS A DUPLICATE: detail::on_when_any_child_complete, in
+	 * when_any.hpp.** Same two statements, same order, byte for byte. It is a copy
+	 * rather than a call into this header so that including alt/when_any.hpp does not
+	 * drag this whole component into every translation unit that awaits a when_any, and
+	 * the copy's note points here for the measured account below rather than restating
+	 * it. The consequence is a constraint on THIS function, which is why it is recorded
+	 * on this side too: **the order of the two statements below cannot be revisited
+	 * here alone.** A change to it must be made in both, and the derivation that change
+	 * would invalidate lives in each component's own awaiter destructor -- ~when_all_-
+	 * awaiter below, and ~when_any_awaiter there, which re-derives rather than cites.
+	 * If a third combinator ever wants this hook, move it to combinator_state.hpp and
+	 * carry this note with it rather than making a third copy.
 	 */
 	inline void on_combinator_child_complete(void* state) noexcept
 	{

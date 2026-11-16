@@ -189,6 +189,41 @@ namespace
 		co_await alt::cancellation_point{};
 	}
 
+	/**
+	 * A tracked task that parks on @p gate and counts its own resumption past the wait.
+	 *
+	 * The counter is the observable for the claim when_any_child and
+	 * when_any_awaiter::await_resume both rest on: a child already PARKED on an alt
+	 * wait primitive is resumed *released* rather than torn down, so its body runs on
+	 * past the co_await even on the cancelled path. The increment is the first
+	 * statement after the wait, so it cannot run for a child that was torn down at its
+	 * suspension point instead.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both objects are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::task<alt::wait_result> wait_then_count(alt::async_event& gate, std::atomic<int>& resumed, int tag)
+	{
+		const frame_tracker    tracker{tag};
+		const alt::wait_result result = co_await gate;
+		resumed.fetch_add(1, std::memory_order_acq_rel);
+		co_return result;
+	}
+
+	/** Races two counting children and records how the wait ended. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds it until live_frames is back to zero.
+	alt::cancellable_task counting_race_root(alt::async_event& first, alt::async_event& second, std::atomic<int>& resumed, wait_record& record, std::size_t& winner)
+	{
+		const auto result = co_await make_race(wait_then_count(first, resumed, 1), wait_then_count(second, resumed, 2));
+		record_outcome(record, result);
+
+		if(result)
+		{
+			winner = result->index();
+		}
+
+		// Somewhere for a cancelled chain to tear its frames down.
+		co_await alt::cancellation_point{};
+	}
+
 	/** Races two children that both complete inside the fan-out. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the record is owned by the calling test, which blocks in sync_wait until this completes.
 	alt::task<void> ready_children_probe(wait_record& record, std::size_t& winner, int& value)
@@ -340,26 +375,38 @@ TEST_F(WhenAnyTest, EveryChildAlreadyCompleteYieldsAWinnerWithoutSuspending)
 
 TEST_F(WhenAnyTest, ACancelledRaceReportsOperationCanceled)
 {
-	alt::task_completion_source<int> first;
-	alt::task_completion_source<int> second;
-	wait_record                      record;
-	std::size_t                      winner = 99;
-	int                              value  = 0;
+	alt::async_event first;
+	alt::async_event second;
+	std::atomic<int> resumed{0};
+	wait_record      record;
+	std::size_t      winner = 99;
 
-	auto handle = alt::start(two_source_root(first, second, record, winner, value));
+	auto handle = alt::start(counting_race_root(first, second, resumed, record, winner));
 	ASSERT_EQ(record.resumptions, 0);
-	ASSERT_EQ(live_frames, 1);
+	ASSERT_EQ(live_frames, 2) << "both children are parked on their own event";
+	ASSERT_EQ(resumed.load(std::memory_order_acquire), 0);
 
-	// Both children are parked, so no child has completed and no position has been
-	// elected when the stop lands. The children are then resumed released and each
-	// one does reach its election, so a winner is elected on this path too -- with a
-	// released value in its slot. The verdict must not be built from it.
 	handle.request_stop();
 
 	EXPECT_EQ(record.resumptions, 1);
 	EXPECT_FALSE(record.satisfied);
 	EXPECT_EQ(record.error, released_error);
 	EXPECT_EQ(winner, 99U) << "a cancelled race reports no winner";
-	EXPECT_EQ(value, 0);
 	EXPECT_EQ(live_frames, 0);
+
+	// The one half of "a cancelled race still elects a winner" that a test can
+	// observe, and the load-bearing half: both children were resumed RELEASED rather
+	// than torn down, and both ran the statement after their co_await. From there to
+	// elect() is straight-line code in when_any_child -- store, then elect, with no
+	// suspension point between -- so both children reached their election.
+	//
+	// What this test CANNOT show, and does not claim to: that an elected winner is
+	// discarded by await_resume's cancelled() test. On this path the elections happen
+	// AFTER the await has returned. The chain's token is walked in reverse
+	// registration order, so the joiner's own waiter_stop_release -- registered at the
+	// park, after the block's m_link -- resumes the chain first, await_resume takes its
+	// verdict from !waited, and only then does m_link fire cancel() and let these two
+	// children run on. So winner() still reads no_winner where the flag is read, which
+	// is exactly why the measurement in await_resume's note is a zero. See that note.
+	EXPECT_EQ(resumed.load(std::memory_order_acquire), 2) << "a stopped child that was parked is resumed released and runs on";
 }

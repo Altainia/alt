@@ -60,7 +60,7 @@ namespace alt::detail
 		{
 		}
 
-		/** Destroys the block first and the slots after it. See the note on the members. */
+		/** Destroys the block first, then the election, then the slots. See the note on the members. */
 		~when_any_state() = default;
 
 		when_any_state(const when_any_state&)            = delete;
@@ -107,8 +107,10 @@ namespace alt::detail
 		// The election is on that list as well as the slots, and for a reason that is
 		// this component's rather than when_all's: a child that cancel() stops while it
 		// is parked is resumed released rather than torn down, so it runs on, writes its
-		// slot and then calls m_election.elect(). Both members are therefore touched
-		// from inside cancel()'s walk and both must outlive it.
+		// slot and then calls m_election.elect() -- observed by
+		// WhenAnyTest.ACancelledRaceReportsOperationCanceled, see when_any_child. Both
+		// members are therefore touched from inside cancel()'s walk, and both must
+		// outlive it.
 		Slots               m_slots;
 		combinator_election m_election;
 		combinator_state    m_shared;
@@ -129,12 +131,30 @@ namespace alt::detail
 	 * a stored exception instead of returning, which is where a winner that completed
 	 * by throwing is rethrown at the await.
 	 *
+	 * **@p winner is in range by construction, so nothing here checks it.** The three
+	 * things that make that true are all elsewhere: the positions handed to elect() are
+	 * @c I from make_index_sequence<tuple_size_v<Storage>> in start_child, the slot
+	 * tuple is the same length by make_combinator_slots's own assert, and
+	 * when_any_awaiter::await_resume rules out no_winner before calling. So the walk
+	 * cannot fall off the end, and the final branch below is position @c I by
+	 * elimination rather than by assumption. An assert here would be one that cannot
+	 * fire; it was written and removed for that reason.
+	 *
+	 * This function is also where an argument-list when_any over NO awaitables is
+	 * rejected, and it is rejected at COMPILE time by the static_assert below -- see
+	 * when_any_awaiter::await_suspend, which distinguishes that from the range form's
+	 * empty case.
+	 *
 	 * @param slots  The children's slots. Only the winner's is read.
-	 * @param winner The elected position.
+	 * @param winner The elected position. Must be a position of @p slots.
 	 */
 	template<typename Result, std::size_t I = 0, typename Slots>
 	[[nodiscard]] Result when_any_result_at(Slots& slots, const std::size_t winner)
 	{
+		// A when_any over no awaitables, which cannot be answered at run time: this
+		// function is instantiated by await_resume whatever await_suspend returned, so
+		// an early return there could not rescue a zero-length tuple. The range form's
+		// empty case is a different matter and is not caught here.
 		static_assert(std::tuple_size_v<Slots> > 0, "a when_any over no awaitables can elect no winner, so there is no slot to assemble from");
 
 		if constexpr(I + 1 < std::tuple_size_v<Slots>)
@@ -148,11 +168,8 @@ namespace alt::detail
 		}
 		else
 		{
-			// The last position is reached only once every earlier one has been ruled
-			// out, so a winner outside the tuple arrives here rather than being caught
-			// where it was produced. when_any_awaiter::await_resume asserts the position
-			// is a position at all; this asserts it is this tuple's.
-			assert(winner == I && "assembling an alt when_any result for a position no child won");
+			// The last position, reached once every earlier one has been ruled out. See
+			// the note above for why that makes it the winner's rather than a guess.
 			return Result{std::in_place_index<I>, std::move(std::get<I>(slots)).value()};
 		}
 	}
@@ -163,6 +180,12 @@ namespace alt::detail
 	 * The argument-list form's winner is a variant alternative and needs the
 	 * compile-time walk above; the range form's is a run-time index beside one value
 	 * type, which is why alt::when_any_range_result is a class of its own.
+	 *
+	 * @p winner indexes the range form's vector unchecked, and is in range for the
+	 * counterpart of the reason the walk above gives: the positions handed to elect()
+	 * are the loop index in start_children, which asserts itself under the range's own
+	 * size, and the vector was sized from that same size. An assert here would be one
+	 * that cannot fire.
 	 */
 	template<typename Result, typename Slots>
 	[[nodiscard]] Result assemble_when_any_result(Slots& slots, const std::size_t winner)
@@ -173,7 +196,6 @@ namespace alt::detail
 		}
 		else
 		{
-			assert(winner < slots.size() && "assembling an alt when_any result for a position outside the range");
 			return Result{winner, std::move(slots[winner]).value()};
 		}
 	}
@@ -201,7 +223,10 @@ namespace alt::detail
 	 * This is a second copy rather than a call into when_all.hpp, so that including
 	 * alt/when_any.hpp does not drag a whole unrelated component in. The cost is that
 	 * the two must be changed together: revisiting the order there means revisiting it
-	 * here.
+	 * here. **That constraint is recorded on both sides** -- the note on
+	 * on_combinator_child_complete names this function and says the order cannot be
+	 * revisited there alone -- because when_all.hpp is where a reader looking to change
+	 * the order starts, holding as it does the measurement.
 	 */
 	inline void on_when_any_child_complete(void* state) noexcept
 	{
@@ -244,6 +269,14 @@ namespace alt::detail
 	 * when_any_awaiter::await_resume tests the cancellation flag ahead of the election
 	 * rather than after it.
 	 *
+	 * That first case is OBSERVED rather than asserted:
+	 * WhenAnyTest.ACancelledRaceReportsOperationCanceled races two children whose
+	 * bodies increment a counter in the statement after their wait, and both increments
+	 * land on the cancelled path. From there to the election is the straight-line code
+	 * below -- store, then elect, with no suspension point between -- so both children
+	 * reached it. What that test cannot observe, and what await_resume's note marks as
+	 * arranged but unwitnessed, is the elected winner then being discarded.
+	 *
 	 * A child that completes by throwing stores the exception in its slot and still
 	 * elects, so it can win: the exception is then rethrown at the await, by
 	 * result_store::value() inside the assembly above.
@@ -284,10 +317,18 @@ namespace alt::detail
 		if(election->elect(position))
 		{
 			// Only from a winner, and only here. This walk resumes every still-parked
-			// sibling released, on this thread, before it returns. It cannot free the
-			// block from under this frame: this child's own reference is dropped by its
-			// completion hook, which has not run yet. Nor can it resume the awaiting
-			// chain, because the counter still holds this child's own item.
+			// sibling, released, on this thread and before it returns -- but it does not
+			// follow that every sibling is GONE when it returns. A sibling that runs on
+			// and reaches a further suspension point is torn down there by
+			// abandon_chain, which POSTS when start_options::home is set, so its frame
+			// can outlive this call by as long as that scheduler takes to drain.
+			//
+			// Neither conclusion below depends on that, which is why the qualification
+			// is only wording. It cannot free the block from under this frame: this
+			// child's own reference is dropped by its completion hook, which has not run
+			// yet. Nor can it resume the awaiting chain, because the counter still holds
+			// this child's own item -- a sibling whose teardown is posted has not
+			// retired either, so it holds one too.
 			state->request_children_stop();
 		}
 	}
@@ -465,11 +506,24 @@ namespace alt::detail
 		 * child options, the park after everything -- and this function follows it.
 		 * Do not re-derive those here; read them there before moving anything.
 		 *
-		 * Nothing precedes the allocation, deliberately: a race with no children can
-		 * elect no winner, so that case has to report its outcome before anything is
-		 * allocated and before the chain suspends. With no overload yet that can produce
-		 * one, the only way to reach await_resume with no winner is a child count of
-		 * zero, which is why that case is asserted there rather than handled.
+		 * Nothing precedes the allocation, deliberately, and which no-children case that
+		 * leaves room for is worth being exact about, because the two forms fail
+		 * differently and only one of them can be answered from here:
+		 *
+		 * - AN ARGUMENT-LIST when_any OVER NO AWAITABLES IS A COMPILE ERROR, and no
+		 *   early return can change that. Its Slots is an empty std::tuple, so
+		 *   when_any_result_at's static_assert rejects it as soon as await_resume is
+		 *   instantiated -- which the compiler does at the co_await, whatever this
+		 *   function would have returned at run time. (Its Result would be a
+		 *   std::variant<> besides.)
+		 * - AN EMPTY RANGE IS A RUN-TIME CASE and is the one this space is for. Its types
+		 *   are all well formed, the child count is simply zero, the counter drains as the
+		 *   starter retires, the join refuses the link and await_resume then finds no
+		 *   winner. That case must report its outcome before anything is allocated and
+		 *   before the chain suspends, which means ahead of the statement below.
+		 *
+		 * No overload exists yet that can build either, so neither is reachable today;
+		 * the no-winner case await_resume asserts is the second of the two.
 		 *
 		 * @return False when the race is already over -- every child retired before the
 		 *         join could link -- so the awaiting coroutine carries straight on.
@@ -519,7 +573,14 @@ namespace alt::detail
 			// point completes inside start() and fires its hook there. A race reaches that
 			// shape readily -- WhenAnyTest.EveryChildAlreadyCompleteYieldsAWinnerWithout-
 			// Suspending is a whole fan-out of it -- so it is not a corner case here.
-			// No rollback if start throws, exactly as task_group::spawn records.
+			//
+			// No rollback if start throws, exactly as task_group::spawn records, and the
+			// consequence is when_all's unchanged because the raise precedes the throw
+			// here too: the exception propagates out of the await, nothing releases the
+			// reference that child was given, and **the block leaks** along with its
+			// slots, its election and the children's stop source. Children already
+			// started run to completion unobserved and their results are discarded. There
+			// is no hang, the chain never having parked. One leak per failed start.
 			start_children(child_options);
 
 			// Retire the starter. Until this returns no child can have driven the count
@@ -572,14 +633,48 @@ namespace alt::detail
 		 * THE ORDER OF THE TWO TESTS BELOW IS THE DECISION THIS FUNCTION EXISTS FOR.
 		 * The cancellation flag outranks the election: a cancellation that arrives after
 		 * a winner was elected reports std::errc::operation_canceled and discards the
-		 * winner. A race that is cancelled really does elect a winner -- a child already
-		 * PARKED on an alt wait primitive is resumed released rather than torn down, so
-		 * it runs on and reaches its election, and the flag and a winner are therefore
-		 * not alternatives -- and that winner's slot holds whatever a released wait is
-		 * worth, which is not a result anyone asked for.
-		 * WhenAnyTest.ACancelledRaceReportsOperationCanceled is the shape: both children
-		 * are parked when the stop lands, both reach the election, and the await must
-		 * still report the cancellation.
+		 * winner. The flag and a winner are not alternatives, because a cancelled race
+		 * really does elect one: a child already PARKED on an alt wait primitive is
+		 * resumed released rather than torn down, so it runs on, writes whatever a
+		 * released wait is worth into its slot and reaches its election. (A child
+		 * stopped before it reached any suspension point is torn down at its first one
+		 * and reaches neither.)
+		 *
+		 * BUT NO PATH IN THE SHIPPED TREE ELECTS BEFORE THIS FUNCTION READS THE FLAG,
+		 * and that is the honest statement of what the order below is for. The two have
+		 * to be told apart, because an earlier draft of this note cited
+		 * WhenAnyTest.ACancelledRaceReportsOperationCanceled as the witness and that
+		 * test cannot be one:
+		 *
+		 * - ON THE CANCELLED PATH THE ELECTIONS COME AFTER THE AWAIT HAS RETURNED. The
+		 *   chain's token holds the block's m_link, registered in await_suspend, and the
+		 *   joiner's own waiter_stop_release, registered later at the park; libstdc++
+		 *   walks that list in reverse registration order, so the joiner's release
+		 *   resumes the chain FIRST, this function takes its verdict from !waited, and
+		 *   only then does m_link fire cancel() and let the children run on and elect.
+		 *   winner() therefore still reads no_winner where the flag is read. That test
+		 *   observes the half that is observable -- both children resumed released and
+		 *   ran the statement after their co_await, so both reached their election,
+		 *   store-then-elect being straight-line code in when_any_child -- and it
+		 *   cannot tell "no winner" from "winner discarded". It is the witness for the
+		 *   premise, not for this ordering.
+		 * - A TOKEN ALREADY STOPPED WHEN await_suspend RUNS does not produce one either.
+		 *   link() fires cancel() inline, before the fan-out, so the flag is set first
+		 *   and a child with no suspension point can complete and elect during the
+		 *   fan-out -- but the park then emplaces its callback on an already-stopped
+		 *   token, the claim finds the node, m_released is set and the verdict is again
+		 *   !waited.
+		 * - WHAT WOULD PRODUCE ONE is a stop that lands after this chain was resumed
+		 *   SATISFIED and before this line reads the flag. Single-threaded that window
+		 *   does not exist: await_resume runs in the same resumption that await_suspend
+		 *   returned from. It is a cross-thread window, and nothing in the suite races
+		 *   for it.
+		 *
+		 * So the discarding of an elected winner is ARRANGED BUT UNWITNESSED. Witnessing
+		 * it needs either that cross-thread race -- a child driving the counter to zero
+		 * on one thread while another requests the chain's stop, repeated until the
+		 * interleaving lands -- or the reordering named in the second bullet below,
+		 * which makes cancel() run before the joiner is claimed. Neither is in the suite.
 		 *
 		 * DO NOT delete or reorder the cancelled() test as dead code, and do not read
 		 * the measurement below as saying it is. What it says is narrower:
@@ -588,15 +683,12 @@ namespace alt::detail
 		 *   winner outranks the flag, fails nothing in the suite: 0 of 200 repeats in
 		 *   debug and 0 of 20 under each of AddressSanitizer and ThreadSanitizer, for
 		 *   each of the five WhenAnyTest tests run alone, plus one whole-suite run of all
-		 *   788 tests green in each of the three presets. The reason is
-		 *   detail::when_all_awaiter::await_resume's, unchanged: whenever the chain's
-		 *   token is stopped, the joiner's own waiter_stop_release has claimed its node,
-		 *   so the verdict is already !waited and the FIRST half of the test is what
-		 *   returns the error. For cancelled() to be the deciding half, a stop must land
-		 *   after this chain was resumed satisfied and before this line reads the flag --
-		 *   a window on another thread, which nothing in the suite races for. There is no
-		 *   guard of record for this ordering, which is the state of it rather than an
-		 *   omission.
+		 *   788 tests green in each of the three presets. That zero is the three bullets
+		 *   above restated as a measurement rather than a second finding: the FIRST half
+		 *   of the test returns the error on every path there is, so the second half is
+		 *   never the deciding one. There is no guard of record for this ordering, which
+		 *   is the state of it rather than an omission. The reason it still holds here is
+		 *   detail::when_all_awaiter::await_resume's, unchanged.
 		 * - Nothing in [stopcallback] fixes that order, which is why the flag is stored
 		 *   ahead of the children's stop in combinator_state::cancel() and read ahead of
 		 *   the election here. when_all's await_resume note measures the reordering that
@@ -610,7 +702,11 @@ namespace alt::detail
 		 * longer have anywhere to put.
 		 *
 		 * May rethrow the winner's exception, which result_store::value() does from
-		 * inside the assembly.
+		 * inside the assembly. **A cancelled race rethrows nothing**, and that follows
+		 * from the order above rather than being a separate rule: the flag test returns
+		 * before the assembly runs, so a winner that completed by throwing has its
+		 * exception discarded with its slot exactly as a winner that completed with a
+		 * value has. The cancellation is the only thing the caller is told.
 		 */
 		[[nodiscard]] std::expected<Result, std::error_code> await_resume()
 		{
@@ -633,9 +729,13 @@ namespace alt::detail
 			// stops a child without a winner, and that sets the flag tested above. The
 			// block is still alive because this awaiter has not been destroyed.
 			//
-			// A child count of zero is the one way past that argument, and it has no
-			// caller: there is no overload that builds a race with no children. See
-			// await_suspend on where such a case must be answered.
+			// An EMPTY RANGE is the one way past that argument: zero children, the
+			// counter drained by the starter alone, nothing elected. It is what the
+			// assert below is for, and it has no caller -- no overload builds a range
+			// race yet -- so it must be answered by a run-time early return in
+			// await_suspend, ahead of the allocation. An argument-list race over no
+			// awaitables is not this case and never reaches here: it fails to compile in
+			// when_any_result_at. See await_suspend, which separates the two.
 			const std::size_t winner = m_state->election().winner();
 			assert(winner != combinator_election::no_winner && "an alt when_any was satisfied with no child elected");
 
