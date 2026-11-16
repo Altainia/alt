@@ -107,9 +107,16 @@ namespace alt::detail
 		// would not look. ~when_all_awaiter's note derives the satisfied path's immunity
 		// to ITS hazard from exactly this statement order: complete() before release()
 		// means the child that drove the count to zero still holds a reference while the
-		// chain's awaiter is destroyed, so that awaiter's release is never the block's
-		// last on a satisfied chain. Swapping these two therefore opens a window there as
-		// well as the use-after-free described below. Read that destructor before
+		// chain runs on, and -- on the caller shapes where that destructor runs within
+		// complete()'s dynamic extent -- while the chain's awaiter is destroyed too.
+		//
+		// Do not carry that immunity away from here as unconditional. It is not: the
+		// condition it needs, and the legal caller shape that fails it, are the first and
+		// fourth bullets of that destructor's note, which is the only place either is
+		// stated. What holds unconditionally is the implication, which is the part that
+		// constrains these two lines: swapping them removes the reference the immunity
+		// rests on whether the condition is met or not, so the swap opens a window there
+		// as well as the use-after-free described below. Read that destructor before
 		// touching these two lines.
 		//
 		// Measured rather than argued, and the instrument matters. Swapping these two
@@ -334,8 +341,11 @@ namespace alt::detail
 		 *
 		 * So on the ordinary single-suspension co_await statement this order prevents no
 		 * fault that is reachable today. That is NOT the stronger claim that no fault is
-		 * reachable at all: the fourth entry below reaches one with a legal caller shape
-		 * and a racing stop, no change to this library required. The honest statement of
+		 * reachable at all: the fourth entry below needs no change to this library, only a
+		 * legal caller shape, to put a SATISFIED chain's awaiter here holding the block's
+		 * last reference with its callback still registered -- and on that shape, with
+		 * these two statements swapped, a racing stop is a use-after-free. Nothing in the
+		 * shipped tree faults; this order is what prevents it. The honest statement of
 		 * what the order buys is: the callback is deregistered before the list can be
 		 * freed by construction, rather than by the argument above. Four things break that
 		 * argument, two of the four are local to when_all, and the last needs no change

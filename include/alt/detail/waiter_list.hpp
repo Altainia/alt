@@ -243,10 +243,13 @@ namespace alt::detail
 	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that was measured, on a
 	 * tree that had none of the three: no sentinel, no refused-link reset in
 	 * detail::wait_awaiter::await_suspend, and no ~when_all_awaiter reset ahead of its
-	 * release. All three conditions matter, because the guard is a conjunction -- see the
-	 * measurement paragraph below, which states it the same way. A tree missing only the
-	 * first two is stage A exactly as it shipped, and there this test passes and measures
-	 * nothing; naming two of the three would describe that tree instead of this one.
+	 * release. All three conditions matter, and they divide: the two deregistration
+	 * statements are the conjunction the test itself guards, which the measurement
+	 * paragraph below states and measures, while the sentinel is the remaining one and
+	 * this class's own -- without it there is no assert for those failures to land on, so
+	 * removing both statements could not make the test fail at all. A tree missing only
+	 * the first two is stage A exactly as it shipped, and there this test passes and
+	 * measures nothing; naming two of the three would describe that tree, not this one.
 	 *
 	 * m_liveness changes that in two ways, and the second is the one a reader will
 	 * otherwise assume is impossible.
