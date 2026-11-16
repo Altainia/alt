@@ -227,6 +227,47 @@ namespace alt::detail
 		 * Here the callback really does point into the frame, so the order is
 		 * load-bearing and nothing in the language checks it.
 		 *
+		 * The REFUSED-LINK path no longer relies on it at all, that hazard having been
+		 * removed structurally too: the tail below deregisters m_stop before it writes
+		 * anything, so an awaiter whose link was refused holds no callback by the time
+		 * await_suspend returns, and no destruction order can matter to a callback that
+		 * does not exist. It is also the path on which declaration order was never
+		 * enough, because the pointer that outlives its target there is the one into
+		 * the primitive's waiter_list rather than the one into this frame: an awaiter
+		 * freed together with its primitive takes the list with it, and a destructor
+		 * ordering inside this class cannot reach that.
+		 *
+		 * Declaration order stays load-bearing for the LINKED path, where the callback
+		 * legitimately exists while the waiter is parked and is destroyed only when the
+		 * awaiter is. detail::when_all_awaiter is the live case: its destructor resets
+		 * its whole join awaiter before releasing the shared block, so that no callback
+		 * is in flight over the counter's waiter_list when that block is freed. Half of
+		 * that call site's reasoning is now redundant -- the refused-link path it names
+		 * leaves no callback behind to deregister -- and the other half is not: a joiner
+		 * that did link holds its callback until the awaiter dies, which is after
+		 * await_resume and after the last reference to the block would otherwise go. So
+		 * an owner that frees the primitive from inside its own awaiter still has to keep
+		 * that discipline by hand; nothing in this class enforces it.
+		 *
+		 * Read that destructor's note before taking its linked case for a live hazard,
+		 * though, and read the whole of it rather than this summary. It records that on the
+		 * ordinary single-suspension co_await statement when_all cannot reach the fault: on
+		 * a satisfied chain the child that drove the counter to zero still holds a block
+		 * reference while the awaiter is destroyed, and on a released one the only party
+		 * that could claim the freed list is the very invocation that resumed the chain.
+		 * The satisfied half of that carries a proviso, which is a condition on the caller
+		 * and not on anything either class can check: the awaiter dies at the end of the
+		 * co_await FULL-EXPRESSION, so a full-expression holding a second suspension point
+		 * -- consume(co_await when_all(a, b), co_await other), which is legal C++ -- lets
+		 * the resumer's reference go before the awaiter is destroyed, and a satisfied chain
+		 * reaches that destructor holding the last reference with its callback still
+		 * registered. So the fault is reachable without changing any library code; the
+		 * discipline is what keeps it unreachable. The argument for not needing the
+		 * discipline is an argument about who else can claim, and a second claimer --
+		 * another waiter parked on the same primitive, a conditional detach -- restores the
+		 * fault as well. Which is the shape every other wait_awaiter user should assume for
+		 * itself, nothing here checking it.
+		 *
 		 * @return False when the wait is already over and the coroutine should carry
 		 *         straight on, which is this function's only way to say so.
 		 */
@@ -280,6 +321,21 @@ namespace alt::detail
 			// members are safe to touch again. The node is not: a stop callback may be
 			// mid-flight over it, and whatever it finds there it resumes nothing, having
 			// won a node that is on no list.
+			//
+			// Deregistered first, before the two writes below. A callback mid-flight
+			// over the node or the list is what the sentence above says cannot be ruled
+			// out, and std::stop_callback's destructor is the only thing that rules it
+			// out: it waits for an invocation already running on another thread. So this
+			// is also the line that ends the window in which the awaiter may be
+			// destroyed -- taking its primitive's waiter_list with it, when the two are
+			// owned together -- while a callback still holds pointers into both. No
+			// deadlock is possible: link() took and released the list's mutex within its
+			// own call, so this thread holds no lock while it blocks on an in-flight
+			// callback that wants that mutex. reset() on a disengaged optional is a
+			// no-op, so the path that registered nothing needs no branch, and so is
+			// reset() where the callback already fired inline from inside emplace.
+			m_stop.reset();
+
 			m_parked   = false;
 			m_released = !satisfied_at_the_link;
 			return false;

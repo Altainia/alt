@@ -7,6 +7,9 @@
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -28,6 +31,95 @@ namespace
 	 * separate two-thread race, so the repeats multiply rather than just repeat.
 	 */
 	constexpr std::size_t contended_nodes = 32;
+
+	/**
+	 * Whether this build still has the asserts the death tests below observe.
+	 *
+	 * Not a configuration switch over the guard itself: waiter_list carries its
+	 * liveness sentinel in every configuration and only the checks on it are
+	 * assert-guarded, so NDEBUG leaves the member and removes the abort. A death test
+	 * then has nothing to see -- the call it expects to die returns normally -- which
+	 * is a property of the build and not a defect, so the test skips and says so.
+	 */
+#if defined(NDEBUG)
+	constexpr bool asserts_are_compiled_in = false;
+#else
+	constexpr bool asserts_are_compiled_in = true;
+#endif
+
+	/**
+	 * Whether ThreadSanitizer is instrumenting this build.
+	 *
+	 * Nested rather than written as one condition because the two compilers spell it
+	 * differently and GCC before 14 does not have __has_feature at all, where a single
+	 * `defined(__has_feature) && __has_feature(...)` would not short-circuit in the
+	 * preprocessor and would fail to compile.
+	 */
+#if defined(__SANITIZE_THREAD__)
+	constexpr bool thread_sanitizer_is_active = true;
+#elif defined(__has_feature)
+#	if __has_feature(thread_sanitizer)
+	constexpr bool thread_sanitizer_is_active = true;
+#	else
+	constexpr bool thread_sanitizer_is_active = false;
+#	endif
+#else
+	constexpr bool thread_sanitizer_is_active = false;
+#endif
+
+	/** Why a death test is skipped in a build whose asserts are gone. */
+	constexpr std::string_view skipped_without_asserts =
+	  "the liveness precondition is an assert, and NDEBUG compiles it away, so this build has no "
+	  "guard for a death test to observe. That is a real gap rather than a configuration detail: a "
+	  "release build gets no liveness check at all, which waiter_list's own notes state.";
+
+	/**
+	 * @brief Sets GoogleTest's death test style for one scope and puts back what was
+	 *        there.
+	 *
+	 * GTEST_FLAG_SET writes a process-global flag and GoogleTest offers nothing scoped
+	 * of its own, so a death test that sets it leaves it set for everything after it in
+	 * the same process. Harmless while every death test in this file sets the same
+	 * style and ctest runs each test in its own process, and invisible to the next death
+	 * test anyone adds, which would silently inherit a style it never asked for.
+	 * Restoring the previous value is cheaper than that surprise.
+	 * tests/test_async_wait.cpp carries its own copy of this helper, deliberately, for
+	 * the same reason.
+	 *
+	 * Under the "threadsafe" style the child re-executes the binary and runs the test
+	 * body again, so the child constructs one of these too and sets the flag for
+	 * itself. The restore runs after the expectation either way, which is what makes it
+	 * safe to do at all.
+	 */
+	class scoped_death_test_style
+	{
+	public:
+		explicit scoped_death_test_style(const std::string& style): m_previous(GTEST_FLAG_GET(death_test_style))
+		{
+			GTEST_FLAG_SET(death_test_style, style);
+		}
+
+		~scoped_death_test_style()
+		{
+			GTEST_FLAG_SET(death_test_style, m_previous);
+		}
+
+		scoped_death_test_style(const scoped_death_test_style&)            = delete;
+		scoped_death_test_style& operator=(const scoped_death_test_style&) = delete;
+		scoped_death_test_style(scoped_death_test_style&&)                 = delete;
+		scoped_death_test_style& operator=(scoped_death_test_style&&)      = delete;
+
+	private:
+		/** What the flag held before this object changed it. */
+		std::string m_previous;
+	};
+
+	/** Why a death test is skipped under ThreadSanitizer. */
+	constexpr std::string_view skipped_under_thread_sanitizer =
+	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
+	  "die of the tool rather than of the assert. What this test pins is single-threaded by "
+	  "construction and nothing about it is sanitizer-specific, so the debug and AddressSanitizer "
+	  "presets both run it.";
 
 	// The two-party rendezvous both contended tests below are built around lives in
 	// coroutine_test_support.hpp, because alt::async_event's tests need the same one.
@@ -596,6 +688,182 @@ TEST(WaiterList, DestroyingTheListWithLinkedNodesLeavesNoneLinked)
 	EXPECT_FALSE(second.satisfied);
 }
 
+// The suite's first EXPECT_DEATH cases -- tests/test_async_wait.cpp's EXPECT_EXIT is a
+// death test too, and landed one commit ahead of the third case below -- and they are
+// here because waiter_list is the one place in the library where the mistake they catch
+// is reachable while no tool is looking at it.
+//
+// What they pin. Every public member of waiter_list that locks m_mutex asserts the
+// list's liveness sentinel before it locks -- the destructor is the exception, being the
+// member that stores the dead pattern rather than checking it -- so entering one after
+// ~waiter_list has run aborts instead of locking a std::mutex whose object no longer
+// exists. Three cases over two entry points:
+//
+// - claim and link rather than just one of them, because they are reached by different
+//   parties -- a stop callback and a waiter -- so a guard on only one would leave the
+//   other silent.
+// - claim a second time, with the node already won by somebody else. That claim never
+//   reaches the lock at all: it loses the election and returns. It aborts anyway,
+//   because the assert sits ahead of the election, and the third test is what keeps it
+//   there. A lost claim is the one shape of late arrival that has no other symptom,
+//   which is what makes it worth a case of its own rather than a sentence.
+//
+// The asserts on size(), empty(), detach_all and detach_one are deliberately untested:
+// they take the same mutex and so touch the same storage, and guarding only the entry
+// points a test happens to reach would make the guard's coverage a function of this
+// suite rather than of the hazard.
+//
+// Why an assert and not a tool, and the scope of that "not". Absent the sentinel, the
+// hazard's only contact with the freed list is std::scoped_lock over its std::mutex,
+// which is glibc's pthread_mutex_lock. Neither sanitizer instruments glibc, libstdc++'s
+// std::mutex destructor is trivial so no pthread_mutex_destroy is intercepted, and
+// ThreadSanitizer drops its synchronization variables on free. There was no instrumented
+// access anywhere on that path, which is why nothing but a sentinel the library owns
+// could report it. See WhenAllTest.AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked,
+// whose note measured exactly that blindness, and waiter_list's own class notes, which
+// say what the sentinel changed: alive()'s four-byte load is instrumented, so on a
+// genuinely FREED list AddressSanitizer now reports the use-after-free at that load
+// rather than seeing nothing. Both statements are needed, because a reader who takes
+// only the first will read a green ASan run as exoneration and a reader who takes only
+// the second will expect these three tests to produce an ASan report, which they cannot.
+//
+// What they do NOT reach, stated rather than left for a reader to assume:
+//
+// - A claim running CONCURRENTLY with ~waiter_list, rather than after it. The sentinel is
+//   stored before the destructor drains the list precisely so that interleaving is
+//   caught, but no rendezvous a test can write pins a point inside a destructor body
+//   that takes the same mutex the claim is about to take, so it is not deterministically
+//   reachable from here. Uncovered, not covered.
+// - Anything under NDEBUG, where assert compiles the check away and a release build
+//   therefore has no guard. The sentinel member is still there -- making it conditional
+//   would change the class layout between translation units built with different flags
+//   -- but nothing reads it. All three death tests skip there and say so.
+// - The freed-and-returned window, as opposed to the destroyed-but-not-yet-freed one.
+//   std::optional::reset() is what makes the latter reachable: it ends the list's
+//   lifetime and leaves its storage intact, so the sentinel's bytes still read
+//   dead_pattern. Once the storage is handed back and reused it reads neither pattern,
+//   which is why waiter_list::alive() tests positively for alive_pattern; what no test
+//   can do is land a call in that window on purpose. All three use stack storage,
+//   so nothing here is heap-freed and AddressSanitizer has nothing to report either --
+//   which is the point of the previous paragraph, not a gap in it: on the freed window
+//   the tool is the instrument, and on this one the sentinel is.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. Measured with the pinned tool at threshold 0: the macro alone in a test body is 0, the macro alone in a named helper is 37, and one skip guard ahead of it is 38 -- so hoisting the macro into a helper moves the finding rather than removing it, and the guard cannot move because GTEST_SKIP only skips the function it is written in. What this body actually contains is two skip guards and one expectation.
+TEST(WaiterListDeathTest, ClaimingAWaiterOnADestroyedListAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	// The child re-executes this binary rather than forking a process that has already
+	// run every test ahead of this one. GoogleTest recommends this style for a
+	// multi-threaded program, and this suite is one, even though these death tests are
+	// single-threaded by construction. Scoped so the flag does not outlive this test;
+	// see scoped_death_test_style.
+	const scoped_death_test_style style{"threadsafe"};
+
+	std::optional<waiter_list> list{std::in_place};
+	waiter_node                node;
+
+	// Taken while the optional is still engaged, which is the whole reason the pointer
+	// is named here rather than the call being written as list->claim(node).
+	// _GLIBCXX_ASSERTIONS is on by default on this distribution's GCC and its Clang
+	// alike, so std::optional::operator-> on a reset optional aborts inside
+	// <optional> -- measured, with the message "Assertion 'this->_M_is_engaged()'
+	// failed" -- and the call under test is never reached. Holding the address past
+	// the reset is also the more faithful model: a stop callback holds a pointer into
+	// the block, not an optional.
+	waiter_list* const storage = &*list;
+
+	list.reset();
+
+	// Calling through that pointer is formally undefined, and deliberately so: it is
+	// the only way to name the destroyed object's storage, which is exactly what a
+	// stop callback that outlived the block it points into does.
+	EXPECT_DEATH(static_cast<void>(storage->claim(node)), "claiming an alt waiter on a destroyed list");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. Measured with the pinned tool at threshold 0: the macro alone in a test body is 0, the macro alone in a named helper is 37, and one skip guard ahead of it is 38 -- so hoisting the macro into a helper moves the finding rather than removing it, and the guard cannot move because GTEST_SKIP only skips the function it is written in. What this body actually contains is two skip guards and one expectation.
+TEST(WaiterListDeathTest, LinkingAWaiterOnADestroyedListAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	std::optional<waiter_list> list{std::in_place};
+
+	// Given a resumable handle so that the liveness assert is the only precondition this
+	// call can trip. link's older asserts carry their own messages, and the regex below
+	// is what keeps the test specific to the sentinel rather than to whichever assert
+	// happens to come first.
+	waiter_node node{.handle = std::noop_coroutine()};
+
+	// See the test above for why the storage is named before the reset rather than
+	// reached through the optional after it.
+	waiter_list* const storage = &*list;
+
+	list.reset();
+
+	EXPECT_DEATH(static_cast<void>(storage->link(node)), "linking an alt waiter on a destroyed list");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. See the two tests above, whose suppressions carry the measurement.
+TEST(WaiterListDeathTest, AClaimThatWouldLoseTheElectionOnADestroyedListAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	std::optional<waiter_list> list{std::in_place};
+
+	// Already won by another party, so try_claim's compare-exchange from linked fails
+	// and this claim would return lost having touched nothing at all: not the mutex,
+	// not the links, not this node again. The abort therefore comes from where the
+	// assert sits -- ahead of the election, not after it -- rather than from anything
+	// the call goes on to do, and that is what this case adds to the two above.
+	// Measured: with the assert moved below try_claim, this test fails 20 of 20 in debug
+	// and 20 of 20 under AddressSanitizer while the two above pass 20 of 20 in both;
+	// ThreadSanitizer skips all three.
+	//
+	// It is the shape a late claim takes on a waiter that was resumed rather than
+	// cancelled: a stop callback arriving after the satisfier has already won the node
+	// reads the state word, loses, and returns. Every other symptom of a dead list is
+	// downstream of the lock it then never takes, which is why a lost claim is the one
+	// that would otherwise be silent. detail::wait_awaiter's linked path is where that
+	// matters; see detail::when_all_awaiter's destructor.
+	waiter_node node;
+	node.state.store(waiter_state::done, std::memory_order_relaxed);
+
+	// See ClaimingAWaiterOnADestroyedListAborts for why the storage is named before the
+	// reset rather than reached through the optional after it.
+	waiter_list* const storage = &*list;
+
+	list.reset();
+
+	EXPECT_DEATH(static_cast<void>(storage->claim(node)), "claiming an alt waiter on a destroyed list");
+}
+
 TEST(WaiterList, AConcurrentSatisfierAndStopDoNotBothResume)
 {
 	// A satisfier detaching the whole list while a stop callback claims nodes one at
@@ -631,6 +899,14 @@ TEST(WaiterList, AConcurrentSatisfierAndStopDoNotBothResume)
 	// of those assertions from run to run -- a resumption count of five, or a node
 	// left claimed and never resumed because a double unlink corrupted the links --
 	// so it is the set of them that does the catching, not any one line.
+	//
+	// ThreadSanitizer earns its place in that set: both threads are alive for the whole
+	// race and a double win races on a frame the first resumption destroyed, which is an
+	// instrumented access. Do not generalize that to waiter_list's lifetime
+	// preconditions. A call that reaches a destroyed list touches it through
+	// nothing but the lock, which neither sanitizer instruments, so no run of this test
+	// says anything about that -- see the three WaiterListDeathTest cases above and
+	// waiter_list's own class notes.
 	//
 	// No repeat calls alt_test::reset_coroutine_test_state(): the nodes here are bare
 	// waiter_nodes with no coroutine behind them, so there is none of that state to

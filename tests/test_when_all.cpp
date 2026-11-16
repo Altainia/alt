@@ -1610,13 +1610,17 @@ namespace
 	 * the slot's copy is therefore the last instant inside the block's teardown that a
 	 * test can reach: after ~combinator_state has destroyed the completion counter and
 	 * its waiter_list, and before the operator delete that frees the storage. So a stop
-	 * released here reaches a waiter_list that has been destroyed, which is what the
-	 * reset in ~when_all_awaiter prevents. The same window a few hundred nanoseconds
-	 * later, with the storage freed rather than merely destroyed, is reachable only by
-	 * timing and no rendezvous a test can write lands there, because nothing of ours
-	 * runs between that free and ~m_stop. The note on
-	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked says what that leaves the test
-	 * able to claim, and agrees with this one.
+	 * released here reaches a waiter_list whose lifetime has ended -- if anything of this
+	 * chain's is still registered to be invoked by it. In the shipped tree nothing is:
+	 * detail::wait_awaiter::await_suspend deregisters the joiner's callback in its
+	 * refused-link tail, and ~when_all_awaiter's reset ahead of the release would
+	 * deregister it too. The window is what this tripwire opens; which of those two
+	 * statements is keeping it empty is what the mutations named on
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked separate. The same window a few
+	 * hundred nanoseconds later, with the storage freed rather than merely destroyed, is
+	 * reachable only by timing and no rendezvous a test can write lands there, because
+	 * nothing of ours runs between that free and ~m_stop. That note says what this leaves
+	 * the test able to claim, and agrees with this one.
 	 *
 	 * Only the copy in the block -- tripwire_block_hops moves from the child's own
 	 * result -- releases the stop thread and holds the teardown open. The child's
@@ -1750,10 +1754,11 @@ namespace
 	 * context carries a token that can be stopped and wait_awaiter::await_suspend
 	 * registers a callback at all -- a sync_wait-driven alt::task has a null context and
 	 * registers nothing, which is why every other ready-children test here is safe. The
-	 * one child is ready, so it retires before the join can link, the link is refused
-	 * with that callback left engaged, and the awaiter's release() is the block's LAST
-	 * reference. And the stop is requested from another thread, which is this library's
-	 * documented shutdown idiom.
+	 * one child is ready, so it retires before the join can link, the link is refused,
+	 * and the awaiter's release() is the block's LAST reference -- the three conditions
+	 * that put a registered callback and a dead waiter_list in the same instant, in a
+	 * tree whose refused-link tail does not deregister that callback. And the stop is
+	 * requested from another thread, which is this library's documented shutdown idiom.
 	 */
 	void check_the_teardown_repeat(const int repeat, const wait_record& record, const int tag_seen, const int opened)
 	{
@@ -2039,55 +2044,84 @@ TEST_F(WhenAllTest, ANestedWhenAllInsideAChildIsItsOwnRoot)
 	EXPECT_EQ(live_frames, 0) << "both levels are gone";
 }
 
-// The window ~when_all_awaiter's m_join.reset() closes, built on purpose rather than
-// hoped for. Read that destructor's note first; this is its guard of record.
+// The window a refused link used to leave open, built on purpose rather than hoped for.
+// Read detail::wait_awaiter::await_suspend's refused-link tail and ~when_all_awaiter's
+// destructor note before this one. Between them they say what this test is the guard of
+// and what, as of this branch, it is no longer the guard of.
 //
-// READ THIS BEFORE TRUSTING A GREEN RUN. Its assertions cannot fail on the mutation it
-// exists for -- moving the reset below the release, which is the order this branch
-// shipped with until the final review -- and they cannot be made to. Measured: 0
-// failures and 0 hangs in 20 repeats of this test alone in each of the debug,
-// AddressSanitizer and ThreadSanitizer builds with the mutation in place, and a full
-// suite run of 763 passes in each of the two sanitizer presets. That is not evidence the
-// order does not matter. The reason it is not is specific.
+// WHAT IT GUARDS, measured rather than as first written. The hazard needs two things
+// true at once: a stop callback still registered for a joiner whose link was refused,
+// and the awaiter's release() freeing the block -- and with it the completion counter's
+// waiter_list -- while that callback is registered. Two separate statements each falsify
+// the first half on their own, so this test fails only when both are gone:
+//
+// - await_suspend's m_stop.reset() in the refused-link tail. Remove it alone and this
+//   test still passes 20 of 20 in each of debug, AddressSanitizer and ThreadSanitizer.
+// - ~when_all_awaiter's m_join.reset() ahead of the release. Move it under the release
+//   alone and this test still passes 20 of 20 in all three, and so does the whole suite
+//   over 20 whole-suite runs per preset.
+// - Remove both and this test fails 20 of 20 in all three, every failure an abort on
+//   waiter_list's liveness assert, "claiming an alt waiter on a destroyed list", exit
+//   134.
+//
+// So this test guards the conjunction and neither statement separately. It was cited in
+// ~when_all_awaiter as the guard of that destructor's ordering, which was true of the
+// tree it was written against and is not true now: await_suspend's reset satisfies the
+// conjunction by itself, and nothing in the suite fails when the destructor's order is
+// swapped. That destructor's note carries the argument for keeping the order anyway, and
+// it is an argument, not a measurement.
+//
+// READ THIS BEFORE TRUSTING A GREEN RUN. This test's own EXPECT assertions cannot fail
+// on either mutation and cannot be made to; what reports the fault is the abort above,
+// which takes the whole binary with it. Before the sentinel existed, the
+// both-statements-gone mutation produced 0 failures and 0 hangs in 20 repeats of this
+// test in each of the debug, AddressSanitizer and ThreadSanitizer builds, and a full
+// suite run of 763 passes -- the suite's size at the time of that measurement -- in each
+// of the two sanitizer presets. Those zeros are what the sentinel was added for. They
+// are not a statement about this tree, where the same mutation aborts every time.
 //
 // What this test's handshake reaches. when_all_state declares m_slots and then m_shared,
 // so ~combinator_state -- and with it the completion counter and its waiter_list -- runs
 // BEFORE the slots are destroyed, and the operator delete that frees the storage runs
 // after both. The tripwire lives in a result slot (see teardown_tripwire, which says the
 // same), so the handshake lands the concurrent request_stop() after the waiter_list's
-// lifetime has ended and BEFORE its storage is freed. That is formally undefined
-// behavior and operationally a no-op: libstdc++'s std::mutex destructor is trivial and
-// the bytes are still intact, so the callback's lock and unlock act on memory that is
-// still allocated. There is no memory error in that window for any tool to report, which
-// is why this test's zeros are what they are. No instrumentation is blind to anything
-// here, and no assertion can see a lifetime violation that changes no byte.
+// lifetime has ended and BEFORE its storage is freed. In the shipped tree nothing is
+// registered to arrive there at all -- that is what await_suspend's reset accomplishes,
+// and the block's own m_link is deregistered by ~combinator_state earlier in the same
+// teardown -- so the stop finds no callback of this chain's to invoke. Under the
+// both-statements-gone mutation the joiner's callback is what arrives, and it claims a
+// list whose lifetime has ended, which is where the sentinel's abort comes from.
 //
-// What it does not reach. The window the mutation opens in the shipped order's place --
-// the callback's claim entered after the block's operator delete has returned -- is a few
-// hundred nanoseconds later, and no rendezvous a test can write lands there: nothing of
-// ours runs between the free and ~m_stop. That window was reached once, by a different
-// instrument than this test's handshake: a timestamped print in
-// waiter_stop_release::operator() and in when_all_state::destroy, plus a library-side
-// hold, in a scratch build. The trace showed the claim entered with the list pointer
-// inside the freed block (list=0x...11f0 within block=0x...11c0) and AddressSanitizer
-// reporting nothing. This test's green runs are not that evidence and do not reproduce
-// it.
+// What the handshake does NOT reach, in any configuration. The same window a few hundred
+// nanoseconds later, with the storage freed rather than merely destroyed: no rendezvous a
+// test can write lands there, because nothing of ours runs between the free and ~m_stop.
+// It was reached once, by a different instrument than this test's handshake: a timestamped
+// print in waiter_stop_release::operator() and in when_all_state::destroy, plus a
+// library-side hold, in a scratch build. The trace showed the claim entered with the list
+// pointer inside the freed block (list=0x...11f0 within block=0x...11c0) and
+// AddressSanitizer reporting nothing. This test's runs are not that evidence and do not
+// reproduce it.
 //
-// Why the real post-free window would also go unreported, which is the reason a green
-// sanitizer run is not exoneration: claim touches the list through exactly one thing,
-// std::scoped_lock over the list's std::mutex, whose lock and unlock are glibc's
-// pthread_mutex_lock and pthread_mutex_unlock. Neither sanitizer instruments glibc, the
-// trivial std::mutex destructor means no pthread_mutex_destroy is intercepted, and
-// ThreadSanitizer drops its synchronization variables on free. The rest of the
-// callback's work is on the node, which lives in the chain's own frame and is still
-// alive. So the freed-heap write has no instrumented access anywhere on its path.
+// What a sanitizer can and cannot say about either window, since the first thing a reader
+// reaches for is a green ASan run. A claim's contact with the list is now two things, not
+// one: waiter_list::alive()'s four-byte load of the list's own storage, which is an
+// ordinary instrumented access, and then std::scoped_lock over its std::mutex, which is
+// glibc's pthread_mutex_lock and pthread_mutex_unlock. Neither sanitizer instruments
+// glibc, the trivial std::mutex destructor means no pthread_mutex_destroy is intercepted,
+// and ThreadSanitizer drops its synchronization variables on free -- so the LOCK is
+// invisible, and in an NDEBUG build, where the assert and with it the load are gone, that
+// is the whole of the contact and the hazard has no instrumented access anywhere on its
+// path. With asserts compiled in, a genuinely FREED list is reported by AddressSanitizer
+// at that load, and a merely DESTROYED one -- this test's window -- is caught by the
+// sentinel instead, there being no memory error in it for any tool to find. waiter_list's
+// class notes carry that partition; do not read either half of it without the other.
 //
 // So what this test contributes is the window it does build, deterministically: a
-// cancellable_task root, every child retired before the join could link, and a
-// concurrent request_stop() made to land inside the block's teardown by a handshake
-// rather than by timing, 50 repeats per preset. No other test in the suite puts those
-// together. Keep it, and keep the mutation named here, because the next reader will
-// otherwise find a green sanitizer run and conclude the reset is redundant.
+// cancellable_task root, every child retired before the join could link, and a concurrent
+// request_stop() made to land inside the block's teardown by a handshake rather than by
+// timing, 50 repeats per preset. No other test in the suite puts those together. Keep it,
+// and keep both mutations named here, because a reader who finds a green run and only one
+// of them will conclude that whichever statement they looked at is redundant.
 TEST_F(WhenAllTest, AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked)
 {
 	for(int repeat = 0; repeat < teardown_race_repeats; ++repeat)

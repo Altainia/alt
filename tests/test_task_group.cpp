@@ -27,12 +27,15 @@ static_assert(std::is_same_v<alt::await_result_t<decltype(std::declval<alt::task
 
 // Three asserts are documented preconditions that no test exercises: the destructor's
 // "no live tasks", and spawn's two ownership claims (a start_options::token and a
-// start_options::on_completion of the caller's own). The suite has no death tests (no
-// EXPECT_DEATH or ASSERT_DEATH anywhere), and introducing the first one for these would
-// be a larger change than this component. They compile away under NDEBUG, so no
-// release-build behavior is reachable from a Debug preset either. They are therefore a
-// known gap in coverage, stated here rather than left silent. The destructor's is the
-// one a caller can reach without a mistake, through a cancelled joiner, and
+// start_options::on_completion of the caller's own). The reason is no longer that the
+// mechanism is unavailable: tests/test_waiter_list.cpp carries EXPECT_DEATH cases and
+// tests/test_async_wait.cpp an EXPECT_EXIT one, with the "threadsafe" style, the scoped
+// restore of that flag, and the NDEBUG and ThreadSanitizer skips a death test in this
+// project needs. The pattern to copy exists; nobody has written these three. They
+// compile away under NDEBUG, so no release-build behavior is reachable from a Debug
+// preset either. They are therefore a known gap in coverage, stated here rather than
+// left silent. The destructor's is the one a caller can reach without a mistake,
+// through a cancelled joiner, and
 // ACancelledJoinerIsReleasedWithOperationCanceledWhileTasksAreLive pins the state that
 // assert exists to catch.
 

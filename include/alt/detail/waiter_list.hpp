@@ -223,6 +223,93 @@ namespace alt::detail
 	 * - No claim may be in flight when the list is destroyed. A claim that has won
 	 *   the election but not yet taken the mutex leaves its node linked for that
 	 *   moment, and a list destroyed in that window would race the unlink.
+	 *
+	 * ABSENT THE SENTINEL BELOW, neither sanitizer reports a breach of the second one,
+	 * which is why this class carries a liveness sentinel of its own. That scope
+	 * matters: as stage A shipped this class, a claim's only contact with a destroyed
+	 * or freed list was std::scoped_lock over m_mutex, which is glibc's
+	 * pthread_mutex_lock and pthread_mutex_unlock. AddressSanitizer does not intercept
+	 * glibc, libstdc++'s std::mutex destructor is trivial so there is no
+	 * pthread_mutex_destroy for it to intercept either, and ThreadSanitizer drops its
+	 * synchronization variables on free. Everything else the claim touched was the
+	 * node, which lives in the waiter's own frame and is still alive. So the
+	 * freed-heap access had no instrumented access anywhere on its path, and a green
+	 * sanitizer run said nothing about this precondition. That is still the state of
+	 * any build whose asserts are gone, because NDEBUG removes the checks below and
+	 * restores exactly this blindness. And any note in this library that offers an
+	 * AddressSanitizer or ThreadSanitizer report as evidence about a waiter_list holds
+	 * only where something instrumented also touches the freed list -- the block's
+	 * refcount word, a slot's contents -- and not for the lock itself. alt::when_all's
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that was measured, on a
+	 * tree that had none of the three: no sentinel, no refused-link reset in
+	 * detail::wait_awaiter::await_suspend, and no ~when_all_awaiter reset ahead of its
+	 * release. All three conditions matter, and they divide: the two deregistration
+	 * statements are the conjunction the test itself guards, which the measurement
+	 * paragraph below states and measures, while the sentinel is the remaining one and
+	 * this class's own -- without it there is no assert for those failures to land on, so
+	 * removing both statements could not make the test fail at all. A tree missing only
+	 * the first two is stage A exactly as it shipped, and there this test passes and
+	 * measures nothing; naming two of the three would describe that tree, not this one.
+	 *
+	 * m_liveness changes that in two ways, and the second is the one a reader will
+	 * otherwise assume is impossible.
+	 *
+	 * - Every public member that locks m_mutex asserts the list is alive before it
+	 *   locks. The destructor is the exception, and it is the member that *stores* the
+	 *   dead pattern rather than checking it. So a call that arrives after
+	 *   ~waiter_list has run aborts with a named precondition instead of locking a
+	 *   mutex whose object is gone. That covers the destroyed-but-not-yet-freed
+	 *   window.
+	 * - alive() is an ordinary four-byte load of this object's own storage, inlined
+	 *   into whatever translation unit calls it. Where that storage has actually been
+	 *   freed and AddressSanitizer still holds the chunk poisoned, the tool therefore
+	 *   instruments the very first thing a claim does and reports the
+	 *   heap-use-after-free at the load, before the assert can fire. The sentinel
+	 *   extends the tool's reach rather than only substituting for it. Once the chunk
+	 *   has been handed out again neither instrument is certain, which is the second
+	 *   limit below.
+	 *
+	 * Taken together, three windows rather than two: the sentinel covers
+	 * destroyed-but-not-yet-freed, AddressSanitizer covers freed-while-still-poisoned,
+	 * and freed-and-reused is covered RELIABLY by neither -- AddressSanitizer is silent
+	 * once the chunk has been handed out again, and the sentinel is probabilistic there,
+	 * rejecting every value but alive_pattern itself, which is all but one in 2^32. That
+	 * is the second limit below, stated the same way. So in a debug build the first two
+	 * windows are no longer invisible and the third is covered but not certainly.
+	 *
+	 * The measurement for this guard does not contradict that, and the reason is the
+	 * first thing a reader will reach for. With BOTH of alt::when_all's deregistration
+	 * statements removed -- detail::wait_awaiter::await_suspend's reset in its
+	 * refused-link tail and ~when_all_awaiter's reset ahead of its release --
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked fails 20 of 20 in each of the
+	 * debug, AddressSanitizer and ThreadSanitizer builds, with no sanitizer report at
+	 * all, every failure landing on claim()'s assert -- not link()'s, which is the one a
+	 * reader scanning downward reaches first; tests/test_when_all.cpp names the message
+	 * exactly, "claiming an alt waiter on a destroyed list". Removing either statement
+	 * alone leaves it passing 20 of 20 in all three, so the configuration matters: that
+	 * test guards the conjunction, and its own header comment in tests/test_when_all.cpp
+	 * carries both mutations.
+	 *
+	 * The window that test reaches is destroyed, not freed: when_all_state declares
+	 * m_slots before m_shared, so ~combinator_state -- and the waiter_list inside it --
+	 * runs before the slots are destroyed, the operator delete that frees the storage
+	 * runs after both, and the test's tripwire lives in a result slot. The mutex is
+	 * destroyed there rather than freed, so there is no memory error for
+	 * AddressSanitizer to find. That test's header comment derives all of this; read it
+	 * rather than re-deriving it.
+	 *
+	 * Three limits, and this list is not a promise of completeness.
+	 *
+	 * - The checks are asserts, so NDEBUG removes them and a release build has no
+	 *   guard.
+	 * - alive() is a best-effort read of four bytes: storage that has been freed,
+	 *   handed out again and written over holds neither pattern, which alive()
+	 *   rejects, but it can be overwritten with alive_pattern by chance.
+	 * - The check is not atomic with the lock that follows it. A caller that passes
+	 *   alive() an instant before the destructor's store goes on to lock a destroyed
+	 *   mutex exactly as it did before. The sentinel NARROWS the window the second
+	 *   precondition names; it does not close it, and that precondition stays the
+	 *   owner's to keep.
 	 */
 	class waiter_list
 	{
@@ -250,10 +337,29 @@ namespace alt::detail
 		 * this destructor, rather than leaving the release to the backstop -- and read
 		 * detach_all first, because draining one at a time removes this walk's hazard
 		 * without making a destroyed waiter's node safe to leave behind.
+		 *
+		 * The drain goes through the private detach_all_locked() rather than the public
+		 * detach_all(), because the public one now asserts this list is alive and the
+		 * sentinel below is stored before the drain begins. See m_liveness.
 		 */
 		~waiter_list()
 		{
-			resume_claimed(detach_all(), false);
+			// DELICATE. This store is what the whole sentinel rests on: it runs before
+			// any member of this object is destroyed, which is why alive() can speak for
+			// a destroyed list at all. See m_liveness.
+			//
+			// Stored before the drain, not after: a claim racing this teardown is the
+			// hazard the precondition names, and a sentinel set afterwards would miss
+			// exactly that interleaving while catching only the easier
+			// post-destruction one.
+			m_liveness.store(dead_pattern, std::memory_order_relaxed);
+
+			waiter_node* chain = nullptr;
+			{
+				const std::scoped_lock lock{m_mutex};
+				chain = detach_all_locked();
+			}
+			resume_claimed(chain, false);
 		}
 
 		/**
@@ -321,6 +427,10 @@ namespace alt::detail
 		template<typename Condition>
 		[[nodiscard]] bool link(waiter_node& node, Condition still_waiting)
 		{
+			// Before the lock, because the lock is the thing that touches freed storage.
+			// See m_liveness.
+			assert(alive() && "linking an alt waiter on a destroyed list");
+
 			// The cheapest place to catch the most likely mistake above this header:
 			// linking a waiter before its handle has been stored. Checked here rather
 			// than in resume_claimed, where the node is already detached and in flight
@@ -364,6 +474,11 @@ namespace alt::detail
 		/** Links a waiter whose primitive has no state of its own to consult. */
 		[[nodiscard]] bool link(waiter_node& node)
 		{
+			// Redundant with the overload above it, and kept anyway: every public entry
+			// point carries the check, so a reader does not have to trace delegation to
+			// find out which ones are guarded. See m_liveness.
+			assert(alive() && "linking an alt waiter on a destroyed list");
+
 			return link(node, [] { return true; });
 		}
 
@@ -395,6 +510,11 @@ namespace alt::detail
 		 */
 		claim_result claim(waiter_node& node)
 		{
+			// Before the election and before the lock. This is the entry point the
+			// hazard m_liveness exists for actually arrives through: a stop callback
+			// that outlived the primitive whose waiter_list this is.
+			assert(alive() && "claiming an alt waiter on a destroyed list");
+
 			if(!try_claim(node))
 			{
 				return claim_result::lost;
@@ -443,6 +563,8 @@ namespace alt::detail
 		template<typename Action>
 		waiter_node* detach_all(Action under_lock) noexcept
 		{
+			assert(alive() && "detaching every alt waiter on a destroyed list");
+
 			const std::scoped_lock lock{m_mutex};
 			under_lock();
 			return detach_all_locked();
@@ -493,6 +615,8 @@ namespace alt::detail
 		 */
 		waiter_node* detach_all() noexcept
 		{
+			assert(alive() && "detaching every alt waiter on a destroyed list");
+
 			const std::scoped_lock lock{m_mutex};
 			return detach_all_locked();
 		}
@@ -531,6 +655,8 @@ namespace alt::detail
 		template<typename Action>
 		waiter_node* detach_one(Action under_lock) noexcept
 		{
+			assert(alive() && "detaching an alt waiter on a destroyed list");
+
 			const std::scoped_lock lock{m_mutex};
 			waiter_node* const     detached = detach_one_locked();
 			under_lock(detached != nullptr);
@@ -548,6 +674,8 @@ namespace alt::detail
 		 */
 		waiter_node* detach_one() noexcept
 		{
+			assert(alive() && "detaching an alt waiter on a destroyed list");
+
 			const std::scoped_lock lock{m_mutex};
 			return detach_one_locked();
 		}
@@ -559,6 +687,12 @@ namespace alt::detail
 		 */
 		[[nodiscard]] std::size_t size() const
 		{
+			// Guarded although no test reaches it, and that is the point: this takes the
+			// same mutex every other entry point does, so it touches the same freed
+			// storage. Checking only what a test happens to exercise would make the
+			// guard's coverage a function of the suite rather than of the hazard.
+			assert(alive() && "reading the size of a destroyed alt waiter list");
+
 			const std::scoped_lock lock{m_mutex};
 			return m_size;
 		}
@@ -576,6 +710,9 @@ namespace alt::detail
 		 */
 		[[nodiscard]] bool empty() const
 		{
+			// As size(): a guard rather than a claim about what is tested.
+			assert(alive() && "testing a destroyed alt waiter list for waiters");
+
 			const std::scoped_lock lock{m_mutex};
 			return m_size == 0;
 		}
@@ -681,10 +818,63 @@ namespace alt::detail
 			--m_size;
 		}
 
-		mutable std::mutex m_mutex;
-		waiter_node*       m_head = nullptr;
-		waiter_node*       m_tail = nullptr;
-		std::size_t        m_size = 0;
+		/**
+		 * @brief Whether this list is still within its own lifetime.
+		 *
+		 * Tests POSITIVELY for alive_pattern rather than negatively for dead_pattern,
+		 * and that is the whole value of the check. Freed storage that has been handed
+		 * out again and written over holds neither pattern, so a test for dead_pattern
+		 * would call such a list alive and let the lock through; only the positive test
+		 * rejects it. It cannot reject every reuse -- four bytes can be overwritten with
+		 * alive_pattern by chance -- but it rejects all but one value in 2^32.
+		 *
+		 * Relaxed, deliberately. This orders nothing and is not trying to: it reads a
+		 * word to decide whether an object exists, and if the answer is no then there is
+		 * no happens-before edge left to establish with anything. An acquire load would
+		 * suggest the opposite.
+		 */
+		[[nodiscard]] bool alive() const noexcept
+		{
+			return m_liveness.load(std::memory_order_relaxed) == alive_pattern;
+		}
+
+		/** What m_liveness holds for the whole of a list's lifetime. */
+		static constexpr std::uint32_t alive_pattern = 0x57414954U;
+
+		/** What ~waiter_list writes over it, before it drains anything. */
+		static constexpr std::uint32_t dead_pattern = 0xDEAD1157U;
+
+		// DELICATE, but the delicate part is in ~waiter_list, not here. What makes the
+		// sentinel work is the destructor body's store of dead_pattern, which runs before
+		// any member is destroyed; do not move or remove it.
+		//
+		// Declaration order is defensive convention rather than load-bearing.
+		// m_liveness is declared FIRST, so it is destroyed LAST, after m_mutex -- the
+		// member a late caller would otherwise lock. That buys nothing on its own:
+		// std::atomic<std::uint32_t>'s destructor is trivial, so "destroyed last" is not
+		// an event, and the four bytes alive() reads survive member destruction either
+		// way. Nor is there anything on the other side of the order to sequence against,
+		// libstdc++'s std::mutex destructor being trivial too (see the class
+		// documentation above). Keep the position anyway, for the reader who expects the
+		// guard to precede what it guards.
+		//
+		// The member exists in every configuration and only the checks on it are
+		// assert-guarded. Making the member itself conditional on NDEBUG would change
+		// this class's layout between translation units compiled with different flags,
+		// which is an ODR violation waiting to happen in a header-only component six
+		// other components include; the cost of not doing that is four bytes.
+		//
+		// What this catches and what it does not, measured rather than assumed. See
+		// tests/test_waiter_list.cpp's three WaiterListDeathTest cases, which reach the
+		// destroyed-but-not-yet-freed window -- including the one that pins the assert in
+		// claim() sitting ahead of the election, so that a late claim which would lose it
+		// and touch nothing still aborts -- and the notes in the class documentation
+		// above for why no sanitizer reaches any of it.
+		std::atomic<std::uint32_t> m_liveness{alive_pattern};
+		mutable std::mutex         m_mutex;
+		waiter_node*               m_head = nullptr;
+		waiter_node*               m_tail = nullptr;
+		std::size_t                m_size = 0;
 	};
 
 }

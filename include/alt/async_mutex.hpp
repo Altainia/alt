@@ -145,10 +145,17 @@ namespace alt
 	 * concurrently: of several callers reaching for the lock exactly one takes it.
 	 * Destruction is not, as ever, and in particular a mutex must not be destroyed
 	 * while a cancellation is in flight against one of its waiters, nor while a guard
-	 * that could outlive it still holds the lock. Resumption happens on the thread
-	 * that released the lock, inside async_mutex_lock::unlock() or the guard's
-	 * destructor, which therefore run waiter bodies; co_await alt::resume_on(scheduler)
-	 * in a waiter that needs to be somewhere specific.
+	 * that could outlive it still holds the lock. That second case now aborts in a debug
+	 * build rather than corrupting quietly: the guard's destructor hands the lock on
+	 * through detail::waiter_list::detach_one, whose liveness assert fires on a list its
+	 * own destructor has already marked dead. It was undefined behavior before that
+	 * assert existed and it is undefined behavior now; what changed is only that it says
+	 * so, so a guard outliving its mutex is a new abort rather than a new rule.
+	 *
+	 * Resumption happens on the thread that released the lock, inside
+	 * async_mutex_lock::unlock() or the guard's destructor, which therefore run waiter
+	 * bodies; co_await alt::resume_on(scheduler) in a waiter that needs to be somewhere
+	 * specific.
 	 *
 	 * Neither copyable nor movable: the awaiters inside suspended coroutine frames
 	 * and the live guards both hold pointers to it, and no copy or move could fix

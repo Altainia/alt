@@ -190,6 +190,18 @@ namespace alt::detail
 			// simpler cancellation tests do not expose it, because libstdc++ skips that
 			// relock after the LAST callback in the list; the test is built so the release
 			// lands during an earlier one.
+			//
+			// One clause on why that citation holds, because it looks like the kind
+			// waiter_list's notes reject. The freed object here is libstdc++'s stop
+			// state, and the access AddressSanitizer reports is _M_lock()'s
+			// read-modify-write of that state's own word, inlined into this translation
+			// unit from <stop_token> and so instrumented like any other access. A claim
+			// on a destroyed waiter_list reaches it through pthread_mutex_lock inside
+			// glibc, which neither sanitizer instruments, and that is why that class
+			// needs a liveness sentinel of its own and why a green ASan run says nothing
+			// there. The difference is what the freed memory is touched BY, not how
+			// exotic the race is; see waiter_list's class notes before generalizing
+			// either way.
 			const std::stop_source children_source = m_children;
 			children_source.request_stop();
 		}
