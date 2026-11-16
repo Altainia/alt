@@ -107,10 +107,11 @@ namespace alt::detail
 		// The election is on that list as well as the slots, and for a reason that is
 		// this component's rather than when_all's: a child that cancel() stops while it
 		// is parked is resumed released rather than torn down, so it runs on, writes its
-		// slot and then calls m_election.elect() -- observed by
-		// WhenAnyTest.ACancelledRaceReportsOperationCanceled, see when_any_child. Both
-		// members are therefore touched from inside cancel()'s walk, and both must
-		// outlive it.
+		// slot and then calls m_election.elect(). What
+		// WhenAnyTest.ACancelledRaceReportsOperationCanceled observes is the body
+		// running on; the step from there to elect() is straight-line code. See
+		// when_any_child. Both members are therefore touched from inside cancel()'s
+		// walk, and both must outlive it.
 		Slots               m_slots;
 		combinator_election m_election;
 		combinator_state    m_shared;
@@ -274,8 +275,14 @@ namespace alt::detail
 	 * bodies increment a counter in the statement after their wait, and both increments
 	 * land on the cancelled path. From there to the election is the straight-line code
 	 * below -- store, then elect, with no suspension point between -- so both children
-	 * reached it. What that test cannot observe, and what await_resume's note marks as
-	 * arranged but unwitnessed, is the elected winner then being discarded.
+	 * reached it.
+	 *
+	 * That test cannot also show the elected winner being DISCARDED, because on its path
+	 * the elections happen after the await has returned.
+	 * WhenAnyTest.ACancellationDiscardsAWinnerAlreadyElected is the one that does, by
+	 * leaving a sibling outstanding that no stop can resume so the election is settled
+	 * while the chain is still parked. See await_resume's note for which half of its
+	 * verdict each of the two pins, and for the one half that still has no test.
 	 *
 	 * A child that completes by throwing stores the exception in its slot and still
 	 * elects, so it can win: the exception is then rethrown at the await, by
@@ -640,41 +647,65 @@ namespace alt::detail
 		 * stopped before it reached any suspension point is torn down at its first one
 		 * and reaches neither.)
 		 *
-		 * BUT NO PATH IN THE SHIPPED TREE ELECTS BEFORE THIS FUNCTION READS THE FLAG,
-		 * and that is the honest statement of what the order below is for. The two have
-		 * to be told apart, because an earlier draft of this note cited
-		 * WhenAnyTest.ACancelledRaceReportsOperationCanceled as the witness and that
-		 * test cannot be one:
+		 * BUT THE FLAG IS NEVER THE HALF THAT DECIDES, and that is the honest statement
+		 * of what the order below is for. Not "no path elects before the flag is read" --
+		 * every ordinary successful race elects before the read, and an earlier draft of
+		 * this note said the false thing in capitals. The claim is narrower: **wherever
+		 * cancelled() is true at this line, !waited has already returned the error.**
 		 *
-		 * - ON THE CANCELLED PATH THE ELECTIONS COME AFTER THE AWAIT HAS RETURNED. The
-		 *   chain's token holds the block's m_link, registered in await_suspend, and the
-		 *   joiner's own waiter_stop_release, registered later at the park; libstdc++
-		 *   walks that list in reverse registration order, so the joiner's release
-		 *   resumes the chain FIRST, this function takes its verdict from !waited, and
-		 *   only then does m_link fire cancel() and let the children run on and elect.
-		 *   winner() therefore still reads no_winner where the flag is read. That test
-		 *   observes the half that is observable -- both children resumed released and
-		 *   ran the statement after their co_await, so both reached their election,
-		 *   store-then-elect being straight-line code in when_any_child -- and it
-		 *   cannot tell "no winner" from "winner discarded". It is the witness for the
-		 *   premise, not for this ordering.
-		 * - A TOKEN ALREADY STOPPED WHEN await_suspend RUNS does not produce one either.
-		 *   link() fires cancel() inline, before the fan-out, so the flag is set first
-		 *   and a child with no suspension point can complete and elect during the
-		 *   fan-out -- but the park then emplaces its callback on an already-stopped
-		 *   token, the claim finds the node, m_released is set and the verdict is again
-		 *   !waited.
-		 * - WHAT WOULD PRODUCE ONE is a stop that lands after this chain was resumed
-		 *   SATISFIED and before this line reads the flag. Single-threaded that window
-		 *   does not exist: await_resume runs in the same resumption that await_suspend
-		 *   returned from. It is a cross-thread window, and nothing in the suite races
-		 *   for it.
+		 * ONE INVARIANT CARRIES THAT, rather than an enumeration of paths that would have
+		 * to be complete to be sound:
 		 *
-		 * So the discarding of an elected winner is ARRANGED BUT UNWITNESSED. Witnessing
-		 * it needs either that cross-thread race -- a child driving the counter to zero
-		 * on one thread while another requests the chain's stop, repeated until the
-		 * interleaving lands -- or the reordering named in the second bullet below,
-		 * which makes cancel() run before the joiner is claimed. Neither is in the suite.
+		 *     cancelled() can only be true because cancel() ran, and cancel() runs only
+		 *     from the block's m_link, so only because the CHAIN'S TOKEN WAS STOPPED.
+		 *     And ANY STOP BEFORE THE JOINER'S NODE IS CLAIMED YIELDS !waited -- the
+		 *     joiner's own waiter_stop_release is registered on that same token before
+		 *     the link is attempted, so it either claims a parked node and resumes the
+		 *     chain released, or claims a node not yet linked, in which case
+		 *     waiter_list::link tests the election before the condition and refuses the
+		 *     park with m_released set.
+		 *
+		 * So the only way to this line with the flag true and the wait SATISFIED is a
+		 * stop that lands after the claim and before this read. Single-threaded that
+		 * window does not exist: await_resume runs in the same resumption await_suspend
+		 * returned from. It is a cross-thread window, and nothing in the suite races for
+		 * it.
+		 *
+		 * Four shapes are illustrations of that invariant rather than a list to be
+		 * completed, and they are kept because each one was reasoned about wrongly at
+		 * some point: a stop while the joiner is parked; a token already stopped when
+		 * await_suspend runs, where link() fires cancel() inline before the fan-out and a
+		 * child with no suspension point then elects during it; a winner elected and a
+		 * sibling still outstanding when the stop arrives; and a stop landing mid-fan-out
+		 * after an early election. The invariant answers all four the same way, and would
+		 * answer a fifth nobody has thought of.
+		 *
+		 * WHAT IS WITNESSED AND WHAT IS NOT, which is two things and not one:
+		 *
+		 * - THE DISCARD IS WITNESSED, single-threaded, by
+		 *   WhenAnyTest.ACancellationDiscardsAWinnerAlreadyElected: a child completes and
+		 *   wins while a sibling that registers no stop callback stays outstanding, so the
+		 *   chain is still parked with the election settled, and the stop then makes this
+		 *   function report the cancellation instead of the winner. That is decision 2's
+		 *   actual promise -- an elected winner is discarded rather than returned -- and
+		 *   it discards through the FIRST half of the test below. Measured, so that it is
+		 *   known to be a witness rather than merely arranged as one: let an elected
+		 *   winner outrank the whole verdict -- return the assembled result ahead of both
+		 *   halves -- and that test fails 5 of 5 in debug, on its satisfied assertion,
+		 *   while it is the ONLY failure in the 789-test suite. Nothing else held this.
+		 * - THE FLAG HALF IS ARRANGED BUT UNWITNESSED, and only the flag half. Reaching
+		 *   it needs the cross-thread window above: a child driving the counter to zero on
+		 *   one thread while another requests the chain's stop, repeated until the
+		 *   interleaving lands. The alternative route is not a test anyone could write but
+		 *   a SOURCE MUTATION -- registering the link after the join park, the reordering
+		 *   the second bullet below names -- so do not go looking for a test that takes it.
+		 *
+		 * WhenAnyTest.ACancelledRaceReportsOperationCanceled witnesses neither of those.
+		 * It witnesses the PREMISE: both children resumed released and ran the statement
+		 * after their co_await, so both reached their election, store-then-elect being
+		 * straight-line code in when_any_child. It cannot tell "no winner" from "winner
+		 * discarded", because on its path the elections happen after this function has
+		 * returned.
 		 *
 		 * DO NOT delete or reorder the cancelled() test as dead code, and do not read
 		 * the measurement below as saying it is. What it says is narrower:
@@ -683,18 +714,21 @@ namespace alt::detail
 		 *   winner outranks the flag, fails nothing in the suite: 0 of 200 repeats in
 		 *   debug and 0 of 20 under each of AddressSanitizer and ThreadSanitizer, for
 		 *   each of the five WhenAnyTest tests run alone, plus one whole-suite run of all
-		 *   788 tests green in each of the three presets. That zero is the three bullets
-		 *   above restated as a measurement rather than a second finding: the FIRST half
-		 *   of the test returns the error on every path there is, so the second half is
-		 *   never the deciding one. There is no guard of record for this ordering, which
-		 *   is the state of it rather than an omission. The reason it still holds here is
-		 *   detail::when_all_awaiter::await_resume's, unchanged.
+		 *   788 tests green in each of the three presets. That zero is the invariant above
+		 *   restated as a measurement rather than a second finding: the FIRST half of the
+		 *   test returns the error wherever the flag is true, so the second half is never
+		 *   the deciding one. The figure predates
+		 *   ACancellationDiscardsAWinnerAlreadyElected, and that test does not change it:
+		 *   it too discards through the first half. There is no guard of record for the
+		 *   FLAG half, which is the state of it rather than an omission. The reason it
+		 *   still holds here is detail::when_all_awaiter::await_resume's, unchanged.
 		 * - Nothing in [stopcallback] fixes that order, which is why the flag is stored
 		 *   ahead of the children's stop in combinator_state::cancel() and read ahead of
-		 *   the election here. when_all's await_resume note measures the reordering that
+		 *   the election here. when_all's await_resume note measures a reordering that
 		 *   makes its own flag test the deciding half -- registering the link after the
-		 *   join park -- and that figure is when_all's. It was NOT repeated here, so do
-		 *   not read it as a number for this component.
+		 *   join park. That is a SOURCE MUTATION, not a shape a test can set up, and the
+		 *   figure attached to it is when_all's: it was NOT repeated here, so do not read
+		 *   it as a number for this component.
 		 *
 		 * A stop that races a completion is therefore reported as a cancellation, and a
 		 * fully assembled winner is discarded with it. That is deliberate: a caller that
