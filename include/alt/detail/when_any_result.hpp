@@ -7,9 +7,8 @@
 #include <utility>
 #include <variant>
 
-namespace alt
+namespace alt::detail
 {
-
 	/**
 	 * The value type that position i of a when_any over A contributes.
 	 *
@@ -18,6 +17,11 @@ namespace alt
 	 */
 	template<alt::awaitable A>
 	using when_any_value_t = detail::combinator_value_t<alt::await_result_t<A>>;
+
+} // namespace alt::detail
+
+namespace alt
+{
 
 	/**
 	 * The result of an argument-list when_any: which position completed first, and

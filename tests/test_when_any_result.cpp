@@ -12,7 +12,7 @@
 
 using alt::when_any_range_result;
 using alt::when_any_result;
-using alt::when_any_value_t;
+using alt::detail::when_any_value_t;
 
 // What each position of a when_any contributes: the same mapping when_all uses. The
 // const case is stated because a plain remove_cvref would silently drop it.
