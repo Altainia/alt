@@ -1383,8 +1383,11 @@ namespace
 	 * the satisfier -- so the election is over, and the satisfier won it, before the
 	 * stop exists. The child then waits to be released, which the awaiting thread does
 	 * immediately before requesting that stop, so the child's drain into the shared
-	 * block and the stop's walk of the chain still overlap: this pins which party won
-	 * the node, it does not serialize the teardown that follows.
+	 * block and the stop's walk of the chain are both in flight: this pins which party
+	 * won the node, it does not serialize the teardown that follows. That much is
+	 * arranged by the order of the two statements; that the two are still overlapping
+	 * when the stop walks is timing, and no assertion witnesses it. The test's note on
+	 * pinned_satisfied_waits says so rather than implying otherwise.
 	 *
 	 * It pins only that. Which party wins the chain's OWN joiner node, and so whether
 	 * the chain's verdict is satisfied or released, is not arranged here at all. It is
@@ -1392,9 +1395,12 @@ namespace
 	 * verdict on effectively every repeat, pinned_satisfied_waits coming out a mean of
 	 * 0.008 of 200 over 2,500 AddressSanitizer runs and 0.09 in debug, which is the
 	 * free-running phase's own rate. So the pinned phase is not a weaker sample of the
-	 * window noted on ~when_all_awaiter, which needs a released joiner over a
-	 * satisfier-won child node: it supplies that conjunction on every repeat where the
-	 * free-running phase supplies it about 2.8 times in 200 under AddressSanitizer.
+	 * window noted on ~when_all_awaiter. That window needs three things at once: a
+	 * released joiner, a satisfier-won child node, and the awaiter's release being the
+	 * block's LAST. Two of the three are observable from here, and the pinned phase has
+	 * both on every repeat where the free-running phase has them about 2.8 times in 200
+	 * under AddressSanitizer. Whether the third holds as often is not observable from a
+	 * test, so what this buys that window is an expectation and not a measured count.
 	 *
 	 * What the free-running phase is still here for is the other side of the election,
 	 * the stop winning the child's node, which it reaches on 0.19% of its repeats in
@@ -1620,8 +1626,11 @@ namespace
 		// avoids -- resume_claimed runs the child's body with no lock of this source
 		// held, and the stop's own claim on an already-claimed node returns lost ahead
 		// of any mutex -- and both waits are bounded anyway, so the cost of the wrong
-		// order would be a quiet loss of the overlap rather than a hang. Which is
-		// exactly why the test checks for that loss; see pinned_satisfied_waits below.
+		// order would be a quiet loss of the overlap rather than a hang. Quiet is the
+		// word: nothing in this file would notice, pinned_satisfied_waits least of all,
+		// since the serialized order drives that count AWAY from its bound rather than
+		// toward it. The test's note on that bound says so, and says what witnessing the
+		// overlap would actually take.
 		handshake.released.store(true, std::memory_order_release);
 
 		// Fatal rather than ADD_FAILURE, so the first broken repeat ends the phase. The
@@ -2045,11 +2054,13 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 
 	// Then the same repeat with the election pinned. This is the phase that carries the
 	// path the test exists for, entered on every repeat by construction instead of on
-	// the repeats whose timing happens to favor the satisfier. Which is also a coverage
-	// gain and not only a stabilization: the window noted on ~when_all_awaiter needs a
-	// released joiner over a satisfier-won child node, and this phase produces that
-	// conjunction 200 times per run where the free-running phase above produces it about
-	// 2.8 times under AddressSanitizer.
+	// the repeats whose timing happens to favor the satisfier. Which is plausibly a
+	// coverage gain and not only a stabilization: of the three conditions the window
+	// noted on ~when_all_awaiter needs, this phase has the two a test can see -- a
+	// released joiner over a satisfier-won child node -- on all 200 repeats, where the
+	// free-running phase above has them about 2.8 times under AddressSanitizer. The
+	// third, the awaiter's release being the block's last, is not observable from here,
+	// so that is where the gain stops being measured. See satisfier_handshake.
 	ASSERT_NO_FATAL_FAILURE(run_the_stop_race_phase(race_election::pinned, pinned));
 
 	// The self-check, and an equality rather than a lower bound. The handshake makes
@@ -2067,25 +2078,50 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// phase's mix for that reason; it is recorded below instead.
 	EXPECT_EQ(pinned.satisfier_wins, stop_race_repeats) << "a pinned repeat's child was not resumed by its satisfier, so path (a) was not entered on every one of them";
 
-	// The overlap's own witness, and a degenerate bound rather than a rate one. The
-	// pinned phase releases the child immediately BEFORE requesting the stop so that the
-	// drain and the stop overlap; a change that quietly serialized them -- releasing the
-	// child only once request_stop() had returned -- would let every one of these
-	// repeats finish its child before the stop reached the chain's joiner, making every
-	// verdict the satisfied one. Nothing else here would notice. The bound is at the
-	// full count and not at a rate for the reason the deleted EXPECT_GT is a cautionary
-	// tale: measured over 4,300 runs, this count is a mean of 0.008 of 200 under
-	// AddressSanitizer, 0.09 in debug and 0.12 under ThreadSanitizer, the highest single
-	// run anywhere being 3. 200 is not a number a timing shift can reach.
-	EXPECT_LT(pinned.satisfied_waits, stop_race_repeats) << "every pinned repeat reached a satisfied verdict, so the child's drain is no longer overlapping the stop but preceding it";
+	// A degenerate bound, and what it is a bound on is the STOP still having an effect
+	// here. Reaching stop_race_repeats means every single repeat's chain ended satisfied,
+	// which against a measured rate near zero means the stop stopped winning the chain's
+	// joiner on any repeat at all: a request_stop() that became a no-op, a stop path that
+	// no longer reaches the joiner, or a claim on it that always loses.
+	//
+	// It is NOT a witness for the overlap, which an earlier draft of this comment claimed
+	// and had backwards. Serializing the release -- publishing it only once
+	// request_stop() had returned -- holds the child BEHIND the stop, so the joiner is
+	// still parked when the stop reaches it, the verdict is the released one, and this
+	// count moves toward zero rather than toward the bound. The shipped order is the one
+	// that can produce a satisfied verdict at all, because it gives the child a head
+	// start of a few instructions. See the note below for what that leaves unwitnessed.
+	//
+	// The bound is at the full count and not at a rate for the reason the deleted
+	// EXPECT_GT is a cautionary tale: measured over 4,300 runs, this count is a mean of
+	// 0.008 of 200 under AddressSanitizer, 0.09 in debug and 0.12 under ThreadSanitizer,
+	// the highest single run anywhere being 3. 200 is not a number a timing shift can
+	// reach from there.
+	EXPECT_LT(pinned.satisfied_waits, stop_race_repeats) << "every pinned repeat ended satisfied, so no repeat's stop won the chain's joiner and the stop is no longer having any effect here";
 
 	// What neither phase checks, recorded here because it is where the next reader will
-	// look. Nothing in this test asserts that the stop had any EFFECT: a request_stop()
-	// that became a complete no-op would leave the satisfier resuming every child, every
-	// verdict satisfied -- caught by the bound above only in that degenerate form -- and
-	// the pinned phase's own equality would pass outright. The hole predates the pinned
-	// phase, the deleted EXPECT_GT having had it too, and closing it belongs with the
-	// cancellation tests rather than here.
+	// look. Two things, and the second is the more important.
+	//
+	// The stop's effect is checked only in the degenerate case. The bound above fires
+	// when NO repeat's stop won the joiner; a stop that became ineffective on some
+	// repeats and not others would leave every assertion here green, the pinned phase's
+	// own equality included. That hole predates this phase -- the deleted EXPECT_GT had
+	// it too -- and closing it belongs with the cancellation tests rather than here.
+	//
+	// And the overlap this phase is built around is ARRANGED BUT UNWITNESSED. The
+	// ordering itself is program order on one thread: pin_the_satisfiers_win stores
+	// released and only then does the caller enter request_stop(), so the child is
+	// certainly let go before the stop starts travelling the chain. Whether the child's
+	// teardown is still IN FLIGHT while that stop walks is timing, and no assertion in
+	// this file observes it. The handful of satisfied verdicts per thousand runs is not
+	// that witness either: it says the two are close enough in time for their order to
+	// vary, which overlap needs but does not follow from, a child that ran to completion
+	// before the stop was entered producing the same verdict. Witnessing it means
+	// instrumenting the library side -- ~when_all_awaiter observing the block's count
+	// above one, or a counter of the two threads' contact with it -- which is out of this
+	// test's scope. An honest "arranged but unwitnessed" is worth more here than an
+	// assertion watching the wrong variable, which is what the bound above was first
+	// written as.
 	//
 	// Recorded rather than asserted, so that a reader of a failure in either loop knows
 	// which mix of outcomes the failing run actually saw. The two phases are kept apart
