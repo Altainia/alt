@@ -279,9 +279,15 @@ namespace alt::detail
 		 *   complete() -- and when_all's only complete() that can reach a parked joiner is
 		 *   the one in on_combinator_child_complete, which calls it BEFORE its release().
 		 *   So the child that drove the count to zero still holds its reference while the
-		 *   chain runs on and while this destructor runs; the awaiter's release cannot be
-		 *   the block's last, and that path has no window at all. The only other
-		 *   complete() is the starter's, in await_suspend, which runs before the park. A
+		 *   chain runs on, and -- PROVIDED THIS DESTRUCTOR RUNS WITHIN complete()'s
+		 *   DYNAMIC EXTENT -- while this destructor runs as well, in which case the
+		 *   awaiter's release cannot be the block's last and that path has no window at
+		 *   all. That proviso is a condition on the CALLER rather than on anything here,
+		 *   and it is not always met: the ordinary auto r = co_await when_all(...);
+		 *   statement guarantees it, a full-expression holding a later suspension point
+		 *   does not. The fourth entry in the breakage list below is that shape, and on it
+		 *   the satisfied path has a window too. The only other complete() is the
+		 *   starter's, in await_suspend, which runs before the park. A
 		 *   RELEASED joiner that linked was resumed by its own waiter_stop_release: the two
 		 *   other parties that resume a joiner unsatisfied, ~completion_counter and
 		 *   ~waiter_list, can only reach one still parked when the block is destroyed,
@@ -297,7 +303,8 @@ namespace alt::detail
 		 *   alone that test reaches it 7 times in 12,000 destructions in debug and 5 times
 		 *   in 12,000 under ThreadSanitizer, still none under AddressSanitizer -- a rate
 		 *   that depends on what else the process has just been doing, which is why the
-		 *   figures differ between the two ways of running it. All twelve hits reported the
+		 *   figures differ between the two ways of running it. All thirteen hits -- the one
+		 *   whole-suite coincidence and the twelve isolated ones -- reported the
 		 *   node released rather than satisfied, which corroborates the bullet above rather
 		 *   than carrying it: the chain's own stop callback claimed the parked joiner and
 		 *   resumed the chain, and the one child's completion hook retired and released its
@@ -318,12 +325,21 @@ namespace alt::detail
 		 *   the invocation that resumed this chain, per the first bullet: it runs on this
 		 *   thread, it is past its claim, and ~std::stop_callback does not block for an
 		 *   invocation on the current thread. A second invocation is not reachable either,
-		 *   one request_stop() per stop state running the callbacks.
+		 *   one request_stop() per stop state running the callbacks. This inertness
+		 *   argument carries the first bullet's proviso with it, and fails where that
+		 *   proviso does: on a SATISFIED chain the registered callback has never run, so
+		 *   where a satisfied chain does reach here as the block's last reference, a
+		 *   racing request_stop() would invoke it against a freed list for real instead of
+		 *   meeting a same-thread invocation already past its claim.
 		 *
-		 * So this order prevents no fault that is reachable today, and the honest statement
-		 * of what it buys is: the callback is deregistered before the list can be freed by
-		 * construction, rather than by the argument above. Three changes break that
-		 * argument, and two of them are local to when_all:
+		 * So on the ordinary single-suspension co_await statement this order prevents no
+		 * fault that is reachable today. That is NOT the stronger claim that no fault is
+		 * reachable at all: the fourth entry below reaches one with a legal caller shape
+		 * and a racing stop, no change to this library required. The honest statement of
+		 * what the order buys is: the callback is deregistered before the list can be
+		 * freed by construction, rather than by the argument above. Four things break that
+		 * argument, two of the four are local to when_all, and the last needs no change
+		 * anywhere:
 		 *
 		 * - Swapping complete() and release() in on_combinator_child_complete. The
 		 *   satisfied path's immunity is exactly "the resumer still holds a reference", and
@@ -337,9 +353,33 @@ namespace alt::detail
 		 *   joiner on it, or one that parks before its fan-out has ended -- which when_any
 		 *   may -- has a claimer that is neither this thread's own callback nor an
 		 *   already-retired child.
+		 * - A CALLER whose co_await full-expression holds a SECOND suspension point. This
+		 *   one is not a change to the library: consume(co_await when_all(a, b), co_await
+		 *   other) is legal C++ today. This awaiter is a temporary of that full-expression
+		 *   -- see when_all_awaitable's note below, which says the same of the awaitable
+		 *   -- so it is destroyed only once the second suspension has resumed, which is
+		 *   long after complete() returned and the hook's release() dropped the completing
+		 *   child's reference. Compiled rather than inferred: GCC 15.2 and clang 19.1 both
+		 *   destroy the first co_await's awaiter after the second one has resumed. So on
+		 *   that shape a SATISFIED chain reaches this destructor holding the block's last
+		 *   reference, which costs the first bullet its immunity and the third bullet its
+		 *   inertness argument at once, the registered callback never having run. With the
+		 *   two statements swapped this is the cheapest fault on the list to reach: a
+		 *   legal caller shape plus a racing stop, and none of the three changes above.
 		 *
-		 * In all three the window above is a use-after-free with nothing left to argue
+		 * In all four the window above is a use-after-free with nothing left to argue
 		 * about. Keep the reset first.
+		 *
+		 * AND FOR WHOEVER WRITES when_any. If it parks more than one joiner on a counter,
+		 * or parks before its fan-out has ended, every enumeration in this note -- the two
+		 * complete() calls, the one resume_claimed that writes satisfied, the three
+		 * unsatisfied resumers, the four parties that touch the counter's list -- must be
+		 * RE-DERIVED FROM SCRATCH rather than cited. Each of them is correct today, for
+		 * when_all, and three readers checked all four; none of the three was looking at
+		 * the lifetime of the awaiter itself, which is exactly where the gap in the fourth
+		 * bullet turned out to be. An enumeration over call sites is the instrument that
+		 * already failed once in stage A, and citing one of these from a component with a
+		 * different parking shape repeats that failure at greater length.
 		 *
 		 * The ordering is also still what satisfies detail::wait_awaiter's stated
 		 * precondition locally, "the primitive must outlive every claim on its waiters":

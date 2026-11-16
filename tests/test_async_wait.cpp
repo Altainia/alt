@@ -459,7 +459,15 @@ TEST(AsyncWaitTest, ARefusedLinkDeregistersWhileAStopCallbackRunsElsewhere)
 	// that was on no list and resumed nothing, which is rule 4: a condition that
 	// refused because the primitive was satisfied is never reported cancelled, however
 	// the state word reads afterwards.
-	EXPECT_EQ(awaiter.node_state(), waiter_state::claimed);
+	//
+	// The state word itself is deliberately NOT asserted here. The in-hook spin above
+	// already waited for exactly waiter_state::claimed, and nothing on the not_linked
+	// path rewrites it -- await_suspend's tail writes m_stop, m_parked and m_released
+	// and never the node -- so an EXPECT_EQ on it could not fail once this line is
+	// reached. The failure mode it looks like it would guard is a callback that never
+	// claims the node, and that one hangs in the spin above and is reported by ctest's
+	// 60-second timeout instead. An assertion was here and was removed for being
+	// decorative rather than wrong; do not put it back without a way to make it fail.
 	EXPECT_TRUE(awaiter.await_resume().has_value());
 
 	root.destroy();

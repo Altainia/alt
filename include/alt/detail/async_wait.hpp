@@ -250,14 +250,23 @@ namespace alt::detail
 		 * that discipline by hand; nothing in this class enforces it.
 		 *
 		 * Read that destructor's note before taking its linked case for a live hazard,
-		 * though. It records that when_all cannot currently reach the fault: on a satisfied
-		 * chain the child that drove the counter to zero still holds a block reference
-		 * while the awaiter is destroyed, and on a released one the only party that could
-		 * claim the freed list is the very invocation that resumed the chain. The discipline
-		 * is kept because the argument for not needing it is an argument about who else can
-		 * claim, and a second claimer -- another waiter parked on the same primitive, a
-		 * conditional detach -- restores the fault. Which is the shape every other
-		 * wait_awaiter user should assume for itself, nothing here checking it.
+		 * though, and read the whole of it rather than this summary. It records that on the
+		 * ordinary single-suspension co_await statement when_all cannot reach the fault: on
+		 * a satisfied chain the child that drove the counter to zero still holds a block
+		 * reference while the awaiter is destroyed, and on a released one the only party
+		 * that could claim the freed list is the very invocation that resumed the chain.
+		 * The satisfied half of that carries a proviso, which is a condition on the caller
+		 * and not on anything either class can check: the awaiter dies at the end of the
+		 * co_await FULL-EXPRESSION, so a full-expression holding a second suspension point
+		 * -- consume(co_await when_all(a, b), co_await other), which is legal C++ -- lets
+		 * the resumer's reference go before the awaiter is destroyed, and a satisfied chain
+		 * reaches that destructor holding the last reference with its callback still
+		 * registered. So the fault is reachable without changing any library code; the
+		 * discipline is what keeps it unreachable. The argument for not needing the
+		 * discipline is an argument about who else can claim, and a second claimer --
+		 * another waiter parked on the same primitive, a conditional detach -- restores the
+		 * fault as well. Which is the shape every other wait_awaiter user should assume for
+		 * itself, nothing here checking it.
 		 *
 		 * @return False when the wait is already over and the coroutine should carry
 		 *         straight on, which is this function's only way to say so.

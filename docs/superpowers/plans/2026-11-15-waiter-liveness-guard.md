@@ -239,6 +239,8 @@ git commit -am "Make the branch's sanitizer and death-test notes true as written
 
 - [ ] **Step 1: Bump to 1.10.1**
 
+> **Superseded:** executed as **1.11.0** (minor), see the commit message. `sizeof(detail::waiter_list)` grows by the sentinel, and five `src/*.cpp` compile out-of-line definitions of types that embed it into `libalt`, which ships as a `.deb` — so this is an ABI break and a patch bump would have been wrong. The steps below are kept as the record of what was planned, not as the live instruction.
+
 A **patch** bump: this PR adds no public API. Decided with the author, whose minor-bump decision was made for `when_any` and applies to PR 2.
 
 `CMakeLists.txt`, `include/alt/version.hpp`, `src/version.cpp`, `tests/test_version.cpp`, `README.md`, `CLAUDE.md`.

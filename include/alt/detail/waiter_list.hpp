@@ -241,8 +241,12 @@ namespace alt::detail
 	 * only where something instrumented also touches the freed list -- the block's
 	 * refcount word, a slot's contents -- and not for the lock itself. alt::when_all's
 	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that was measured, on a
-	 * tree that had neither this sentinel nor the refused-link reset in
-	 * detail::wait_awaiter::await_suspend.
+	 * tree that had none of the three: no sentinel, no refused-link reset in
+	 * detail::wait_awaiter::await_suspend, and no ~when_all_awaiter reset ahead of its
+	 * release. All three conditions matter, because the guard is a conjunction -- see the
+	 * measurement paragraph below, which states it the same way. A tree missing only the
+	 * first two is stage A exactly as it shipped, and there this test passes and measures
+	 * nothing; naming two of the three would describe that tree instead of this one.
 	 *
 	 * m_liveness changes that in two ways, and the second is the one a reader will
 	 * otherwise assume is impossible.
@@ -276,9 +280,11 @@ namespace alt::detail
 	 * refused-link tail and ~when_all_awaiter's reset ahead of its release --
 	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked fails 20 of 20 in each of the
 	 * debug, AddressSanitizer and ThreadSanitizer builds, with no sanitizer report at
-	 * all, every failure landing on the assert below. Removing either statement alone
-	 * leaves it passing 20 of 20 in all three, so the configuration matters: that test
-	 * guards the conjunction, and its own header comment in tests/test_when_all.cpp
+	 * all, every failure landing on claim()'s assert -- not link()'s, which is the one a
+	 * reader scanning downward reaches first; tests/test_when_all.cpp names the message
+	 * exactly, "claiming an alt waiter on a destroyed list". Removing either statement
+	 * alone leaves it passing 20 of 20 in all three, so the configuration matters: that
+	 * test guards the conjunction, and its own header comment in tests/test_when_all.cpp
 	 * carries both mutations.
 	 *
 	 * The window that test reaches is destroyed, not freed: when_all_state declares
@@ -335,6 +341,10 @@ namespace alt::detail
 		 */
 		~waiter_list()
 		{
+			// DELICATE. This store is what the whole sentinel rests on: it runs before
+			// any member of this object is destroyed, which is why alive() can speak for
+			// a destroyed list at all. See m_liveness.
+			//
 			// Stored before the drain, not after: a claim racing this teardown is the
 			// hazard the precondition names, and a sentinel set afterwards would miss
 			// exactly that interleaving while catching only the easier
@@ -831,9 +841,19 @@ namespace alt::detail
 		/** What ~waiter_list writes over it, before it drains anything. */
 		static constexpr std::uint32_t dead_pattern = 0xDEAD1157U;
 
-		// DELICATE. Declaration order is load-bearing: m_liveness is declared FIRST so
-		// it is destroyed LAST, after m_mutex, which is the member a late caller would
-		// otherwise lock.
+		// DELICATE, but the delicate part is in ~waiter_list, not here. What makes the
+		// sentinel work is the destructor body's store of dead_pattern, which runs before
+		// any member is destroyed; do not move or remove it.
+		//
+		// Declaration order is defensive convention rather than load-bearing.
+		// m_liveness is declared FIRST, so it is destroyed LAST, after m_mutex -- the
+		// member a late caller would otherwise lock. That buys nothing on its own:
+		// std::atomic<std::uint32_t>'s destructor is trivial, so "destroyed last" is not
+		// an event, and the four bytes alive() reads survive member destruction either
+		// way. Nor is there anything on the other side of the order to sequence against,
+		// libstdc++'s std::mutex destructor being trivial too (see the class
+		// documentation above). Keep the position anyway, for the reader who expects the
+		// guard to precede what it guards.
 		//
 		// The member exists in every configuration and only the checks on it are
 		// assert-guarded. Making the member itself conditional on NDEBUG would change

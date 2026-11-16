@@ -27,6 +27,15 @@ namespace alt
 		// what this call buys is that the unsupported case leaks nothing, not that any
 		// particular depth of it works. The test above pins that defensive behavior and
 		// is not a statement that the behavior is promised.
+		//
+		// One level deeper is now LOUD rather than silent, which is new and worth
+		// knowing before meeting it. A waiter released by m_waiters' own destructor --
+		// that is, one released by the second round above -- which awaits this event
+		// again aborts in a debug build on detail::waiter_list's liveness assert,
+		// ~waiter_list having already stored its dead pattern before it drains. Before
+		// the sentinel the same re-await parked silently in a drained list and leaked
+		// its frame. Both are the already-unsupported case; only the failure mode
+		// changed, from quiet to a named precondition. No test in the suite reaches it.
 		detail::resume_claimed(m_waiters.detach_all(), false);
 	}
 

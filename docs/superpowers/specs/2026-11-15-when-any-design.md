@@ -127,7 +127,7 @@ own storage, inlined into the caller:
 |---|---|
 | Destroyed, not yet freed | The sentinel, and only the sentinel. `~waiter_list` has written `dead_pattern`, the bytes are intact, and no memory error exists for a tool to find. |
 | Freed, chunk still poisoned | AddressSanitizer, at `alive()`'s load, before the assert can fire. The sentinel's load is what gives the tool an instrumented access on this path; the lock alone never did. |
-| Freed, handed out again and written over | **Neither reliably.** AddressSanitizer is silent once the chunk has been handed out again. The sentinel is probabilistic here: reused bytes hold neither pattern, so `alive()` rejects them — but they can hold `alive_pattern` by chance, which is all but one value in 2^32. |
+| Freed, handed out again and written over | **Neither reliably.** AddressSanitizer is silent once the chunk has been handed out again. The sentinel is probabilistic here: reused bytes hold neither pattern, so `alive()` rejects them — but they can hold `alive_pattern` by chance, which is one value in 2^32. Put the other way round, the positive test rejects all but one value in 2^32. |
 
 Two riders. The asserts are asserts, so an `NDEBUG` build has the first window
 uncovered and loses `alive()`'s load with it, which returns the second window to exactly
@@ -219,6 +219,21 @@ is what makes that fix — and stage A's existing one — checkable rather than 
    away entirely in Release is the builder's call; the gates that matter for it are all
    Debug-based.
 
+   **PR 2 must decide this deliberately rather than discover it.** `claim`'s assert sitting
+   ahead of the election is what this decision asks for, and PR 1 pinned it there with
+   `WaiterListDeathTest.AClaimThatWouldLoseTheElectionOnADestroyedListAborts`. In `when_all`
+   that costs nothing: the only way a *benign* late-losing claim meets a dead list today is
+   inside `~waiter_list`'s backstop drain, which is non-empty only if something re-awaited
+   during the primitive's own explicit drain — already-unsupported territory. A combinator
+   that **parks more than one joiner on a counter** changes that. "A sibling's late claim
+   loses the election and touches nothing" becomes a *normal* shape during block teardown,
+   and this assert aborts on it — a benign race, reported as a precondition violation, in
+   every Debug, ASan, TSan and Coverage preset. So before `when_any` parks a second joiner,
+   choose one of: keep the assert where it is and guarantee no sibling can claim after the
+   list dies; narrow it to claims that would *win*, losing decision 8's stated reach and the
+   death test with it; or give the counter's list a lifetime that outlives every sibling
+   claim. Picking none of the three means finding out from a failing gate.
+
 9. **`wait_awaiter::await_suspend` resets `m_stop` on the refused-link path.** Verified safe
    at `include/alt/detail/async_wait.hpp:275-284`: `~stop_callback` blocks for an invocation
    on another thread and returns immediately for one on the current thread, and the only
@@ -239,13 +254,20 @@ C1 finding proves the gap without `when_any` needing to exist.
 **PR 1 — make the invisible class detectable, and close it at its source.** Decision 8's
 `waiter_list` sentinel and decision 9's refused-link reset, each with its own mutation
 evidence, plus the negative control: remove the assert, confirm the use-after-free goes
-unreported again, restore it. Re-verifies the six phase-5 components. No public API changes,
-so this takes a **patch** bump, 1.10.0 to 1.10.1 — my call, since the author's minor
-decision was made for the component.
+unreported again, restore it. Re-verifies the six phase-5 components. It adds no public API,
+but it does break ABI, so it took a **minor** bump, 1.10.0 to **1.11.0**, and 1.10.1 was
+never released. The sentinel grows `sizeof(detail::waiter_list)` — measured 64 to 72, and on
+through `async_event` 72 to 80 and every type that embeds one — and this library is not
+header-only at those types: `src/async_event.cpp`, `async_latch.cpp`, `async_mutex.cpp`,
+`async_semaphore.cpp` and `task_group.cpp` compile out-of-line definitions into `libalt`,
+which ships as a `.deb`. A layout change is therefore a real break between a prebuilt
+`libalt` and objects compiled against either header, which a patch bump would not have
+announced. (The earlier patch-bump ruling here was mine, made before the ABI reach was
+measured.)
 
 **PR 2 — `when_any`.** Everything else here, including decision 4's additive
 `combinator_state` member, decision 10's rewording across the three live files, and the
-documentation. New public API, so a **minor** bump, 1.10.1 to 1.11.0.
+documentation. New public API, so a **minor** bump, **1.11.0 to 1.12.0**.
 
 10. **Invariants (A) and (C) are sharpened here**, discharging the item stage A deferred.
     They read as near-duplicates in the combinators spec's Global Constraints, which is
