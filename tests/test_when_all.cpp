@@ -1387,12 +1387,25 @@ namespace
 	 * the node, it does not serialize the teardown that follows.
 	 *
 	 * It pins only that. Which party wins the chain's OWN joiner node, and so whether
-	 * the chain's verdict is satisfied or released, stays a race here as much as in the
-	 * free-running phase -- see the note on ~when_all_awaiter, whose window needs the
-	 * released one. That phase runs too, and first, for exactly that reason.
+	 * the chain's verdict is satisfied or released, is not arranged here at all. It is
+	 * measured, though, and it does not change: the pinned phase reaches a released
+	 * verdict on effectively every repeat, pinned_satisfied_waits coming out a mean of
+	 * 0.008 of 200 over 2,500 AddressSanitizer runs and 0.09 in debug, which is the
+	 * free-running phase's own rate. So the pinned phase is not a weaker sample of the
+	 * window noted on ~when_all_awaiter, which needs a released joiner over a
+	 * satisfier-won child node: it supplies that conjunction on every repeat where the
+	 * free-running phase supplies it about 2.8 times in 200 under AddressSanitizer.
+	 *
+	 * What the free-running phase is still here for is the other side of the election,
+	 * the stop winning the child's node, which it reaches on 0.19% of its repeats in
+	 * debug and which nothing arranges anywhere. That is its justification; the released
+	 * joiner is not.
 	 */
 	struct satisfier_handshake
 	{
+		/** The repeat this handshake belongs to, so either half's message names it. */
+		int repeat = 0;
+
 		/** Set by the child's body once some party has resumed it. */
 		std::atomic<bool> resumed{false};
 
@@ -1459,7 +1472,7 @@ namespace
 
 			if(!spin_until_for(handshake->released, satisfier_handshake_limit))
 			{
-				ADD_FAILURE() << "the awaiting thread never released the child, so this repeat's drain into the block did not overlap its stop";
+				ADD_FAILURE() << "repeat " << handshake->repeat << ": the awaiting thread never released the child, so this repeat's drain into the block did not overlap its stop";
 			}
 		}
 
@@ -1598,12 +1611,26 @@ namespace
 		// resumption just after the wait expired is never left spinning out its own
 		// limit on a flag nobody would ever publish. Its wait is bounded too, so
 		// neither half of this handshake can strand the other.
+		//
+		// Stored BEFORE the caller's request_stop() rather than after it, and that order
+		// is the whole of what makes the two overlap: a release published after
+		// request_stop() returned would hold the child until every callback on the
+		// chain's token had run, which is the serialized shape teardown_tripwire wants
+		// and the opposite of what this one does. It is not a deadlock that the order
+		// avoids -- resume_claimed runs the child's body with no lock of this source
+		// held, and the stop's own claim on an already-claimed node returns lost ahead
+		// of any mutex -- and both waits are bounded anyway, so the cost of the wrong
+		// order would be a quiet loss of the overlap rather than a hang. Which is
+		// exactly why the test checks for that loss; see pinned_satisfied_waits below.
 		handshake.released.store(true, std::memory_order_release);
 
-		if(!resumed)
-		{
-			ADD_FAILURE() << "repeat " << repeat << ": the satisfier never resumed the child, so nothing pinned which party won its node";
-		}
+		// Fatal rather than ADD_FAILURE, so the first broken repeat ends the phase. The
+		// wait above is five seconds and the phase is stop_race_repeats repeats long,
+		// so a non-fatal failure here would accumulate those bounds past this test's
+		// TIMEOUT in tests/CMakeLists.txt and report as a killed test rather than as
+		// this message. The caller runs each repeat under ASSERT_NO_FATAL_FAILURE, which
+		// is what carries this out of the loop.
+		ASSERT_TRUE(resumed) << "repeat " << repeat << ": the satisfier never resumed the child, so nothing pinned which party won its node";
 	}
 
 	/**
@@ -1724,7 +1751,7 @@ namespace
 		for(int repeat = 0; repeat < stop_race_repeats; ++repeat)
 		{
 			race_record         ran;
-			satisfier_handshake handshake;
+			satisfier_handshake handshake{.repeat = repeat};
 
 			// Constructed on every repeat and handed over only on a pinned one, which
 			// costs a raced repeat two atomic initializations of a flag its child cannot
@@ -2006,19 +2033,23 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	phase_tally raced;
 	phase_tally pinned;
 
-	// The free-running race first, and first on purpose. It is the phase that produces
-	// every interleaving this shape can reach rather than the one interleaving the test
-	// is named for -- including the stop winning the child's node, which nothing here
-	// arranges, and the released chain verdict that the window noted on
-	// ~when_all_awaiter needs. Running it ahead of the pinned phase keeps the mix it
-	// samples the mix it sampled before that phase existed, which matters because the
-	// process's very first repeat is measurably the satisfier's best one under
+	// The free-running race first, and first on purpose. What it is here for is the one
+	// interleaving nothing arranges anywhere: the STOP winning the child's node, which
+	// it reaches on 0.19% of its repeats in debug. It is not here for the released chain
+	// verdict -- the pinned phase supplies that at the same rate, measured, so crediting
+	// this phase with it would be wrong. Running it ahead of the pinned phase keeps the
+	// mix it samples the mix it sampled before that phase existed, which matters because
+	// the process's very first repeat is measurably the satisfier's best one under
 	// AddressSanitizer. See satisfier_handshake.
 	ASSERT_NO_FATAL_FAILURE(run_the_stop_race_phase(race_election::raced, raced));
 
 	// Then the same repeat with the election pinned. This is the phase that carries the
 	// path the test exists for, entered on every repeat by construction instead of on
-	// the repeats whose timing happens to favor the satisfier.
+	// the repeats whose timing happens to favor the satisfier. Which is also a coverage
+	// gain and not only a stabilization: the window noted on ~when_all_awaiter needs a
+	// released joiner over a satisfier-won child node, and this phase produces that
+	// conjunction 200 times per run where the free-running phase above produces it about
+	// 2.8 times under AddressSanitizer.
 	ASSERT_NO_FATAL_FAILURE(run_the_stop_race_phase(race_election::pinned, pinned));
 
 	// The self-check, and an equality rather than a lower bound. The handshake makes
@@ -2036,16 +2067,38 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// phase's mix for that reason; it is recorded below instead.
 	EXPECT_EQ(pinned.satisfier_wins, stop_race_repeats) << "a pinned repeat's child was not resumed by its satisfier, so path (a) was not entered on every one of them";
 
+	// The overlap's own witness, and a degenerate bound rather than a rate one. The
+	// pinned phase releases the child immediately BEFORE requesting the stop so that the
+	// drain and the stop overlap; a change that quietly serialized them -- releasing the
+	// child only once request_stop() had returned -- would let every one of these
+	// repeats finish its child before the stop reached the chain's joiner, making every
+	// verdict the satisfied one. Nothing else here would notice. The bound is at the
+	// full count and not at a rate for the reason the deleted EXPECT_GT is a cautionary
+	// tale: measured over 4,300 runs, this count is a mean of 0.008 of 200 under
+	// AddressSanitizer, 0.09 in debug and 0.12 under ThreadSanitizer, the highest single
+	// run anywhere being 3. 200 is not a number a timing shift can reach.
+	EXPECT_LT(pinned.satisfied_waits, stop_race_repeats) << "every pinned repeat reached a satisfied verdict, so the child's drain is no longer overlapping the stop but preceding it";
+
+	// What neither phase checks, recorded here because it is where the next reader will
+	// look. Nothing in this test asserts that the stop had any EFFECT: a request_stop()
+	// that became a complete no-op would leave the satisfier resuming every child, every
+	// verdict satisfied -- caught by the bound above only in that degenerate form -- and
+	// the pinned phase's own equality would pass outright. The hole predates the pinned
+	// phase, the deleted EXPECT_GT having had it too, and closing it belongs with the
+	// cancellation tests rather than here.
+	//
 	// Recorded rather than asserted, so that a reader of a failure in either loop knows
 	// which mix of outcomes the failing run actually saw. The two phases are kept apart
 	// because they are two different samples: the raced phase's wins are the build's
 	// timing, the pinned phase's are the handshake's doing, and summing them would hide
 	// the one that moves.
 	//
-	// Neither satisfied count is asserted on in either phase, and the handshake does not
-	// arrange one. Winning the child's node is not winning the chain's: an earlier draft
-	// of this test asserted on the chain's verdict and measured 0 or 1 satisfied out of
-	// 200, which reads as "the window was never hit" and is not what it means.
+	// Neither satisfied count is asserted on as a RATE, and the handshake arranges
+	// neither: the bound above is a degenerate one over the pinned count and says
+	// nothing about how often a verdict is satisfied. Winning the child's node is not
+	// winning the chain's, and an earlier draft of this test asserted on the chain's
+	// verdict and measured 0 or 1 satisfied out of 200, which reads as "the window was
+	// never hit" and is not what it means.
 	RecordProperty("satisfier_wins", raced.satisfier_wins);
 	RecordProperty("satisfied_waits", raced.satisfied_waits);
 	RecordProperty("pinned_satisfier_wins", pinned.satisfier_wins);
