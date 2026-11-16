@@ -1402,10 +1402,29 @@ namespace
 	 * under AddressSanitizer. Whether the third holds as often is not observable from a
 	 * test, so what this buys that window is an expectation and not a measured count.
 	 *
-	 * What the free-running phase is still here for is the other side of the election,
-	 * the stop winning the child's node, which it reaches on 0.19% of its repeats in
-	 * debug and which nothing arranges anywhere. That is its justification; the released
-	 * joiner is not.
+	 * THE SAME STRUCT PINS THE OTHER SIDE OF THE ELECTION, with the other pair of
+	 * parties. On race_election::stop_pinned the awaiting thread requests its stop while
+	 * the child is still parked and publishes `stopped` only once request_stop() has
+	 * returned; the party held back is the SATISFIER, waiting at the rendezvous for that
+	 * flag, and the child is handed no handshake at all, so `resumed` and `released` go
+	 * unused there. No value exists for the child's node to be claimed with until the
+	 * stop has already claimed it, so the stop wins every node by construction. That is
+	 * the witness that the stop has any effect on the child at all, and it is an equality
+	 * rather than a rate; the test's own notes say what it catches and what it does not.
+	 *
+	 * What the free-running phase is still here for, with both sides of the election now
+	 * arranged, is the CONTENTION. It is the only one of the three phases where the
+	 * satisfier's detach_one and the stop's claim reach the same node at the same time
+	 * from two threads. Both pinned elections serialize them instead: the loser arrives
+	 * at a node the winner has already taken off the list, so it loses the
+	 * compare_exchange in waiter_list::try_claim without ever having contended for it,
+	 * and a broken election could not resume the child twice on either of them -- on a
+	 * satisfier-pinned repeat the stop's claim reads a node already @c claimed, and on a
+	 * stop-pinned one the satisfier's detach_one walks a list the node has already left.
+	 * The raced phase is where check_the_race_resolved_once's "exactly one party resumed
+	 * the child" and its resumption count are claims about a contended node rather than
+	 * about a sequence. That is its justification; the released joiner is not, and
+	 * neither is the stop's side of the election any more.
 	 */
 	struct satisfier_handshake
 	{
@@ -1417,16 +1436,27 @@ namespace
 
 		/** Set by the awaiting thread immediately before it requests the stop. */
 		std::atomic<bool> released{false};
+
+		/**
+		 * Set by the awaiting thread once request_stop() has returned, which is what lets
+		 * the satisfier go on a stop-pinned repeat. Touched by nothing on the other two
+		 * elections, whose repeats run through a different function entirely; see
+		 * run_one_stop_pinned_race for why there are two.
+		 */
+		std::atomic<bool> stopped{false};
 	};
 
-	/** Whether a repeat leaves the node's election to the build or pins it. */
+	/** Whether a repeat leaves the node's election to the build or pins it, and for whom. */
 	enum class race_election : std::uint8_t
 	{
 		/** Left to the build's timing: either party may win the child's node. */
 		raced,
 
 		/** Arranged by satisfier_handshake: the satisfier wins every node. */
-		pinned
+		pinned,
+
+		/** Arranged by satisfier_handshake inverted: the stop wins every node. */
+		stop_pinned
 	};
 
 	/** What the raced child recorded about its own wait, from inside the child. */
@@ -1450,7 +1480,8 @@ namespace
 	 * A tracked task that parks on @p source and records which party resumed it.
 	 *
 	 * @p handshake is this body's half of satisfier_handshake, or null on a repeat that
-	 * leaves the election to the build.
+	 * leaves the election to the build and on a stop-pinned one, whose handshake is
+	 * between the awaiting thread and the satisfier instead. See satisfier_handshake.
 	 */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): both references are owned by the calling test, which joins the racing thread and waits for live_frames to reach zero before leaving its scope.
 	alt::task<std::expected<int, std::error_code>> tracked_source_wait(alt::task_completion_source<int>& source, child_record& child, int tag, satisfier_handshake* handshake)
@@ -1696,6 +1727,124 @@ namespace
 	}
 
 	/**
+	 * @brief Runs one repeat with the election pinned to the STOP. Asserts nothing about
+	 *        the outcome either.
+	 *
+	 * The inverted arrangement satisfier_handshake describes: the satisfier is held at
+	 * the rendezvous until request_stop() has returned, so the stop walks a chain whose
+	 * child is still parked and whose source holds no value, and the children's stop
+	 * claims the child's node on every repeat.
+	 *
+	 * A FUNCTION OF ITS OWN rather than a third branch inside run_one_stop_race, and the
+	 * reason is measured. Folding the two together needs one null-pointer test in the
+	 * satisfier's lambda, between the rendezvous and the set_value, and the raced phase
+	 * cannot afford it. Measured under AddressSanitizer, where that phase's wins are rare
+	 * enough to count: kept apart, the raced phase's satisfier wins are a mean of 2.78,
+	 * 3.13 and 3.27 of 200 across three builds of this form, with 2, 3 and 3 runs in
+	 * every 1,000 (500 for the last) scoring zero, against 2.90 of 200 with 1 run in
+	 * 1,000 scoring zero on the pre-change binary. Folded into one body, with that test
+	 * in the lambda, they collapse to a mean of 1.01 with 368 runs in 1,000 scoring zero.
+	 * The window that phase samples is a few instructions wide, so a branch the raced
+	 * repeat does not need costs it two thirds of its wins. The duplicated shape below is
+	 * the price of leaving that path byte for byte what it was; keep the two bodies apart,
+	 * and if one of them has to change, re-measure the raced phase rather than assuming
+	 * the other can follow.
+	 *
+	 * @param repeat    The repeat index, so a precondition failure names which one.
+	 * @param ran       Filled with what the child and the chain each recorded.
+	 * @param handshake The handshake whose `stopped` flag holds the satisfier back. Its
+	 *                  other two flags go unused here: the child is handed nothing,
+	 *                  because the party that must be held back is the one that would
+	 *                  otherwise win the node, and here that is the satisfier.
+	 */
+	void run_one_stop_pinned_race(const int repeat, race_record& ran, satisfier_handshake& handshake)
+	{
+		reset_coroutine_test_state();
+
+		alt::task_completion_source<int> source;
+		std::atomic<std::size_t>         arrived{0};
+
+		// Written by the satisfier and read below, after the join that orders the two.
+		// Plain rather than atomic for that reason, and for the same reason it is a bool
+		// the awaiting thread asserts on rather than a failure the satisfier reports: a
+		// fatal assertion on that thread would end its lambda and nothing else, and a
+		// non-fatal one would let every remaining repeat spend the same five seconds over
+		// again -- 200 of them, past this test's TIMEOUT in tests/CMakeLists.txt, which
+		// reports as a killed test rather than as the message that says what broke.
+		bool stop_was_reported = false;
+
+		auto handle = alt::start(one_child_root(source, ran.child, ran.parent, ran.values_seen, nullptr));
+		ASSERT_EQ(ran.parent.resumptions, 0) << "repeat " << repeat;
+		ASSERT_EQ(live_frames, 1) << "repeat " << repeat;
+
+		std::jthread satisfier{[&] {
+			rendezvous(arrived, 2);
+
+			// Bounded on this side for the reason satisfier_handshake_limit records: a
+			// change that stopped the awaiting thread from publishing its stop would turn
+			// an unbounded spin into a hang. Reaching the limit is not itself a broken
+			// stop, and the equality in the test body is what reports that: a stop that
+			// never reached the child leaves it parked, the set_value below resumes it, and
+			// that repeat counts as the satisfier's win, which is exactly what it is.
+			stop_was_reported = spin_until_for(handshake.stopped, satisfier_handshake_limit);
+
+			// A source nobody is parked on by now, the stop having taken the child's node:
+			// detach_one finds an empty list, publish() fills the store, and nothing is
+			// resumed. That is a set with no waiter and not a second set, so neither of
+			// task_completion_source's two preconditions -- setting twice, awaiting twice --
+			// is approached.
+			source.set_value(1);
+		}};
+
+		rendezvous(arrived, 2);
+		handle.request_stop();
+
+		// After request_stop() has RETURNED, which is what leaves the child parked for the
+		// stop to claim: the satisfier cannot reach the node until every callback on the
+		// chain's token has run. That is the serialized order pin_the_satisfiers_win
+		// exists to avoid, wanted here for the opposite reason -- it pins the election
+		// rather than an overlap, and there is no overlap on this election to lose.
+		//
+		// Nothing between the thread's construction and this store can fail, so this is
+		// the one statement that keeps the satisfier's bound off the clock. Deleting it
+		// is what the assertion below was measured against.
+		handshake.stopped.store(true, std::memory_order_release);
+
+		satisfier.join();
+
+		// Fatal, and after the join, so the first broken repeat ends the phase instead of
+		// the phase accumulating the bound above. The caller runs each repeat under
+		// ASSERT_NO_FATAL_FAILURE, which is what carries this out of the loop; deleting
+		// the store above ends this test in 5.01 s with exit 1 at the full repeat count,
+		// where without this assertion it runs past the 60 s TIMEOUT and is killed.
+		ASSERT_TRUE(stop_was_reported) << "repeat " << repeat << ": the awaiting thread never reported its stop, so nothing left the child parked for the stop to claim";
+	}
+
+	/**
+	 * @brief Runs whichever of the two repeats @p election calls for.
+	 *
+	 * A dispatcher rather than a branch in either body, the two runners being kept apart
+	 * for the reason run_one_stop_pinned_race records, and rather than a branch in the
+	 * phase loop below, which cannot carry one: with these two calls inlined there, each
+	 * under its own ASSERT_NO_FATAL_FAILURE, clang-tidy-19 reports
+	 * run_the_stop_race_phase at a cognitive complexity of 54 against a threshold of 25.
+	 * Measured, like the rest of this file's splits.
+	 *
+	 * A fatal failure inside either runner returns from it, then from here, and the
+	 * loop's own ASSERT_NO_FATAL_FAILURE is what ends the phase.
+	 */
+	void run_one_repeat_of(const race_election election, const int repeat, race_record& ran, satisfier_handshake& handshake)
+	{
+		if(election == race_election::stop_pinned)
+		{
+			run_one_stop_pinned_race(repeat, ran, handshake);
+			return;
+		}
+
+		run_one_stop_race(repeat, ran, election == race_election::pinned ? &handshake : nullptr);
+	}
+
+	/**
 	 * @brief Checks that exactly one party resolved the race and nothing was left behind.
 	 *
 	 * Either party may win and both are correct outcomes, so this says nothing about
@@ -1752,7 +1901,7 @@ namespace
 	 * tally travels in an out parameter rather than a return value because a
 	 * GoogleTest ASSERT_* may only appear in a function returning void.
 	 *
-	 * @param election Whether each repeat races for the child's node or pins it.
+	 * @param election Which party each repeat's node is pinned to, if either.
 	 * @param tally    Filled with what the repeats of this phase reported.
 	 */
 	void run_the_stop_race_phase(const race_election election, phase_tally& tally)
@@ -1762,18 +1911,23 @@ namespace
 			race_record         ran;
 			satisfier_handshake handshake{.repeat = repeat};
 
-			// Constructed on every repeat and handed over only on a pinned one, which
-			// costs a raced repeat two atomic initializations of a flag its child cannot
-			// reach and leaves it the repeat it was before this phase existed. Measured
-			// rather than assumed: the raced phase's own distribution is the pre-change
-			// one, a mean of 3.46 wins over 1,000 AddressSanitizer runs against 3.50 over
-			// the 500 runs measured before it.
-			satisfier_handshake* const pinned = election == race_election::pinned ? &handshake : nullptr;
-
-			// ASSERT_NO_FATAL_FAILURE, because an ASSERT_* inside run_one_stop_race returns
-			// only from that helper: a fired precondition would otherwise leave the chain it
-			// had already started parked forever and run the remaining repeats anyway.
-			ASSERT_NO_FATAL_FAILURE(run_one_stop_race(repeat, ran, pinned));
+			// Constructed on every repeat and handed to a different party by each election:
+			// to the child on a satisfier-pinned repeat, to the satisfier on a stop-pinned
+			// one, and to neither on a raced one, which costs it three atomic
+			// initializations of flags no party of it reads and leaves it the repeat it was
+			// before either pinned phase existed. Measured rather than assumed, twice: the
+			// raced phase's distribution was unchanged by the pinned phase, a mean of 3.46
+			// wins over 1,000 AddressSanitizer runs against 3.50 over the 500 measured
+			// before it, and unchanged again by the stop-pinned one, a mean of 2.78 to 3.27
+			// AddressSanitizer wins across three builds of this form against 2.90 on the
+			// pre-change binary the same afternoon. What keeping it unchanged cost is
+			// recorded on run_one_stop_pinned_race: folding these two calls into one body
+			// moves that mean to 1.01, so there are two bodies rather than one branch.
+			//
+			// ASSERT_NO_FATAL_FAILURE, because an ASSERT_* inside either runner returns only
+			// from that helper: a fired precondition would otherwise leave the chain it had
+			// already started parked forever and run the remaining repeats anyway.
+			ASSERT_NO_FATAL_FAILURE(run_one_repeat_of(election, repeat, ran, handshake));
 			check_the_race_resolved_once(repeat, ran);
 			check_the_race_reported_consistently(repeat, ran);
 
@@ -2041,15 +2195,25 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 {
 	phase_tally raced;
 	phase_tally pinned;
+	phase_tally stop_pinned;
 
-	// The free-running race first, and first on purpose. What it is here for is the one
-	// interleaving nothing arranges anywhere: the STOP winning the child's node, which
-	// it reaches on 0.19% of its repeats in debug. It is not here for the released chain
-	// verdict -- the pinned phase supplies that at the same rate, measured, so crediting
-	// this phase with it would be wrong. Running it ahead of the pinned phase keeps the
-	// mix it samples the mix it sampled before that phase existed, which matters because
-	// the process's very first repeat is measurably the satisfier's best one under
-	// AddressSanitizer. See satisfier_handshake.
+	// The free-running race first, and first on purpose. What it is here for is the
+	// CONTENTION, which neither pinned phase below has any of: it is the only phase where
+	// the satisfier's detach_one and the stop's claim reach the same node at the same
+	// time from two threads, so it is the only one where "exactly one party resumed the
+	// child" is a claim about a contended node rather than about a sequence.
+	//
+	// It is NOT here for either side of the election any more. The satisfier's side is
+	// arranged by the pinned phase and the stop's by the stop-pinned phase, each on every
+	// repeat; this phase reaches the stop's side on 0.13% of its repeats in debug -- a
+	// mean of 199.73 satisfier wins of 200 over 1,000 runs -- which was its stated
+	// justification until that third phase landed and is no longer worth anything on its
+	// own. Nor is it here for the released chain verdict -- the pinned phase
+	// supplies that at the same rate, measured, so crediting this phase with it would be
+	// wrong. Running it ahead of both pinned phases keeps the mix it samples the mix it
+	// sampled before either of them existed, which matters because the process's very
+	// first repeat is measurably the satisfier's best one under AddressSanitizer. See
+	// satisfier_handshake.
 	ASSERT_NO_FATAL_FAILURE(run_the_stop_race_phase(race_election::raced, raced));
 
 	// Then the same repeat with the election pinned. This is the phase that carries the
@@ -2062,6 +2226,17 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// third, the awaiter's release being the block's last, is not observable from here,
 	// so that is where the gain stops being measured. See satisfier_handshake.
 	ASSERT_NO_FATAL_FAILURE(run_the_stop_race_phase(race_election::pinned, pinned));
+
+	// And the same repeat with the election pinned the other way, which is where the
+	// STOP's effect is asserted instead of sampled. The satisfier is held at the
+	// rendezvous until request_stop() has returned, so the stop walks a chain whose child
+	// is still parked and whose source holds no value: the children's stop claims the
+	// child's node on every repeat, and the satisfier then sets a source nobody is parked
+	// on, which is a set with no waiter rather than a second set -- detach_one finds an
+	// empty list and the double-set assert in task_completion_source::publish is not
+	// approached. Last of the three because the two phases above sample timing and this
+	// one samples nothing. See satisfier_handshake.
+	ASSERT_NO_FATAL_FAILURE(run_the_stop_race_phase(race_election::stop_pinned, stop_pinned));
 
 	// The self-check, and an equality rather than a lower bound. The handshake makes
 	// the satisfier the only party that can have resumed the child, so every pinned
@@ -2078,11 +2253,14 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// phase's mix for that reason; it is recorded below instead.
 	EXPECT_EQ(pinned.satisfier_wins, stop_race_repeats) << "a pinned repeat's child was not resumed by its satisfier, so path (a) was not entered on every one of them";
 
-	// A degenerate bound, and what it is a bound on is the STOP still having an effect
-	// here. Reaching stop_race_repeats means every single repeat's chain ended satisfied,
-	// which against a measured rate near zero means the stop stopped winning the chain's
-	// joiner on any repeat at all: a request_stop() that became a no-op, a stop path that
-	// no longer reaches the joiner, or a claim on it that always loses.
+	// A degenerate bound, and what it is a bound on is the stop still having an effect on
+	// THIS phase's repeats. Reaching stop_race_repeats means every single repeat's chain
+	// ended satisfied, which against a measured rate near zero means the stop stopped
+	// winning the chain's joiner on any repeat at all: a request_stop() that became a
+	// no-op, a stop path that no longer reaches the joiner, or a claim on it that always
+	// loses. The stop's effect in general is asserted two assertions below, structurally
+	// and per repeat, which is what this bound was the only check on until the stop-pinned
+	// phase existed.
 	//
 	// It is NOT a witness for the overlap, which an earlier draft of this comment claimed
 	// and had backwards. Serializing the release -- publishing it only once
@@ -2099,17 +2277,57 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// reach from there.
 	EXPECT_LT(pinned.satisfied_waits, stop_race_repeats) << "every pinned repeat ended satisfied, so no repeat's stop won the chain's joiner and the stop is no longer having any effect here";
 
-	// What neither phase checks, recorded here because it is where the next reader will
-	// look. Two things, and the second is the more important.
+	// The witness that the stop had an effect, which is the hole the note below used to
+	// record as open. Zero rather than a lower bound on the stop's wins, and an equality
+	// for the same reason the pinned phase's is: on this election the satisfier cannot
+	// reach the child's node until request_stop() has returned, so one win is one repeat
+	// on which the stop reached neither the block's cancel() nor the child's own node,
+	// structurally and not as a sampling shortfall.
 	//
-	// The stop's effect is checked only in the degenerate case. The bound above fires
-	// when NO repeat's stop won the joiner; a stop that became ineffective on some
-	// repeats and not others would leave every assertion here green, the pinned phase's
-	// own equality included. That hole predates this phase -- the deleted EXPECT_GT had
-	// it too -- and closing it belongs with the cancellation tests rather than here.
+	// What it catches that the two assertions above do not: a stop that stops reaching
+	// the CHILDREN while still releasing the chain. Deleting the link(context->token)
+	// line in when_all_awaiter::await_suspend is that mutation, and it takes this count
+	// from 0 to 200 of 200 in the debug, AddressSanitizer, ThreadSanitizer and optimized
+	// presets alike, 10 runs of each, while leaving every other assertion in this test
+	// green: the joiner's own callback still releases the chain, so the bound above stays
+	// satisfied, and the satisfier still wins every pinned child. Eight other tests in
+	// the suite catch that mutation too, so what this buys is this test failing for the
+	// right reason rather than the suite noticing at all.
 	//
-	// And the overlap this phase is built around is ARRANGED BUT UNWITNESSED. The
-	// ordering itself is program order on one thread: pin_the_satisfiers_win stores
+	// What it does NOT catch, and what does: a stop that reaches the child's node and
+	// then resumes nothing leaves the child parked rather than satisfier-won, so this
+	// count stays 0 and it is check_the_race_resolved_once's resumption count and
+	// live_frames that report it -- measured, by returning early from
+	// detail::waiter_stop_release::operator() on a won claim. Neither does this phase say
+	// anything about the stop under CONTENTION, having none: a stop that only lost a
+	// contended claim it used to win would show up, if anywhere, in the raced phase's
+	// recorded mix.
+	EXPECT_EQ(stop_pinned.satisfier_wins, 0) << "a stop-pinned repeat's child was resumed by its satisfier, so on that repeat the stop reached neither the block's cancel() nor the child's node";
+
+	// And the verdict on the same repeats, which is an equality here where the pinned
+	// phase's is a degenerate bound. A stop-pinned repeat cannot report a satisfied wait:
+	// combinator_state::cancel() marks the block cancelled before it requests the
+	// children's stop, and when_all_awaiter::await_resume reports released on that flag
+	// whatever the counter's own verdict was, so a child resumed by the children's stop
+	// can only produce a released wait. The free-running and satisfier-pinned phases
+	// cannot assert this, their child being resumed by a satisfier that may beat cancel()
+	// outright.
+	//
+	// It fires when neither the chain's joiner nor the block's cancel() saw the stop at
+	// all -- a request_stop() that became a no-op outright, which is also the only thing
+	// the bound above can catch -- so what this adds over that bound is the full count's
+	// worth of agreement no longer being needed for it to fire.
+	EXPECT_EQ(stop_pinned.satisfied_waits, 0) << "a stop-pinned repeat reported a satisfied wait, so neither the chain's joiner nor the block's cancel() saw the stop on it";
+
+	// What no phase checks, recorded here because it is where the next reader will look.
+	//
+	// The overlap the satisfier-pinned phase is built around is ARRANGED BUT UNWITNESSED,
+	// and the stop-pinned phase deliberately has no overlap to witness: it holds the
+	// satisfier until request_stop() has returned, which is the serialized order
+	// pin_the_satisfiers_win exists to avoid, chosen there because what it pins is the
+	// election and not an overlap.
+	//
+	// The ordering itself is program order on one thread: pin_the_satisfiers_win stores
 	// released and only then does the caller enter request_stop(), so the child is
 	// certainly let go before the stop starts travelling the chain. Whether the child's
 	// teardown is still IN FLIGHT while that stop walks is timing, and no assertion in
@@ -2123,15 +2341,19 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// assertion watching the wrong variable, which is what the bound above was first
 	// written as.
 	//
-	// Recorded rather than asserted, so that a reader of a failure in either loop knows
-	// which mix of outcomes the failing run actually saw. The two phases are kept apart
-	// because they are two different samples: the raced phase's wins are the build's
-	// timing, the pinned phase's are the handshake's doing, and summing them would hide
-	// the one that moves.
+	// Recorded rather than asserted, so that a reader of a failure in any of the three
+	// loops knows which mix of outcomes the failing run actually saw. The phases are kept
+	// apart because they are three different samples: the raced phase's wins are the
+	// build's timing, the other two are each handshake's doing, and summing them would
+	// hide the one that moves. Only the raced phase's two numbers are a sample at all:
+	// the four below them are three asserted equalities and the one degenerate bound,
+	// recorded so that a reader of a failure sees what the run actually reported rather
+	// than only which equality it missed.
 	//
-	// Neither satisfied count is asserted on as a RATE, and the handshake arranges
-	// neither: the bound above is a degenerate one over the pinned count and says
-	// nothing about how often a verdict is satisfied. Winning the child's node is not
+	// No satisfied count is asserted on as a RATE, and no handshake arranges one: the
+	// pinned phase's bound is a degenerate one and the stop-pinned phase's equality is
+	// the cancelled flag's doing, neither saying anything about how OFTEN a verdict is
+	// satisfied where both outcomes are reachable. Winning the child's node is not
 	// winning the chain's, and an earlier draft of this test asserted on the chain's
 	// verdict and measured 0 or 1 satisfied out of 200, which reads as "the window was
 	// never hit" and is not what it means.
@@ -2139,6 +2361,8 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	RecordProperty("satisfied_waits", raced.satisfied_waits);
 	RecordProperty("pinned_satisfier_wins", pinned.satisfier_wins);
 	RecordProperty("pinned_satisfied_waits", pinned.satisfied_waits);
+	RecordProperty("stop_pinned_satisfier_wins", stop_pinned.satisfier_wins);
+	RecordProperty("stop_pinned_satisfied_waits", stop_pinned.satisfied_waits);
 }
 
 TEST_F(WhenAllTest, AHomeSchedulerDefersTheParentsDestructionPastItsChildrens)
