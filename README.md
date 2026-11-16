@@ -118,11 +118,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.11.1_amd64.deb` in the project root:
+Produces `altlib_1.12.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.11.1_amd64.deb
+sudo dpkg -i altlib_1.12.0_amd64.deb
 ```
 
 ## Using in your project
@@ -130,15 +130,15 @@ sudo dpkg -i altlib_1.11.1_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.11.1 REQUIRED)
+find_package(Alt 1.12.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release, because the
 inline sizes of the async primitives can change between minors. The package config
-enforces this: requesting `1.11.0` accepts 1.11.0 and later 1.11.x releases, but rejects
-1.12.0 and 1.10.x, and a request for a higher patch than the installed one (1.11.1
-against 1.11.0) also fails. Update the requested version when you upgrade across a minor
+enforces this: requesting `1.12.0` accepts 1.12.0 and later 1.12.x releases, but rejects
+1.13.0 and 1.11.x, and a request for a higher patch than the installed one (1.12.1
+against 1.12.0) also fails. Update the requested version when you upgrade across a minor
 release.
 
 Then include headers as needed:

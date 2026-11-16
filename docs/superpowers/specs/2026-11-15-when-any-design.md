@@ -267,7 +267,7 @@ measured.)
 
 **PR 2 — `when_any`.** Everything else here, including decision 4's additive
 `combinator_state` member, decision 10's rewording across the three live files, and the
-documentation. New public API, so a **minor** bump, **1.11.0 to 1.12.0**.
+documentation. New public API, so a **minor** bump, **1.11.1 to 1.12.0**.
 
 10. **Invariants (A) and (C) are sharpened here**, discharging the item stage A deferred.
     They read as near-duplicates in the combinators spec's Global Constraints, which is

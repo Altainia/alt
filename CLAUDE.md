@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.11.1`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.12.0`.
 
 ## Directory layout
 
@@ -152,22 +152,22 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.11.1_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.12.0_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.11.1 REQUIRED)
+find_package(Alt 1.12.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release: the inline
 sizes of the async primitives (`async_event`, `async_mutex`, `task_group`, ...) can
-change between minors. The package config enforces this: `find_package(Alt 1.11.0)`
-accepts 1.11.0 and later 1.11.x releases, but rejects 1.12.0 and 1.10.x, and a request for
-a higher patch than the installed one (1.11.1 against 1.11.0) also fails. When upgrading
+change between minors. The package config enforces this: `find_package(Alt 1.12.0)`
+accepts 1.12.0 and later 1.12.x releases, but rejects 1.13.0 and 1.11.x, and a request for
+a higher patch than the installed one (1.12.1 against 1.12.0) also fails. When upgrading
 across a minor release, update the version your project requests.
 
 ## Coding guidelines
@@ -216,8 +216,8 @@ increase. All six of these files change together:
 | `include/alt/version.hpp` | `ALT_VERSION_MAJOR/MINOR/PATCH` macros and constexpr variables |
 | `src/version.cpp` | String returned by `version()` |
 | `tests/test_version.cpp` | Expected major/minor/patch values and the version string |
-| `README.md` | All occurrences of the version string |
-| `CLAUDE.md` | All occurrences of the version string |
+| `README.md` | Project version occurrences. The `find_package` compatibility example's operands illustrate the rule, not this release: adjust them so the prose still agrees with the snippet above it |
+| `CLAUDE.md` | Same as `README.md`: project version occurrences move; keep the compatibility example consistent with the `find_package` snippet above it |
 
 ## Conventions
 
