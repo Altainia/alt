@@ -67,7 +67,7 @@ namespace alt
 	 * chain cannot create the sibling hazard, because a task is lazy and owns only the
 	 * child it awaits, and a task_group's tasks are self-owning roots it never destroys.
 	 * alt::when_all (see include/alt/when_all.hpp) adds a combinator to that picture and
-	 * does not create the hazard either. Three invariants carry that, labelled as
+	 * does not create the hazard either. Three invariants carry that, labeled as
 	 * alt::when_all's own documentation and docs/when_all.md label them, so that a
 	 * reader arriving from either can check the one they came for:
 	 *

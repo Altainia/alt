@@ -9,6 +9,7 @@
 #include <alt/task_completion_source.hpp>
 #include <alt/when_all.hpp>
 #include <atomic>
+#include <chrono>
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
@@ -72,6 +73,39 @@ namespace
 				std::this_thread::yield();
 			}
 		}
+	}
+
+	/**
+	 * Spins until @p flag is set or @p limit has elapsed, whichever comes first.
+	 *
+	 * For waits whose flag is published by a rendezvous that a future change could stop
+	 * matching: an unbounded spin turns that into a hang, which CI reports as a timeout
+	 * and not as a message. The clock is read only once the spin has fallen back to
+	 * yielding, so the fast path is spin_until's own.
+	 *
+	 * @return true if the flag was set, false if the limit elapsed first.
+	 */
+	[[nodiscard]] bool spin_until_for(const std::atomic<bool>& flag, const std::chrono::steady_clock::duration limit)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + limit;
+
+		for(int spins = 0; !flag.load(std::memory_order_acquire);)
+		{
+			if(spins < spin_limit)
+			{
+				++spins;
+			}
+			else if(std::chrono::steady_clock::now() >= deadline)
+			{
+				return false;
+			}
+			else
+			{
+				std::this_thread::yield();
+			}
+		}
+
+		return true;
 	}
 
 	/** A task that completes synchronously with @p value. */
@@ -448,7 +482,9 @@ namespace
 		EXPECT_TRUE(record.satisfied) << "attempt " << attempt;
 		EXPECT_EQ(std::get<0>(values), 1) << "attempt " << attempt;
 		EXPECT_EQ(std::get<1>(values), 2) << "attempt " << attempt;
-		EXPECT_EQ(live_frames, 0) << "attempt " << attempt;
+
+		// No live_frames assertion: no coroutine on this path owns a frame_tracker, so
+		// the counter reads 0 whatever the code does and the assertion could not fail.
 
 		return record.resumed_on != std::this_thread::get_id();
 	}
@@ -1543,6 +1579,9 @@ namespace
 	/** How many times the teardown-against-stop handshake repeats. */
 	constexpr int teardown_race_repeats = 50;
 
+	/** How long the stop thread waits for the tripwire before calling the window unopened. */
+	constexpr std::chrono::seconds teardown_rendezvous_limit{5};
+
 	/** The value the tripwire child produces, read back by the chain out of its slot. */
 	constexpr int tripwire_tag = 71;
 
@@ -1574,8 +1613,10 @@ namespace
 	 * released here reaches a waiter_list that has been destroyed, which is what the
 	 * reset in ~when_all_awaiter prevents. The same window a few hundred nanoseconds
 	 * later, with the storage freed rather than merely destroyed, is reachable only by
-	 * timing -- see the note on the test -- and no rendezvous a test can write lands
-	 * there, because nothing of ours runs between that free and ~m_stop.
+	 * timing and no rendezvous a test can write lands there, because nothing of ours
+	 * runs between that free and ~m_stop. The note on
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked says what that leaves the test
+	 * able to claim, and agrees with this one.
 	 *
 	 * Only the copy in the block -- tripwire_block_hops moves from the child's own
 	 * result -- releases the stop thread and holds the teardown open. The child's
@@ -1745,7 +1786,20 @@ namespace
 		// for nothing the chain holds, so the handshake cannot deadlock.
 		std::jthread stopper{[&] {
 			rendezvous(arrived, 2);
-			spin_until(reached);
+
+			// Bounded, because `reached` is published only by the tripwire whose hop
+			// count equals tripwire_block_hops. If a change moves the slot's copy off
+			// that count nothing publishes it, and an unbounded wait would hang the
+			// suite instead of failing it. The tripwire's own wait on `stopped` is
+			// entered only after it published `reached`, so giving up here strands
+			// nobody.
+			if(!spin_until_for(reached, teardown_rendezvous_limit))
+			{
+				ADD_FAILURE() << "the teardown tripwire never matched tripwire_block_hops, so the window was never opened and this repeat guarded nothing; "
+				                 "the slot's copy of the child's result is no longer that many moves from the child's own";
+				return;
+			}
+
 			external.request_stop();
 			stopped.store(true, std::memory_order_release);
 		}};
@@ -1975,37 +2029,52 @@ TEST_F(WhenAllTest, ANestedWhenAllInsideAChildIsItsOwnRoot)
 // The window ~when_all_awaiter's m_join.reset() closes, built on purpose rather than
 // hoped for. Read that destructor's note first; this is its guard of record.
 //
-// READ THIS BEFORE TRUSTING A GREEN RUN. Its assertions below cannot fail on the
-// mutation it exists for -- moving the reset below the release, which is the order this
-// branch shipped with until the final review -- and neither sanitizer reports it either:
-// measured 0 failures and 0 hangs in 20 repeats of this test alone in each of the debug,
-// AddressSanitizer and ThreadSanitizer builds, and a full suite run of 763 passes in each
-// of the two sanitizer presets with the mutation in place. That is not evidence the order
-// does not matter, and the reason it is not is specific and worth knowing:
+// READ THIS BEFORE TRUSTING A GREEN RUN. Its assertions cannot fail on the mutation it
+// exists for -- moving the reset below the release, which is the order this branch
+// shipped with until the final review -- and they cannot be made to. Measured: 0
+// failures and 0 hangs in 20 repeats of this test alone in each of the debug,
+// AddressSanitizer and ThreadSanitizer builds with the mutation in place, and a full
+// suite run of 763 passes in each of the two sanitizer presets. That is not evidence the
+// order does not matter. The reason it is not is specific.
 //
-// On the mutated order the still-registered waiter_stop_release runs
-// waiter_list::claim over the freed block, and claim touches the list through exactly
-// one thing -- std::scoped_lock over the list's std::mutex, whose lock and unlock are
-// glibc's pthread_mutex_lock and pthread_mutex_unlock. Neither sanitizer instruments
-// glibc, so the write into the freed block is made by code they do not watch; and
-// libstdc++'s std::mutex destructor is trivial, so no pthread_mutex_destroy is
-// intercepted either. The rest of the callback's work is on the node, which lives in the
-// chain's own frame and is still alive. So the bug is a write to freed heap memory with
-// no instrumented access anywhere on its path.
+// What this test's handshake reaches. when_all_state declares m_slots and then m_shared,
+// so ~combinator_state -- and with it the completion counter and its waiter_list -- runs
+// BEFORE the slots are destroyed, and the operator delete that frees the storage runs
+// after both. The tripwire lives in a result slot (see teardown_tripwire, which says the
+// same), so the handshake lands the concurrent request_stop() after the waiter_list's
+// lifetime has ended and BEFORE its storage is freed. That is formally undefined
+// behavior and operationally a no-op: libstdc++'s std::mutex destructor is trivial and
+// the bytes are still intact, so the callback's lock and unlock act on memory that is
+// still allocated. There is no memory error in that window for any tool to report, which
+// is why this test's zeros are what they are. No instrumentation is blind to anything
+// here, and no assertion can see a lifetime violation that changes no byte.
 //
-// What was measured directly, by adding a timestamped print to
-// waiter_stop_release::operator() and to when_all_state::destroy in a scratch build: on
-// the mutated order the callback's claim is entered after the block's operator delete
-// has returned, with the list pointer inside the freed block (list=0x...11f0 within
-// block=0x...11c0) and AddressSanitizer reporting nothing. The window is real and this
-// test reaches it; the instruments are blind to it.
+// What it does not reach. The window the mutation opens in the shipped order's place --
+// the callback's claim entered after the block's operator delete has returned -- is a few
+// hundred nanoseconds later, and no rendezvous a test can write lands there: nothing of
+// ours runs between the free and ~m_stop. That window was reached once, by a different
+// instrument than this test's handshake: a timestamped print in
+// waiter_stop_release::operator() and in when_all_state::destroy, plus a library-side
+// hold, in a scratch build. The trace showed the claim entered with the list pointer
+// inside the freed block (list=0x...11f0 within block=0x...11c0) and AddressSanitizer
+// reporting nothing. This test's green runs are not that evidence and do not reproduce
+// it.
 //
-// So what this test contributes is the window itself, deterministically: a
+// Why the real post-free window would also go unreported, which is the reason a green
+// sanitizer run is not exoneration: claim touches the list through exactly one thing,
+// std::scoped_lock over the list's std::mutex, whose lock and unlock are glibc's
+// pthread_mutex_lock and pthread_mutex_unlock. Neither sanitizer instruments glibc, the
+// trivial std::mutex destructor means no pthread_mutex_destroy is intercepted, and
+// ThreadSanitizer drops its synchronization variables on free. The rest of the
+// callback's work is on the node, which lives in the chain's own frame and is still
+// alive. So the freed-heap write has no instrumented access anywhere on its path.
+//
+// So what this test contributes is the window it does build, deterministically: a
 // cancellable_task root, every child retired before the join could link, and a
-// concurrent request_stop() that is made to land inside the block's teardown by a
-// handshake rather than by timing. No other test in the suite puts those three together.
-// Keep it, and keep the mutation named here, because the next reader will otherwise find
-// a green sanitizer run and conclude the reset is redundant.
+// concurrent request_stop() made to land inside the block's teardown by a handshake
+// rather than by timing, 50 repeats per preset. No other test in the suite puts those
+// together. Keep it, and keep the mutation named here, because the next reader will
+// otherwise find a green sanitizer run and conclude the reset is redundant.
 TEST_F(WhenAllTest, AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked)
 {
 	for(int repeat = 0; repeat < teardown_race_repeats; ++repeat)

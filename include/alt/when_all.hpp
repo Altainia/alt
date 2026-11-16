@@ -418,13 +418,14 @@ namespace alt::detail
 			// why it is single-threaded now.
 			//
 			// The park is load-bearing far beyond that one test. Run each of the 35
-			// WhenAllTest tests alone against the same mutation and 16 of them abort
-			// outright, all on one assert -- result_store's "reading an alt coroutine
-			// result before it was produced" in coroutine.hpp -- because a chain that
-			// carries on without parking assembles slots no child has filled. The 16 are
-			// exactly the tests whose children park: every test in which a child's
-			// completion, a stop or a scheduler drain is what resumes the chain. The 18
-			// that still pass are the ones whose children all retire inside the fan-out,
+			// WhenAllTest tests alone against the same mutation and they split 16 / 1 /
+			// 18. Sixteen abort outright, all on one assert -- result_store's "reading an
+			// alt coroutine result before it was produced" in coroutine.hpp -- because a
+			// chain that carries on without parking assembles slots no child has filled.
+			// One fails: the test named above, on the assertions named above. Together
+			// those 17 are exactly the tests whose children park: every test in which a
+			// child's completion, a stop or a scheduler drain is what resumes the chain.
+			// The 18 that still pass are the ones whose children all retire inside the fan-out,
 			// where the park has nothing to wait for, which is also why
 			// EveryChildAlreadySatisfiedCompletesWithoutSuspending cannot guard this. The
 			// list is reproducible from this paragraph rather than cited: no measurement
