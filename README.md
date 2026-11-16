@@ -118,11 +118,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.9.0_amd64.deb` in the project root:
+Produces `altlib_1.10.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.9.0_amd64.deb
+sudo dpkg -i altlib_1.10.0_amd64.deb
 ```
 
 ## Using in your project
@@ -130,7 +130,7 @@ sudo dpkg -i altlib_1.9.0_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.9.0 REQUIRED)
+find_package(Alt 1.10.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
@@ -175,3 +175,4 @@ Then include headers as needed:
 | `<alt/async_mutex.hpp>` | Mutual exclusion that blocks no thread, with an RAII guard: `async_mutex`, `async_mutex_lock` | [docs/async_mutex.md](docs/async_mutex.md) |
 | `<alt/task_completion_source.hpp>` | The bridge from a callback to an await: `task_completion_source`, `completion_result` | [docs/task_completion_source.md](docs/task_completion_source.md) |
 | `<alt/task_group.hpp>` | The owner's teardown point for spawned tasks: `task_group` | [docs/task_group.md](docs/task_group.md) |
+| `<alt/when_all.hpp>` | Awaits several awaitables concurrently and yields every result: `when_all` | [docs/when_all.md](docs/when_all.md) |

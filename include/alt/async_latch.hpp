@@ -63,17 +63,34 @@ namespace alt
 	 * looks like: every waiter is leaving.
 	 *
 	 * That first rule is why count_down() can resume its waiters from one multi-node
-	 * chain (detach_all) instead of one detach_one at a time: nothing in the library
-	 * lets one waiter own a sibling's frame, because there is no when_all or race
-	 * combinator and a task is lazy and owns only the child it awaits. Revisit the day
-	 * such a combinator lands: every multi-node resumption in the library would need
-	 * the same revisit, which is async_event::set, this count_down,
-	 * async_semaphore::release -- which wins its waiters one detach_one at a time but
-	 * resumes them as one chain -- and all four destructors, including the
+	 * chain (detach_all) instead of one detach_one at a time. An ordinary awaiting
+	 * chain cannot create the sibling hazard, because a task is lazy and owns only the
+	 * child it awaits, and a task_group's tasks are self-owning roots it never destroys.
+	 * alt::when_all (see include/alt/when_all.hpp) adds a combinator to that picture and
+	 * does not create the hazard either. Three invariants carry that, labeled as
+	 * alt::when_all's own documentation and docs/when_all.md label them, so that a
+	 * reader arriving from either can check the one they came for:
+	 *
+	 * - (A) The combinator never owns or destroys a child frame; it only ever requests
+	 *   stops, and the children are self-owning alt::cancellable_task roots.
+	 * - (B) The claim election cannot free an already-claimed node: a loser whose node a
+	 *   satisfier already won loses the compare-and-swap in waiter_list::claim, so its
+	 *   waiter_stop_release resumes and frees nothing; the only way a child frame dies is
+	 *   the child itself running, which happens only when the walk reaches it.
+	 * - (C) The combinator never destroys a child, though it may resume the awaiting
+	 *   chain while children are still alive; (A) is what makes that safe for the
+	 *   sibling hazard.
+	 *
+	 * The four components that resume a multi-node chain are async_event::set, this
+	 * count_down, async_semaphore::release -- which wins its waiters one detach_one at a
+	 * time but resumes them as one chain -- and all four destructors, including the
 	 * ~waiter_list backstop each of them runs ahead of, which walks a multi-node chain
-	 * of its own and is reachable only through those four. Resuming one node per
-	 * detach, and not holding the next node across a resumption, is what each of them
-	 * would have to change to.
+	 * of its own and is reachable only through those four. What protects them is (A) and
+	 * (B) -- those two facts about ownership and the claim -- not the absence of a
+	 * combinator, so the arrival of one did not force a revisit. A change to
+	 * waiter_list::claim or to resume_claimed would: resuming one node per detach, and
+	 * not holding the next node across a resumption, is what each of them would then
+	 * have to change to.
 	 */
 	class async_latch
 	{
