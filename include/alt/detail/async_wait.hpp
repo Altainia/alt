@@ -246,8 +246,18 @@ namespace alt::detail
 		 * leaves no callback behind to deregister -- and the other half is not: a joiner
 		 * that did link holds its callback until the awaiter dies, which is after
 		 * await_resume and after the last reference to the block would otherwise go. So
-		 * an owner that frees the primitive from inside its own awaiter still has to
-		 * keep that discipline by hand; nothing in this class enforces it.
+		 * an owner that frees the primitive from inside its own awaiter still has to keep
+		 * that discipline by hand; nothing in this class enforces it.
+		 *
+		 * Read that destructor's note before taking its linked case for a live hazard,
+		 * though. It records that when_all cannot currently reach the fault: on a satisfied
+		 * chain the child that drove the counter to zero still holds a block reference
+		 * while the awaiter is destroyed, and on a released one the only party that could
+		 * claim the freed list is the very invocation that resumed the chain. The discipline
+		 * is kept because the argument for not needing it is an argument about who else can
+		 * claim, and a second claimer -- another waiter parked on the same primitive, a
+		 * conditional detach -- restores the fault. Which is the shape every other
+		 * wait_awaiter user should assume for itself, nothing here checking it.
 		 *
 		 * @return False when the wait is already over and the coroutine should carry
 		 *         straight on, which is this function's only way to say so.

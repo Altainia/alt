@@ -688,9 +688,10 @@ TEST(WaiterList, DestroyingTheListWithLinkedNodesLeavesNoneLinked)
 	EXPECT_FALSE(second.satisfied);
 }
 
-// The suite's first death tests, and they are here because waiter_list is the one place
-// in the library where the mistake they catch is reachable while no tool is looking at
-// it.
+// The suite's first EXPECT_DEATH cases -- tests/test_async_wait.cpp's EXPECT_EXIT is a
+// death test too, and landed one commit ahead of the third case below -- and they are
+// here because waiter_list is the one place in the library where the mistake they catch
+// is reachable while no tool is looking at it.
 //
 // What they pin. Every public member of waiter_list that locks m_mutex asserts the
 // list's liveness sentinel before it locks -- the destructor is the exception, being the

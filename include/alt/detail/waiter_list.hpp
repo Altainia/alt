@@ -264,9 +264,11 @@ namespace alt::detail
 	 *
 	 * Taken together, three windows rather than two: the sentinel covers
 	 * destroyed-but-not-yet-freed, AddressSanitizer covers freed-while-still-poisoned,
-	 * and NEITHER covers freed-and-reused, where the four bytes may hold anything and
-	 * the chunk is no longer poisoned -- the second limit below. In a debug build the
-	 * first two windows are no longer invisible; the third still is.
+	 * and freed-and-reused is covered RELIABLY by neither -- AddressSanitizer is silent
+	 * once the chunk has been handed out again, and the sentinel is probabilistic there,
+	 * rejecting every value but alive_pattern itself, which is all but one in 2^32. That
+	 * is the second limit below, stated the same way. So in a debug build the first two
+	 * windows are no longer invisible and the third is covered but not certainly.
 	 *
 	 * The measurement for this guard does not contradict that, and the reason is the
 	 * first thing a reader will reach for. With BOTH of alt::when_all's deregistration
