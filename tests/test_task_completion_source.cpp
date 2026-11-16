@@ -37,12 +37,14 @@ static_assert(std::is_same_v<alt::await_result_t<alt::task_completion_source<int
 static_assert(std::is_same_v<alt::await_result_t<alt::task_completion_source<>&>, alt::wait_result>);
 
 // The set-twice and await-twice paths are documented preconditions that assert in a
-// debug build, and nothing in this suite exercises them: the suite has no death
-// tests (no EXPECT_DEATH or ASSERT_DEATH anywhere), and introducing the first one
-// for two asserts would be a larger change than this component. The release-build
-// behavior of a second set, a no-op, is not reachable from a Debug preset at all,
-// because NDEBUG is what compiles the assert away. These are therefore a known gap
-// in coverage, stated here rather than left silent.
+// debug build, and nothing in this suite exercises them. The reason is no longer that
+// the mechanism is unavailable: tests/test_waiter_list.cpp carries EXPECT_DEATH cases
+// and tests/test_async_wait.cpp an EXPECT_EXIT one, with the "threadsafe" style, the
+// scoped restore of that flag, and the NDEBUG and ThreadSanitizer skips a death test in
+// this project needs. The pattern to copy exists; nobody has written these two. The
+// release-build behavior of a second set, a no-op, is not reachable from a Debug preset
+// at all, because NDEBUG is what compiles the assert away. These are therefore a known
+// gap in coverage, stated here rather than left silent.
 
 namespace
 {

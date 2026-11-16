@@ -105,11 +105,14 @@ namespace alt::detail
 		//
 		// Measured rather than argued, and the instrument matters. Swapping these two
 		// lines fails nothing in a debug build -- 0/200 against the cancellation tests
-		// and 0 across all 763 tests -- because the freed block's counter word usually
-		// still holds a plausible value. Under AddressSanitizer the same swap is
-		// 200/200, reported as heap-use-after-free in completion_counter::complete()
-		// with this function one frame above it. Do not read a green debug run as
-		// evidence that the order does not matter.
+		// and 0 across the whole suite, 763 tests at the time of that measurement --
+		// because the freed block's counter word usually still holds a plausible value.
+		// Under AddressSanitizer the same swap is 200/200, reported as
+		// heap-use-after-free in completion_counter::complete() with this function one
+		// frame above it. That citation is sound where a waiter_list one would not be:
+		// what the freed chunk is touched by here is the counter's own atomic word, an
+		// ordinary instrumented access, not a pthread mutex inside glibc. Do not read a
+		// green debug run as evidence that the order does not matter.
 		//
 		// The guards of record under AddressSanitizer are
 		// WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock, which
@@ -210,8 +213,9 @@ namespace alt::detail
 		 *
 		 * DELICATE. This is reference 1, the one the block is constructed with, and
 		 * where it is dropped is the whole of three invariants. The reset is the third
-		 * of them and is not tidying: both statements free something the other one
-		 * still points at if they are swapped.
+		 * of them. It is ordering rather than tidying, but after the refused-link fix in
+		 * detail::wait_awaiter::await_suspend it is no longer the fix for a fault any
+		 * path reaches: read the measured account below before deciding what it is for.
 		 *
 		 * The awaiter holds the reference for as long as the awaiting chain is parked,
 		 * so the block can never reach zero references with a joiner still on the
@@ -224,28 +228,96 @@ namespace alt::detail
 		 * full-expression, after await_resume.
 		 *
 		 * A node being off the counter is NOT the same as that node's stop callback
-		 * being deregistered, and the "never linked at all" case is where the two part
-		 * company. detail::wait_awaiter::await_suspend emplaces its std::stop_callback on
-		 * the chain's token BEFORE it attempts the link, holding a waiter_stop_release
-		 * that points at the node and at the counter's waiter_list, which lives inside
-		 * the block; a refused link leaves that callback registered for the rest of the
-		 * awaiter's life, and nothing in waiter_list::claim's election disarms it,
-		 * because a node refused by the condition is still winnable. On the path
-		 * await_suspend names -- every child retired before the join could link -- the
-		 * reference count here is exactly 1, so releasing first frees the waiter_list
-		 * while a registered callback still points into it, and a request_stop() on
-		 * another thread then takes the mutex of a freed list.
+		 * being deregistered. detail::wait_awaiter::await_suspend emplaces its
+		 * std::stop_callback on the chain's token BEFORE it attempts the link, holding a
+		 * waiter_stop_release that points at the node and at the counter's waiter_list,
+		 * which lives inside the block. What that leaves behind differs by path, and
+		 * only one of the two paths still has anything to do with this destructor.
 		 *
-		 * Resetting first closes that, and strengthens the argument above rather than
-		 * replacing it: ~std::stop_callback both deregisters the callback and blocks for
-		 * an invocation already running on another thread, and it now does so while the
-		 * block is still referenced. That is exactly detail::wait_awaiter's stated
-		 * precondition, "the primitive must outlive every claim on its waiters", and
-		 * when_all is the first component in the library that can free the primitive
-		 * from inside its own awaiter. Member destruction will not do this on its own:
-		 * the destructor body runs before any member is destroyed, so ~m_join -- and
-		 * with it ~m_stop -- would otherwise run after the release. The guard of record
-		 * is WhenAllTest.AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked.
+		 * THE REFUSED LINK -- every child retired before the join could link, the path
+		 * await_suspend's false return names -- leaves no callback at all any more.
+		 * await_suspend deregisters m_stop in its refused-link tail, ahead of everything
+		 * else it writes there, so by the time this destructor runs nothing is
+		 * registered that could claim the waiter_list the release below is about to
+		 * free. That path is also the only one on which the reference count here is
+		 * reliably 1, which is what made it the dangerous one: releasing first freed the
+		 * list while a registered callback still pointed into it. It is now
+		 * structurally impossible rather than guarded, and the ordering below is not
+		 * what closes it.
+		 *
+		 * Measured on this branch rather than argued, because the test named below used
+		 * to be cited here as this statement's guard and no longer is. Moving the reset
+		 * under the release passes
+		 * WhenAllTest.AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked 20 of 20 in each
+		 * of the debug, AddressSanitizer and ThreadSanitizer builds, and passes the
+		 * whole suite 20 whole-suite runs per preset. Removing await_suspend's reset
+		 * instead, and leaving this order alone, also passes it 20 of 20 in all three.
+		 * Removing BOTH fails it 20 of 20 in all three, every failure on waiter_list's
+		 * liveness assert. So that test guards the conjunction -- the callback is gone
+		 * before the release -- and await_suspend's reset is what satisfies it today.
+		 *
+		 * THE LINKED path keeps its callback until the awaiter dies, which is here. The
+		 * joiner is off the counter, claimed by the zero transition or by its own stop,
+		 * but off the counter is not deregistered, so this destructor is where the
+		 * deregistration happens. Whether the release below can free the list from under
+		 * it is a question about the reference count, and both halves of the answer are
+		 * measured:
+		 *
+		 * - The count CAN be 1 here with the callback still registered, and one test
+		 *   reaches that coincidence. Instrumented across the whole suite it is 1 of
+		 *   7,542 awaiter destructions under ThreadSanitizer, 0 of 15,080 in debug and 0
+		 *   of 7,540 under AddressSanitizer; that single hit localizes to
+		 *   WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock, and run
+		 *   alone that test reaches it 7 times in 12,000 destructions in debug and 5
+		 *   times in 12,000 under ThreadSanitizer, still none under AddressSanitizer --
+		 *   a rate that depends on what else the process has just been doing, which is
+		 *   why the figures differ between the two ways of running it. In every hit the
+		 *   joiner's node reported released rather than satisfied, which names the
+		 *   interleaving: the chain's own stop callback claimed the parked joiner and
+		 *   resumed the chain, and the one child's completion hook retired and released
+		 *   its reference before the chain reached this destructor. So the awaiter's
+		 *   release is the block's last, and with the reset moved under it the list is
+		 *   freed with m_stop still engaged.
+		 * - Nothing can arrive on that freed list, which is why no instrument reports
+		 *   it. Three parties touch the counter's waiter_list: the joiner's own
+		 *   waiter_stop_release, link() from the joiner's own await_suspend, and
+		 *   detach_all() from the complete() that reaches zero. The link is long past. A
+		 *   complete() cannot be in flight, because on_combinator_child_complete calls
+		 *   complete() before release() and a count of 1 here means every child's
+		 *   release has already happened. And the callback is the invocation that resumed
+		 *   this chain: it runs on this thread, it is past its claim, and
+		 *   ~std::stop_callback does not block for an invocation on the current thread. A
+		 *   second invocation is not reachable either, one request_stop() per stop state
+		 *   running the callbacks.
+		 *
+		 * So this order prevents no fault that is reachable today, and the honest
+		 * statement of what it buys is: the callback is deregistered before the list can
+		 * be freed by construction, instead of by that enumeration of who else might
+		 * claim it. The enumeration is what a second claimer invalidates. A combinator
+		 * that parks more than one joiner on the same counter, or one that parks before
+		 * its fan-out has ended -- which when_any may -- has a claimer that is neither
+		 * this thread's own callback nor an already-retired child, and then the window
+		 * above is a use-after-free with nothing left to argue about. Keep the reset
+		 * first.
+		 *
+		 * The ordering is also still what satisfies detail::wait_awaiter's stated
+		 * precondition locally, "the primitive must outlive every claim on its waiters":
+		 * ~std::stop_callback both deregisters the callback and blocks for an invocation
+		 * already running on ANOTHER thread, and here it does so while the block is
+		 * still referenced. when_all is the first component in the library that can free
+		 * the primitive from inside its own awaiter. Member destruction will not do this
+		 * on its own: the destructor body runs before any member is destroyed, so
+		 * ~m_join -- and with it ~m_stop -- would otherwise run after the release.
+		 *
+		 * There is no guard of record for this statement, which is the state of it
+		 * rather than an omission. No test in the suite fails when these two statements
+		 * are swapped. What is pinned is the mechanism that would report the fault if a
+		 * later change made the window reachable:
+		 * WaiterListDeathTest.AClaimThatWouldLoseTheElectionOnADestroyedListAborts, for
+		 * waiter_list::claim asserting its list alive BEFORE the election, so that even
+		 * the late claim a resumed joiner's node produces -- one that would lose and
+		 * touch nothing -- aborts instead of returning quietly. It reaches that by
+		 * destroying a list by hand, not through this destructor.
 		 *
 		 * The reference is still dropped after await_resume has finished reading the
 		 * slots, which is why the release is here and not there, and the reset does not
@@ -262,8 +334,11 @@ namespace alt::detail
 		 */
 		~when_all_awaiter()
 		{
-			// First, and see above: this is what makes the release below safe rather
-			// than merely ordered.
+			// First, and see above. Nothing can reach the list in the window that
+			// swapping these two opens -- measured, no test fails on it -- but what keeps
+			// that true is an enumeration of the counter's other claimers rather than
+			// anything local to this frame. This order is the local half, and it is the
+			// half a second claimer would leave standing.
 			m_join.reset();
 
 			if(m_state != nullptr)
@@ -353,7 +428,10 @@ namespace alt::detail
 			// WhenAllTest.ANestedWhenAllInsideAChildIsItsOwnRoot fails 0 pass / 91 fail /
 			// 109 hang out of 200 repeats in debug, and 0 pass / 200 fail under
 			// AddressSanitizer, where the report is heap-use-after-free in
-			// _Stop_state_t::_M_lock() reached from stop_forwarder::operator(). The other
+			// _Stop_state_t::_M_lock() reached from stop_forwarder::operator() -- an
+			// instrumented access to a freed stop state's own word, which is why the
+			// tool sees this one; combinator_state::cancel's note says why that differs
+			// from a claim on a freed waiter_list, which it would not see. The other
 			// four combinator tests added alongside it pass 200/200. Re-measured against
 			// the 35-test suite this file now has, at 20 repeats rather than 200: 0 pass /
 			// 9 fail / 11 hang, the same character. A whole-suite run in debug prints 33

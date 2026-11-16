@@ -111,12 +111,30 @@ stage A deliberately never required.
 ### How the invisible use-after-free class is handled
 
 Stage A's Critical finding was a heap-use-after-free that **neither AddressSanitizer nor
-ThreadSanitizer reports**, because `waiter_list::claim`'s only contact with the freed block
-is a `std::scoped_lock` over a `std::mutex` — glibc's `pthread_mutex_lock`, which neither
-tool instruments — and libstdc++'s trivial `std::mutex` destructor means no
-`pthread_mutex_destroy` is intercepted either. Measured: 0 failures in 20 repeats per
-sanitizer preset with the defect present, against a scratch-instrumented trace proving the
-window was reached.
+ThreadSanitizer reported**, because as stage A shipped `waiter_list`, `claim`'s only
+contact with the freed block was a `std::scoped_lock` over a `std::mutex` — glibc's
+`pthread_mutex_lock`, which neither tool instruments — and libstdc++'s trivial
+`std::mutex` destructor means no `pthread_mutex_destroy` is intercepted either. Measured
+then: 0 failures in 20 repeats per sanitizer preset with the defect present, against a
+scratch-instrumented trace proving the window was reached.
+
+**The partition is three windows, not two.** This is what the sentinel's fix round
+established, and it is more precise than the two-way framing the rest of this section was
+written with. `claim` now opens with `alive()`, an ordinary four-byte load of the list's
+own storage, inlined into the caller:
+
+| Window | What covers it |
+|---|---|
+| Destroyed, not yet freed | The sentinel, and only the sentinel. `~waiter_list` has written `dead_pattern`, the bytes are intact, and no memory error exists for a tool to find. |
+| Freed, chunk still poisoned | AddressSanitizer, at `alive()`'s load, before the assert can fire. The sentinel's load is what gives the tool an instrumented access on this path; the lock alone never did. |
+| Freed, handed out again and written over | **Neither.** The four bytes hold neither pattern, so `alive()` rejects them — but they can also hold `alive_pattern` by chance, and the chunk is no longer poisoned. |
+
+Two riders. The asserts are asserts, so an `NDEBUG` build has the first window
+uncovered and loses `alive()`'s load with it, which returns the second window to exactly
+the blindness above. And the check is not atomic with the lock that follows it, so a
+caller that passes `alive()` an instant before `~waiter_list`'s store still locks a
+destroyed mutex: the sentinel narrows the first window rather than closing it, and the
+precondition stays the owner's.
 
 `when_any` turns that path into the normal one. In `when_all` the chain resumes while
 children hold block references only on cancellation; in `when_any` it happens on every
@@ -125,8 +143,8 @@ success.
 | Approach | Trade-off |
 |---|---|
 | Comments and argument only | What stage A did. Direct evidence of insufficiency: the bug survived a task review, five fix rounds and a whole-branch review, and was caught by a reviewer reading the code rather than by any tool. |
-| **Make the class detectable** (chosen) | A sentinel in `waiter_list`, checked before the mutex is touched. Turns an invisible use-after-free into a loud assert in every Debug, ASan and TSan preset. Fully reliable for the destroyed-but-not-yet-freed window — the window a test can actually reach, and the reason stage A's regression test cannot fail today. Probabilistic for genuinely freed-and-reused memory. |
-| **Remove the class at its source** (chosen) | Reset `m_stop` on `wait_awaiter`'s refused-link path, so a refused link leaves no callback in existence. Fixes the gap for every present and future `wait_awaiter` user. Costs a change to a header six shipped components share, so it needs its own evidence and re-verification. Covers the refused-link path only; the linked path still depends on the awaiter destroying its callback before releasing the block. |
+| **Make the class detectable** (chosen) | A sentinel in `waiter_list`, checked before the election and before the mutex. Turns an invisible use-after-free into a loud assert in every Debug, ASan and TSan preset. Fully reliable for the destroyed-but-not-yet-freed window — the window a test can actually reach — and, because `alive()` is an instrumented load, it is also what lets AddressSanitizer report the freed-but-poisoned one. Probabilistic for freed-and-reused memory, and absent under `NDEBUG`. With it in place stage A's regression test does fail on the defect, which it could not before. |
+| **Remove the class at its source** (chosen) | Reset `m_stop` on `wait_awaiter`'s refused-link path, so a refused link leaves no callback in existence. Fixes the gap for every present and future `wait_awaiter` user. Costs a change to a header six shipped components share, so it needs its own evidence and re-verification. Covers the refused-link path only. On the LINKED path the window is reachable — measured in `when_all`, one awaiter destruction in a few thousand frees the block with the joiner's callback still engaged — and is inert there only because the single party that could claim the freed list is the invocation that resumed the chain, on the same thread, past its claim. **That argument is an enumeration of `when_all`'s claimers, and `when_any` is where it may stop holding:** a combinator that parks more than one joiner on a counter, or parks before its fan-out ends, has a claimer that is neither. See `~when_all_awaiter`'s note. |
 
 The last two were chosen together: the source fix removes the common case, and the sentinel
 is what makes that fix — and stage A's existing one — checkable rather than argued.
@@ -195,9 +213,11 @@ is what makes that fix — and stage A's existing one — checkable rather than 
    children completing immediately is correct and is not the same shape.
 
 8. **`waiter_list` gains a liveness sentinel**, set by its constructor and overwritten by
-   its destructor, checked by `claim` and `link` before the mutex is touched. The assert
-   fires in Debug, ASan and TSan. Whether it compiles away entirely in Release is the
-   builder's call; the gates that matter for it are all Debug-based.
+   its destructor, checked by `claim` and `link` before the mutex is touched — and in
+   `claim` before the election as well, so that a late claim which would lose it and touch
+   nothing still aborts. The assert fires in Debug, ASan and TSan. Whether it compiles
+   away entirely in Release is the builder's call; the gates that matter for it are all
+   Debug-based.
 
 9. **`wait_awaiter::await_suspend` resets `m_stop` on the refused-link path.** Verified safe
    at `include/alt/detail/async_wait.hpp:275-284`: `~stop_callback` blocks for an invocation

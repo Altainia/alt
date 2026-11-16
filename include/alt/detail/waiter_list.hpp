@@ -240,7 +240,9 @@ namespace alt::detail
 	 * AddressSanitizer or ThreadSanitizer report as evidence about a waiter_list holds
 	 * only where something instrumented also touches the freed list -- the block's
 	 * refcount word, a slot's contents -- and not for the lock itself. alt::when_all's
-	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that was measured.
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that was measured, on a
+	 * tree that had neither this sentinel nor the refused-link reset in
+	 * detail::wait_awaiter::await_suspend.
 	 *
 	 * m_liveness changes that in two ways, and the second is the one a reader will
 	 * otherwise assume is impossible.
@@ -260,20 +262,30 @@ namespace alt::detail
 	 *   has been handed out again neither instrument is certain, which is the second
 	 *   limit below.
 	 *
-	 * Taken together: the sentinel covers the destroyed window, AddressSanitizer
-	 * covers the freed one, and in a debug build neither window is invisible any more.
+	 * Taken together, three windows rather than two: the sentinel covers
+	 * destroyed-but-not-yet-freed, AddressSanitizer covers freed-while-still-poisoned,
+	 * and NEITHER covers freed-and-reused, where the four bytes may hold anything and
+	 * the chunk is no longer poisoned -- the second limit below. In a debug build the
+	 * first two windows are no longer invisible; the third still is.
 	 *
-	 * Step 7's measurement for this guard does not contradict that, and the reason is
-	 * the first thing a reader will reach for. With stage A's fix reverted,
-	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked fails 20 of 20 under
-	 * AddressSanitizer with no sanitizer report at all, every failure landing on the
-	 * assert. The window that test reaches is destroyed, not freed: when_all_state
-	 * declares m_slots before m_shared, so ~combinator_state -- and the waiter_list
-	 * inside it -- runs before the slots are destroyed, the operator delete that frees
-	 * the storage runs after both, and the test's tripwire lives in a result slot. The
-	 * mutex is destroyed there rather than freed, so there is no memory error for
-	 * AddressSanitizer to find. That test's own header comment in
-	 * tests/test_when_all.cpp derives all of this; read it rather than re-deriving it.
+	 * The measurement for this guard does not contradict that, and the reason is the
+	 * first thing a reader will reach for. With BOTH of alt::when_all's deregistration
+	 * statements removed -- detail::wait_awaiter::await_suspend's reset in its
+	 * refused-link tail and ~when_all_awaiter's reset ahead of its release --
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked fails 20 of 20 in each of the
+	 * debug, AddressSanitizer and ThreadSanitizer builds, with no sanitizer report at
+	 * all, every failure landing on the assert below. Removing either statement alone
+	 * leaves it passing 20 of 20 in all three, so the configuration matters: that test
+	 * guards the conjunction, and its own header comment in tests/test_when_all.cpp
+	 * carries both mutations.
+	 *
+	 * The window that test reaches is destroyed, not freed: when_all_state declares
+	 * m_slots before m_shared, so ~combinator_state -- and the waiter_list inside it --
+	 * runs before the slots are destroyed, the operator delete that frees the storage
+	 * runs after both, and the test's tripwire lives in a result slot. The mutex is
+	 * destroyed there rather than freed, so there is no memory error for
+	 * AddressSanitizer to find. That test's header comment derives all of this; read it
+	 * rather than re-deriving it.
 	 *
 	 * Three limits, and this list is not a promise of completeness.
 	 *
@@ -828,8 +840,10 @@ namespace alt::detail
 		// other components include; the cost of not doing that is four bytes.
 		//
 		// What this catches and what it does not, measured rather than assumed. See
-		// tests/test_waiter_list.cpp's two WaiterListDeathTest cases, which reach the
-		// destroyed-but-not-yet-freed window, and the notes in the class documentation
+		// tests/test_waiter_list.cpp's three WaiterListDeathTest cases, which reach the
+		// destroyed-but-not-yet-freed window -- including the one that pins the assert in
+		// claim() sitting ahead of the election, so that a late claim which would lose it
+		// and touch nothing still aborts -- and the notes in the class documentation
 		// above for why no sanitizer reaches any of it.
 		std::atomic<std::uint32_t> m_liveness{alive_pattern};
 		mutable std::mutex         m_mutex;
