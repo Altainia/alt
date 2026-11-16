@@ -10,6 +10,7 @@
 #include <alt/when_any.hpp>
 #include <atomic>
 #include <concepts>
+#include <coroutine>
 #include <cstddef>
 #include <expected>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <tuple>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "coroutine_test_support.hpp"
 
@@ -32,14 +34,11 @@ namespace
 	 * Drives detail::when_any_awaiter directly, standing in for the awaitable the
 	 * public alt::when_any overloads own.
 	 *
-	 * The awaiter is this task's deliverable; the two public overloads and their
-	 * awaitables are a later task's, so there is nothing yet that owns the argument
-	 * tuple for the awaiter to point into. This class is that owner and nothing more:
-	 * it is the same three type aliases and the same rvalue-only operator co_await
-	 * detail::when_all_awaitable has, with no overload resolution, no concept
-	 * constraints and no range form. When the public overloads land, these tests keep
-	 * working through this class and the new ones exercise that one; the point of
-	 * keeping it is that it awaits the awaiter with nothing else in the way.
+	 * Most tests here drive the awaiter through this class rather than through
+	 * alt::when_any, so that nothing but the awaiter is between the test and the
+	 * behavior it pins; the public overloads' own tests are at the end of the file.
+	 * It is the same three type aliases and the same rvalue-only operator co_await
+	 * detail::when_any_awaitable has, with no overload resolution and no constraints.
 	 *
 	 * Stored by value inside detail::cancellation_checked_awaitable, which lives for
 	 * the whole full-expression, so the pointer the awaiter holds into the tuple is
@@ -566,4 +565,220 @@ TEST_F(WhenAnyTest, ACancellationDiscardsAWinnerAlreadyElected)
 	// point, so a second resumption would resume freed storage rather than increment a
 	// counter, and this test could not report it either way.
 	EXPECT_EQ(live_frames, 0);
+}
+
+// The public overloads. Each test above this line drives the awaiter through the
+// race class; these go through alt::when_any itself.
+
+namespace
+{
+	/** A move-only awaitable, ready at once, that records when its contents were moved away. */
+	struct flagged_ready
+	{
+		explicit flagged_ready(const int v): value(v)
+		{
+		}
+
+		flagged_ready(flagged_ready&& other) noexcept: value(other.value)
+		{
+			other.moved_from = true;
+		}
+
+		flagged_ready(const flagged_ready&)            = delete;
+		flagged_ready& operator=(const flagged_ready&) = delete;
+		flagged_ready& operator=(flagged_ready&&)      = delete;
+		~flagged_ready()                               = default;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return value;
+		}
+
+		int  value;
+		bool moved_from = false;
+	};
+
+	/** A copyable awaitable that is ready at once with @p value. */
+	struct copyable_ready
+	{
+		int value;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return value;
+		}
+	};
+
+	/**
+	 * Both an awaitable and a sized range, and a range OF awaitables, so that the range
+	 * overload's other constraints are all satisfied and only !awaitable<R> keeps it out.
+	 * A range of ints would be excluded by its element type whatever that clause said.
+	 */
+	struct awaitable_range: copyable_ready
+	{
+		[[nodiscard]] const copyable_ready* begin() const noexcept
+		{
+			return nullptr;
+		}
+
+		[[nodiscard]] const copyable_ready* end() const noexcept
+		{
+			return nullptr;
+		}
+
+		[[nodiscard]] std::size_t size() const noexcept
+		{
+			return 0;
+		}
+	};
+
+	/** A task that parks on @p gate and then yields @p value. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
+	alt::task<int> wait_then_yield(alt::async_event& gate, int value)
+	{
+		const frame_tracker tracker{value};
+		static_cast<void>(co_await gate);
+		co_return value;
+	}
+
+	/** Parks in a when_any over a vector of two tasks and records the winner. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task range_race_root(alt::async_event& first, alt::async_event& second, wait_record& record, std::size_t& winner, int& value)
+	{
+		std::vector<alt::task<int>> children;
+		children.push_back(wait_then_yield(first, 10));
+		children.push_back(wait_then_yield(second, 20));
+
+		const auto result = co_await alt::when_any(std::move(children));
+		record_outcome(record, result);
+
+		if(result)
+		{
+			winner = result->index();
+			value  = result->value();
+		}
+	}
+
+	/** Races an empty vector of tasks, and records how the await ended. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the record is owned by the calling test, which holds it until live_frames is back to zero.
+	alt::cancellable_task empty_range_root(wait_record& record)
+	{
+		const auto result = co_await alt::when_any(std::vector<alt::task<int>>{});
+		record_outcome(record, result);
+	}
+}
+
+// The compile-time rules, in the register test_when_all.cpp uses for its own.
+template<typename... Args>
+concept when_any_accepts = requires(Args&&... arguments) { alt::when_any(std::forward<Args>(arguments)...); };
+
+// An argument list needs at least one awaitable. This is the constraint's doing and
+// not the result machinery's: without it the call is well formed and the error only
+// appears when something is awaited.
+static_assert(!when_any_accepts<>);
+static_assert(when_any_accepts<alt::task<int>>);
+static_assert(when_any_accepts<alt::task<int>, alt::task<void>>);
+
+// A const range of move-only elements cannot be moved from, and is rejected up front.
+static_assert(!when_any_accepts<const std::vector<alt::task<int>>&>);
+static_assert(when_any_accepts<std::vector<alt::task<int>>&>);
+static_assert(when_any_accepts<std::vector<alt::task<int>>>);
+static_assert(when_any_accepts<const std::vector<copyable_ready>&>);
+
+// A range whose elements are not awaitable is not raced.
+static_assert(!when_any_accepts<std::vector<int>>);
+
+// A type that is both an awaitable and a sized range is one child of the argument-list form.
+static_assert(std::same_as<alt::await_result_t<decltype(alt::when_any(std::declval<awaitable_range>()))>,
+                           std::expected<alt::when_any_result<int>, std::error_code>>);
+
+// The range form's own result class, with the one value type every element shares.
+static_assert(std::same_as<alt::await_result_t<decltype(alt::when_any(std::declval<std::vector<alt::task<int>>>()))>,
+                           std::expected<alt::when_any_range_result<int>, std::error_code>>);
+static_assert(std::same_as<alt::await_result_t<decltype(alt::when_any(std::declval<std::vector<alt::task<void>>>()))>,
+                           std::expected<alt::when_any_range_result<std::monostate>, std::error_code>>);
+
+TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
+{
+	alt::async_event first;
+	alt::async_event second;
+	wait_record      record;
+	std::size_t      winner = 99;
+	int              value  = 0;
+
+	auto handle = alt::start(range_race_root(first, second, record, winner, value));
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_EQ(live_frames, 2);
+
+	second.set();
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_TRUE(record.satisfied);
+	EXPECT_EQ(winner, 1U) << "the second element completed first, so its position is the winner";
+	EXPECT_EQ(value, 20);
+	EXPECT_EQ(live_frames, 0) << "the loser must have retired before a won await returns";
+	EXPECT_FALSE(handle.stop_requested());
+}
+
+TEST_F(WhenAnyTest, AnEmptyRangeReportsInvalidArgument)
+{
+	wait_record record;
+
+	const auto handle = alt::start(empty_range_root(record));
+
+	// Resumed inside start(): nothing was parked, so nothing is left to wait for.
+	EXPECT_EQ(record.resumptions, 1) << "an empty range must not suspend the chain";
+	EXPECT_FALSE(record.satisfied);
+	EXPECT_EQ(record.error, std::make_error_code(std::errc::invalid_argument));
+	EXPECT_EQ(live_frames, 0);
+
+	const auto result = alt::sync_wait(alt::when_any(std::vector<alt::task<int>>{}));
+
+	ASSERT_FALSE(result.has_value());
+	EXPECT_EQ(result.error(), std::errc::invalid_argument);
+}
+
+TEST_F(WhenAnyTest, AnLvalueRangeIsBoundAndLeftMovedFrom)
+{
+	std::vector<flagged_ready> children;
+	children.emplace_back(3);
+	children.emplace_back(4);
+
+	const auto result = alt::sync_wait(alt::when_any(children));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(result->index(), 0U) << "both are ready; the first started is the first elected";
+	EXPECT_EQ(result->value(), 3);
+	EXPECT_EQ(children.size(), 2U) << "the range itself is bound, not consumed";
+	EXPECT_TRUE(children[0].moved_from);
+	EXPECT_TRUE(children[1].moved_from);
+}
+
+TEST_F(WhenAnyTest, AConstRangeOfCopyableElementsIsCopied)
+{
+	const std::vector<copyable_ready> children{{.value = 7}, {.value = 8}};
+
+	const auto result = alt::sync_wait(alt::when_any(children));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(result->index(), 0U);
+	EXPECT_EQ(result->value(), 7);
 }

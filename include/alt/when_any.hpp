@@ -11,6 +11,7 @@
 #include <alt/detail/coroutine.hpp>
 #include <alt/detail/when_any_result.hpp>
 #include <cassert>
+#include <concepts>
 #include <coroutine>
 #include <cstddef>
 #include <exception>
@@ -23,6 +24,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace alt::detail
 {
@@ -524,13 +526,16 @@ namespace alt::detail
 		 *   function would have returned at run time. (Its Result would be a
 		 *   std::variant<> besides.)
 		 * - AN EMPTY RANGE IS A RUN-TIME CASE and is the one this space is for. Its types
-		 *   are all well formed, the child count is simply zero, the counter drains as the
-		 *   starter retires, the join refuses the link and await_resume then finds no
-		 *   winner. That case must report its outcome before anything is allocated and
-		 *   before the chain suspends, which means ahead of the statement below.
+		 *   are all well formed, the child count is simply zero, and left to run the
+		 *   counter would drain as the starter retired, the join would refuse the link
+		 *   and await_resume would find no winner. So the range form checks for it first
+		 *   and returns false, which resumes the chain at once with no suspension and no
+		 *   allocation; m_state stays null, and await_resume reads that as the empty
+		 *   range and reports std::errc::invalid_argument.
 		 *
-		 * No overload exists yet that can build either, so neither is reachable today;
-		 * the no-winner case await_resume asserts is the second of the two.
+		 * alt::when_any's variadic overload keeps the first case from being built at its
+		 * call site, with a constraint; the range overload cannot, since a range's size is
+		 * not part of its type.
 		 *
 		 * @return False when the race is already over -- every child retired before the
 		 *         join could link -- so the awaiting coroutine carries straight on.
@@ -538,6 +543,17 @@ namespace alt::detail
 		template<typename Promise>
 		bool await_suspend(std::coroutine_handle<Promise> h)
 		{
+			// The empty range, and only the range form: see above for why the
+			// argument-list form has no run-time equivalent. Nothing has been allocated,
+			// and m_state staying null is what await_resume tests.
+			if constexpr(is_range_form)
+			{
+				if(child_count() == 0)
+				{
+					return false;
+				}
+			}
+
 			m_state = std::make_unique<when_any_state<Slots>>(child_count()).release();
 
 			start_options child_options{};
@@ -830,6 +846,17 @@ namespace alt::detail
 		 */
 		[[nodiscard]] std::expected<Result, std::error_code> await_resume()
 		{
+			// The empty range, which await_suspend returned from before allocating. Range
+			// form only: an argument-list race over no awaitables does not compile, and
+			// m_state is otherwise non-null from await_suspend until the destructor.
+			if constexpr(is_range_form)
+			{
+				if(m_state == nullptr)
+				{
+					return std::expected<Result, std::error_code>{std::unexpect, std::make_error_code(std::errc::invalid_argument)};
+				}
+			}
+
 			// m_join is engaged by await_suspend, which always runs first: await_ready is
 			// unconditionally false, so there is no path to a resumption without it.
 			// Asserted rather than left implicit because clang-tidy-19's
@@ -849,13 +876,12 @@ namespace alt::detail
 			// stops a child without a winner, and that sets the flag tested above. The
 			// block is still alive because this awaiter has not been destroyed.
 			//
-			// An EMPTY RANGE is the one way past that argument: zero children, the
-			// counter drained by the starter alone, nothing elected. It is what the
-			// assert below is for, and it has no caller -- no overload builds a range
-			// race yet -- so it must be answered by a run-time early return in
-			// await_suspend, ahead of the allocation. An argument-list race over no
-			// awaitables is not this case and never reaches here: it fails to compile in
-			// when_any_result_at. See await_suspend, which separates the two.
+			// An empty range would be the one way past that argument -- zero children,
+			// nothing elected -- and is answered above, before the block exists, so it
+			// never reaches here. That is what the assert below relies on. An
+			// argument-list race over no awaitables is a different case and also never
+			// reaches here: it fails to compile in when_any_result_at. See
+			// await_suspend, which separates the two.
 			const std::size_t winner = m_state->election().winner();
 			assert(winner != combinator_election::no_winner && "an alt when_any was satisfied with no child elected");
 
@@ -955,5 +981,154 @@ namespace alt::detail
 		/** This chain's place in the block's completion counter. The only joiner on it. */
 		std::optional<completion_counter::join_awaiter> m_join;
 	};
+
+	/**
+	 * @brief Owns the awaitables a when_any was given until the await completes.
+	 *
+	 * Stored by value inside detail::cancellation_checked_awaitable, which lives for
+	 * the whole full-expression, so the pointer the awaiter holds into this tuple is
+	 * stable -- the arrangement detail::when_all_awaitable has.
+	 */
+	template<typename... Awaitables>
+	class [[nodiscard]] when_any_awaitable
+	{
+	public:
+		/** What a satisfied race yields: the winner's position and its value. */
+		using result_type = alt::when_any_result<when_any_value_t<Awaitables>...>;
+
+		/** The tuple of result stores the children write into. */
+		using slots_type = std::tuple<when_any_slot_t<Awaitables>...>;
+
+		/** The tuple the arguments are stored in: a value per rvalue, a reference per lvalue. */
+		using awaitables_type = std::tuple<Awaitables...>;
+
+		/** Takes the awaitables, moving each rvalue and binding each lvalue. */
+		explicit when_any_awaitable(Awaitables&&... awaitables): m_awaitables(std::forward<Awaitables>(awaitables)...)
+		{
+		}
+
+		/** The awaiter, pointing at this object's tuple. Rvalue-only: it is a temporary. */
+		auto operator co_await() && noexcept
+		{
+			return when_any_awaiter<result_type, slots_type, awaitables_type>{&m_awaitables};
+		}
+
+	private:
+		awaitables_type m_awaitables;
+	};
+
+	/**
+	 * @brief Owns the range a when_any was given until the await completes.
+	 *
+	 * The range form's counterpart of detail::when_any_awaitable. @p Range is the
+	 * deduced forwarding type: a value type owns the range here, an lvalue reference
+	 * binds the caller's. Either way the elements are moved out, never copied; see
+	 * alt::when_any.
+	 */
+	template<typename Range>
+	class [[nodiscard]] when_any_range_awaitable
+	{
+	public:
+		/** The type each element is moved into a child as. */
+		using element_type = std::ranges::range_value_t<Range>;
+
+		/** What a satisfied race yields: the winner's position in the range and its value. */
+		using result_type = alt::when_any_range_result<when_any_value_t<element_type>>;
+
+		/** The vector of result stores the children write into. */
+		using slots_type = std::vector<when_any_slot_t<element_type>>;
+
+		/** Takes the range, moving an rvalue and binding an lvalue. */
+		explicit when_any_range_awaitable(Range&& range): m_range(std::forward<Range>(range))
+		{
+		}
+
+		/** The awaiter, pointing at this object's range. Rvalue-only: it is a temporary. */
+		auto operator co_await() && noexcept
+		{
+			return when_any_awaiter<result_type, slots_type, std::remove_reference_t<Range>>{&m_range};
+		}
+
+	private:
+		std::conditional_t<std::is_lvalue_reference_v<Range>, Range, std::remove_cvref_t<Range>> m_range;
+	};
+
+}
+
+namespace alt
+{
+
+	/**
+	 * @brief Races every argument and yields the first to complete, with its position.
+	 *
+	 * Each awaitable runs inside its own alt::cancellable_task, so the children run
+	 * concurrently and each is its own cancellation root. Awaiting the result yields
+	 * @c std::expected<alt::when_any_result<detail::when_any_value_t<Awaitables>...>,
+	 * std::error_code>: @c index() is the position of the argument that completed first
+	 * and @c get<I>() its value, with a void child contributing @c std::monostate and a
+	 * reference child a @c std::reference_wrapper. Read a winner with
+	 * @c std::move(result).template get<I>(), which is the only form that can take a
+	 * move-only value out.
+	 *
+	 * The winner stops its siblings, and the await returns only once every child has
+	 * retired, so no child is still running when a won await returns. The losers'
+	 * results are discarded.
+	 *
+	 * Cancellation is an observable *result*, as for alt::when_all: when the awaiting
+	 * chain is cancelled the await yields @c std::errc::operation_canceled, even if a
+	 * winner had already been elected, and nothing is rethrown. A winner that completed
+	 * by throwing rethrows its exception at the await.
+	 *
+	 * **At least one awaitable is required, and that is checked at the call site.** A
+	 * race over no awaitables has no winner to yield, so the call is ill formed: the
+	 * constraint rejects it, which puts the diagnostic on the caller's line. The range
+	 * overload below has a different, run-time rule for the empty case.
+	 *
+	 * An awaitable passed as an lvalue, and everything it refers to, must outlive the
+	 * children; one passed as an rvalue is moved into its child's frame. Passing the
+	 * same awaitable object twice is a precondition violation. The leak when starting a
+	 * child throws is alt::when_all's, unchanged: see there, and for the allocations.
+	 */
+	template<typename... Awaitables>
+	  requires(awaitable<Awaitables> && ...) && (sizeof...(Awaitables) > 0)
+	[[nodiscard]] auto when_any(Awaitables&&... awaitables)
+	{
+		return detail::when_any_awaitable<Awaitables...>{std::forward<Awaitables>(awaitables)...};
+	}
+
+	/**
+	 * @brief Races every element of @p range and yields the first to complete.
+	 *
+	 * The range form of the argument-list overload above. Awaiting the result yields
+	 * @c std::expected<alt::when_any_range_result<V>, std::error_code> with
+	 * @c V = detail::when_any_value_t<std::ranges::range_value_t<R>>: @c index() is the
+	 * winner's position in the range and @c value() its value. It is a result class of
+	 * its own because a std::variant of one type would always have index 0.
+	 *
+	 * **An empty range is the run-time case, and it is an error.** There is no winner,
+	 * so the await yields @c std::errc::invalid_argument, without suspending and
+	 * without allocating. The argument-list overload rejects zero awaitables at compile
+	 * time instead; the two are different mechanisms.
+	 *
+	 * Every element is moved into its child, so the child owns it, and an lvalue range
+	 * is bound, not copied, and is left holding moved-from elements. A const range is
+	 * accepted only if its elements are copyable, and they are then copied. The range
+	 * must be a std::ranges::sized_range, since the child count is needed before the
+	 * first child starts; it is iterated once.
+	 *
+	 * The @c !awaitable<R> constraint is what makes a type that is both an awaitable
+	 * and a sized range select the argument-list overload, as one awaitable child,
+	 * rather than being ambiguous between the two.
+	 *
+	 * Cancellation, exceptions, and the leak when starting a child throws are the
+	 * argument-list form's; see there.
+	 */
+	template<std::ranges::sized_range R>
+	  requires(!awaitable<R>) && awaitable<std::ranges::range_value_t<R>> &&
+	          std::constructible_from<std::ranges::range_value_t<R>, std::ranges::range_rvalue_reference_t<R>>
+	[[nodiscard]] auto when_any(R&& range)
+	{
+		return detail::when_any_range_awaitable<R>{std::forward<R>(range)};
+	}
 
 }
