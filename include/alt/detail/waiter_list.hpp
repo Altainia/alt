@@ -224,30 +224,69 @@ namespace alt::detail
 	 *   the election but not yet taken the mutex leaves its node linked for that
 	 *   moment, and a list destroyed in that window would race the unlink.
 	 *
-	 * Neither sanitizer reports a breach of the second one, which is why this class
-	 * carries a liveness sentinel of its own. A claim's only contact with a destroyed
-	 * or freed list is std::scoped_lock over m_mutex, which is glibc's
-	 * pthread_mutex_lock and pthread_mutex_unlock: AddressSanitizer does not intercept
+	 * ABSENT THE SENTINEL BELOW, neither sanitizer reports a breach of the second one,
+	 * which is why this class carries a liveness sentinel of its own. That scope
+	 * matters: as stage A shipped this class, a claim's only contact with a destroyed
+	 * or freed list was std::scoped_lock over m_mutex, which is glibc's
+	 * pthread_mutex_lock and pthread_mutex_unlock. AddressSanitizer does not intercept
 	 * glibc, libstdc++'s std::mutex destructor is trivial so there is no
 	 * pthread_mutex_destroy for it to intercept either, and ThreadSanitizer drops its
-	 * synchronization variables on free. Everything else the claim touches is the
+	 * synchronization variables on free. Everything else the claim touched was the
 	 * node, which lives in the waiter's own frame and is still alive. So the
-	 * freed-heap access has no instrumented access anywhere on its path, and a green
-	 * sanitizer run says nothing about this precondition. Any note in this library
-	 * that offers an AddressSanitizer or ThreadSanitizer report as evidence about a
-	 * waiter_list holds only where something instrumented also touches the freed list
-	 * -- the block's refcount word, a slot's contents -- and not for the lock itself.
-	 * alt::when_all's AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that
-	 * was measured.
+	 * freed-heap access had no instrumented access anywhere on its path, and a green
+	 * sanitizer run said nothing about this precondition. That is still the state of
+	 * any build whose asserts are gone, because NDEBUG removes the checks below and
+	 * restores exactly this blindness. And any note in this library that offers an
+	 * AddressSanitizer or ThreadSanitizer report as evidence about a waiter_list holds
+	 * only where something instrumented also touches the freed list -- the block's
+	 * refcount word, a slot's contents -- and not for the lock itself. alt::when_all's
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked is where that was measured.
 	 *
-	 * What covers the rest is m_liveness: every public member that takes m_mutex
-	 * asserts the list is alive before it locks, so a call that arrives after
-	 * ~waiter_list has run aborts with a named precondition instead of locking a mutex
-	 * whose object is gone. Two limits are worth stating rather than discovering. It
-	 * is an assert, so NDEBUG removes it and a release build has no guard at all. And
-	 * it is a best-effort read of four bytes: storage that has been freed, handed out
-	 * again and written over holds neither pattern, which alive() rejects, but it can
-	 * be overwritten with alive_pattern by chance.
+	 * m_liveness changes that in two ways, and the second is the one a reader will
+	 * otherwise assume is impossible.
+	 *
+	 * - Every public member that locks m_mutex asserts the list is alive before it
+	 *   locks. The destructor is the exception, and it is the member that *stores* the
+	 *   dead pattern rather than checking it. So a call that arrives after
+	 *   ~waiter_list has run aborts with a named precondition instead of locking a
+	 *   mutex whose object is gone. That covers the destroyed-but-not-yet-freed
+	 *   window.
+	 * - alive() is an ordinary four-byte load of this object's own storage, inlined
+	 *   into whatever translation unit calls it. Where that storage has actually been
+	 *   freed and AddressSanitizer still holds the chunk poisoned, the tool therefore
+	 *   instruments the very first thing a claim does and reports the
+	 *   heap-use-after-free at the load, before the assert can fire. The sentinel
+	 *   extends the tool's reach rather than only substituting for it. Once the chunk
+	 *   has been handed out again neither instrument is certain, which is the second
+	 *   limit below.
+	 *
+	 * Taken together: the sentinel covers the destroyed window, AddressSanitizer
+	 * covers the freed one, and in a debug build neither window is invisible any more.
+	 *
+	 * Step 7's measurement for this guard does not contradict that, and the reason is
+	 * the first thing a reader will reach for. With stage A's fix reverted,
+	 * AStopRacingTheEndOfAnAwaitWhoseJoinerNeverLinked fails 20 of 20 under
+	 * AddressSanitizer with no sanitizer report at all, every failure landing on the
+	 * assert. The window that test reaches is destroyed, not freed: when_all_state
+	 * declares m_slots before m_shared, so ~combinator_state -- and the waiter_list
+	 * inside it -- runs before the slots are destroyed, the operator delete that frees
+	 * the storage runs after both, and the test's tripwire lives in a result slot. The
+	 * mutex is destroyed there rather than freed, so there is no memory error for
+	 * AddressSanitizer to find. That test's own header comment in
+	 * tests/test_when_all.cpp derives all of this; read it rather than re-deriving it.
+	 *
+	 * Three limits, and this list is not a promise of completeness.
+	 *
+	 * - The checks are asserts, so NDEBUG removes them and a release build has no
+	 *   guard.
+	 * - alive() is a best-effort read of four bytes: storage that has been freed,
+	 *   handed out again and written over holds neither pattern, which alive()
+	 *   rejects, but it can be overwritten with alive_pattern by chance.
+	 * - The check is not atomic with the lock that follows it. A caller that passes
+	 *   alive() an instant before the destructor's store goes on to lock a destroyed
+	 *   mutex exactly as it did before. The sentinel NARROWS the window the second
+	 *   precondition names; it does not close it, and that precondition stays the
+	 *   owner's to keep.
 	 */
 	class waiter_list
 	{
