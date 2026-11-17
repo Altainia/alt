@@ -37,8 +37,9 @@ combinators spec** below.
 
 - **Timers and a clock source.** Still absent from this library. `when_any` makes a timeout
   *expressible*; it does not supply the timer. A caller supplies its own.
-- **`when_any_succeed`.** A "first child that completes *successfully*" operation is wanted
-  and is deliberately out of scope here; see **Future work**.
+- **`when_any_succeed`.** A "first child that completes *successfully*" operation,
+  deliberately out of scope here and since left unbuilt for want of a caller; see
+  **Future work**.
 - **Fixing the loser resource-loss mode.** Documented, not fixed. Carried forward from the
   combinators spec's decision 7.
 - **A `std::variant`-typed public result.** Carried forward from decision 6.
@@ -377,11 +378,44 @@ documentation. New public API, so a **minor** bump, **1.11.1 to 1.12.0**.
 ## Future work
 
 **`when_any_succeed`** — completes with the first child that completes *successfully*,
-treating a throwing child as a loser. Wanted, and explicitly not designed here. The open
-question, raised by the author and left open deliberately: what it reports when **every**
-child throws. The two shapes worth weighing are reporting the last exception and reporting
-an aggregate of all of them; neither is chosen, and the choice interacts with how many
-exceptions the shared block must store, which is a design question of its own.
+treating a throwing child as a loser. Explicitly not designed here, and **not built**: the
+owner went looking for a caller on 2026-11-17 and did not find one, so it stays unbuilt
+until a real one turns up. What follows is what that search established, recorded so the
+next reader starts from it instead of re-deriving it.
+
+**The storage question is already answered, and the framing it rested on was wrong.** An
+earlier version of this entry said the choice between reporting the last exception and
+reporting an aggregate "interacts with how many exceptions the shared block must store,
+which is a design question of its own". The shipped component falsifies that.
+`detail::when_any_child` fills its slot on every path — `catch(...)` stores
+`slot->set_exception(std::current_exception())`, at `include/alt/when_any.hpp:415` — and it
+does so **before** it elects, because `detail::combinator_election`'s publication argument
+requires that order. So every child's exception is already in the block, one slot each,
+winner or loser; a loser's slot is written and never read, which that function's own note
+states. An aggregate costs no storage the component does not already pay. **The open
+question is therefore purely the caller-facing contract**: what the wait returns, and how a
+caller reaches N exceptions rather than one.
+
+**It is not the fan-out shape, which is the shape most likely to be reached for.** Sending a
+notification to several sinks, logging the ones that fail, retrying only if none got
+through, is *not* this component. On election the winner's walk tears the remaining children
+down, so stopping the rest the moment one succeeds either does nothing useful or loses sends
+that had independent value — and "some failed but at least one got through" needs every
+outcome, which this component discards by construction, handing back one winner. That shape
+is a `when_all` over children wrapped to yield `std::expected` rather than to throw, which
+is expressible today with no new component. `when_all` rethrows the lowest position's
+exception at the await, which is what makes the wrapping required rather than optional.
+
+**Where it would earn its keep, and the test for recognising a real caller:**
+interchangeable attempts at *one* goal — replicas, mirrors, a hedged request — where
+cancelling the rest is the point and one result is all anyone wants. Three conditions
+together: the children are interchangeable, stopping the others is desirable, and exactly
+one result is needed. Short of all three, the caller wants `when_all` or a plain loop.
+
+`docs/superpowers/plans/2026-11-16-when-any.md`'s "Not in this plan" entry repeats the
+superseded storage framing. It is left standing as the historical record of what was known
+when that plan was written, on the same principle decision 10 applied to the combinators
+spec and the stage A plan.
 
 ## What is left to the builder
 
