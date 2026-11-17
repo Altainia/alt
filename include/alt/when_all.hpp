@@ -928,8 +928,10 @@ namespace alt
 	 * overlap, the children that outlive the frame destroying nothing but themselves. The
 	 * argument is recorded where the hazard is: see the note on alt::async_latch, which
 	 * states the same three under the same labels, and which also says why alt::when_any
-	 * -- where that overlap is the success path rather than the cancellation path -- fits
-	 * the same argument.
+	 * fits the same argument unchanged: it carries a copy of this component's completion
+	 * hook, parks one joiner on the same detail::completion_counter, and keeps the same
+	 * park-until-zero discipline, so it adds no overlap this component does not already
+	 * have.
 	 *
 	 * A when_all awaited in a promise with no cancellation context -- an alt::task
 	 * driven by alt::sync_wait, with no alt::cancellable_task root above it -- is simply

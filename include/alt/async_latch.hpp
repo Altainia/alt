@@ -96,12 +96,38 @@ namespace alt
 	 * **THE SECOND COMBINATOR FITS THAT ARGUMENT, and it is worth saying why rather than
 	 * leaving it to the count.** alt::when_any's children are the same self-owning roots
 	 * it can only stop, so (A) holds verbatim, and it destroys no child, so (C)'s first
-	 * clause does too. What it changes is how OFTEN the overlap in (C) happens: in
-	 * when_all the chain resumes with children still holding block references only on a
-	 * cancellation, while a when_any resumes that way on every successful race, the
-	 * losers retiring behind the winner. That is a change of frequency, not of kind, and
-	 * (A) is indifferent to frequency -- the children that outlive the frame still
-	 * destroy nothing but themselves. So a reader need not re-derive this per combinator.
+	 * clause does too. **It also adds no overlap that alt::when_all does not already
+	 * have**, which is the part a reader is likeliest to assume rather than check: the two
+	 * carry the same completion hook, when_any's being a byte-for-byte copy of when_all's
+	 * rather than a second design (each note says so and names the other), both park
+	 * exactly one joiner on a detail::completion_counter, and both are resumed by the same
+	 * zero transition inside that counter's complete(). So (C)'s overlap is the same two
+	 * shapes in both, and neither is peculiar to either component:
+	 *
+	 * - On a SATISFIED wait that parked, the chain is resumed from inside the LAST child's
+	 *   completion hook. That hook fires from the child's frame destruction and calls
+	 *   complete(), whose zero transition resumes the joiner before it returns, and only
+	 *   then does the hook release(). So the resuming child -- its body already finished,
+	 *   its frame mid-destruction -- holds a block reference across the resumption, while
+	 *   the resumed chain runs on and may destroy the combinator's frame.
+	 *   ~when_all_awaiter builds its first bullet on exactly that reference. One child, in
+	 *   both components. A when_any that resumed on the election instead would be the
+	 *   component that differed here -- it would resume with its losers still running --
+	 *   and that is precisely the design it rejected: the await parks until the last child
+	 *   retires.
+	 * - On a CANCELLATION the chain is resumed RELEASED by its own stop callback, with
+	 *   children still parked or unwinding and their teardown possibly posted to a home
+	 *   scheduler. Many children, really alive, in both components.
+	 *
+	 * An earlier version of this paragraph made (C) a matter of FREQUENCY: the overlap
+	 * cancellation-only in when_all, every-success in when_any. Both halves were false.
+	 * ~when_all_awaiter's first bullet refutes the first, resting as it does on the
+	 * resuming child's reference on the SATISFIED path; and when_any's park-until-zero
+	 * guarantee refutes the second, no loser being alive when a won await returns. The
+	 * conclusion they were offered in support of never needed either: (A) is what keeps
+	 * the sibling hazard away across both shapes, however often each happens, because the
+	 * children that outlive the frame destroy nothing but themselves. So a reader need not
+	 * re-derive this per combinator.
 	 *
 	 * What WOULD break it is not another combinator but a change to who claims. A change
 	 * to waiter_list::claim or to resume_claimed would: resuming one node per detach, and

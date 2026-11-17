@@ -147,10 +147,10 @@ A race has one winner, and **two ways a loser's result is discarded**, with a th
 kind of loss behind them. None is a bug; all are worth knowing before putting work into
 a race.
 
-- **A completed loser's value is discarded.** Every child writes its own result slot,
-  because a child cannot know it has won until it has elected, and only the elected
-  slot is ever read. Two plain tasks that both simply finish are the common case of
-  this, not an exotic one.
+- **A completed loser's value is discarded.** Every child that completes writes its own
+  result slot, because a child cannot know it has won until it has elected, and only the
+  elected slot is ever read. Two plain tasks that both simply finish are the common
+  case of this, not an exotic one.
 - **A loser's exception is discarded**, and this is an **asymmetry with
   [`when_all`](when_all.md)**, which rethrows the lowest-position child's exception. A
   `when_any` rethrows only the *winner's*. A loser that completes by throwing has its
@@ -162,12 +162,17 @@ a race.
   [`alt::async_mutex`](async_mutex.md) loser is harmless, since the guard's destructor
   unlocks.
 
-A loser that is still parked when the winner's stop arrives is *released* rather than
-torn down, which is what the alt wait primitives do with a parked waiter, so its body
-runs on and produces the value or exception that is then discarded. One kind of
-loser does not get that far: a child whose awaitable is a nested `alt::task` is destroyed
-at that task's final suspend once a stop has been requested, so it produces nothing at
-all. Either way it retires, and the await waits for it.
+A loser that is still parked on an `alt` wait primitive when the winner's stop arrives is
+*released* rather than torn down — that is what those primitives do with a parked waiter —
+so its body runs on and produces the value or exception that is then discarded. Two kinds
+of loser produce nothing at all instead: one whose awaitable is a nested `alt::task`, which
+is destroyed at that task's final suspend once a stop has been requested, and one parked on
+a scheduler through [`alt::resume_on`](scheduler.md), which is abandoned when the
+scheduler comes to resume it. And a loser parked on something the stop cannot reach — an
+awaitable of your own that registers no stop callback — is not resumed by the stop at all:
+it stays outstanding until its own mechanism resumes it, and then produces its value or
+not by the same two rules. Every one of them retires, whichever way it goes, and the await
+waits for all of them.
 
 ## The winner's exception
 
@@ -226,11 +231,12 @@ winner's stop and a cancellation are separate operations — only the second mar
 wait cancelled. The three invariants that make this safe are `when_all`'s, stated under
 the same labels in [its documentation](when_all.md#each-child-is-its-own-cancellation-root)
 and in the note on [`alt::async_latch`](async_latch.md), where the hazard they are about
-lives. `when_any` fits them with one difference worth naming: invariant (C)'s overlap —
-the awaiting chain resuming while children are still alive — happens on **every
-successful race** here, where in a `when_all` it happens only on a cancellation. That is
-a change of frequency rather than of kind, and the `async_latch` note says why it does
-not re-open the argument.
+lives. `when_any` fits them unchanged, and the `async_latch` note says why: it carries a
+copy of `when_all`'s completion hook, parks one joiner on the same completion counter and
+keeps the same park-until-zero discipline, so invariant (C)'s overlap is the same in
+both — one child whose body has already finished, holding a block reference while its
+frame is destroyed, across a satisfied resumption; and many children still unwinding on a
+cancellation.
 
 A `when_any` awaited in a promise with **no cancellation context** — an `alt::task`
 driven by `alt::sync_wait`, with no `cancellable_task` root above it — is simply

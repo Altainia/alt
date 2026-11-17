@@ -117,7 +117,7 @@ Three invariants make that safe:
 - **(A) Ownership.** No combinator owns or destroys a child frame. The children are
   self-owning `alt::cancellable_task` roots, and a combinator only ever requests their
   stop.
-- **(B)** The claim election cannot free an already-claimed node. A loser whose node
+- **(B) The claim election cannot free an already-claimed node.** A loser whose node
   a satisfier already won loses the compare-and-swap in `waiter_list::claim`, so its
   `waiter_stop_release` resumes and frees nothing; the only way a child frame dies is
   the child itself running, which happens only when the walk reaches it.
@@ -130,8 +130,10 @@ Three invariants make that safe:
 The argument is recorded where the hazard lives, in the note on
 [`alt::async_latch`](async_latch.md) in `include/alt/async_latch.hpp`, which states the
 same three invariants under the same labels and says why
-[`when_any`](when_any.md) — where (C)'s overlap is the success path rather than the
-cancellation path — fits the same argument. Nesting one `when_all` inside a child is
+[`when_any`](when_any.md) fits the same argument unchanged — it carries a copy of this
+component's completion hook, parks one joiner on the same completion counter, and keeps
+the same park-until-zero discipline, so it adds no overlap this component does not
+already have. Nesting one `when_all` inside a child is
 the case that makes the root property observable, and `tests/test_when_all.cpp` guards
 it with a nested case.
 

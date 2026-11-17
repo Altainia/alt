@@ -200,7 +200,7 @@ namespace
 	 *
 	 * The counter is the observable for the claim when_any_child and
 	 * when_any_awaiter::await_resume both rest on, which is the first of when_any_child's
-	 * three cases: a child already PARKED on an alt wait primitive THIS FRAME AWAITS
+	 * four cases: a child already PARKED on an alt wait primitive THIS FRAME AWAITS
 	 * DIRECTLY is resumed *released* rather than torn down, so it runs on past its wait
 	 * even on the cancelled path, writes its slot and reaches its election.
 	 *

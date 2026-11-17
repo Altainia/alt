@@ -261,37 +261,60 @@ namespace alt::detail
 	 * slot. Electing first and storing afterwards would make that note false.
 	 *
 	 * A consequence worth stating, because it is the cost of that order: EVERY child
-	 * writes its slot, not only the winner, since a child cannot know it has won until
-	 * it has elected. A loser's slot is written and never read -- the awaiter reads the
-	 * elected position and nothing else -- so a loser's value is still discarded, just
-	 * not unwritten. No slot is shared: each child has its own, so two children
-	 * writing concurrently write to different objects.
+	 * THAT COMPLETES writes its slot, not only the winner, since a child cannot know it
+	 * has won until it has elected. A loser's slot is written and never read -- the
+	 * awaiter reads the elected position and nothing else -- so a loser's value is still
+	 * discarded, just not unwritten. No slot is shared: each child has its own, so two
+	 * children writing concurrently write to different objects. What the cases below sort
+	 * out is which STOPPED children get that far and which die first.
 	 *
-	 * A stopped child does not always skip the election, and THE CASES ARE THREE RATHER
-	 * THAN TWO. **This is the component's one condition on "a released child still
-	 * elects", and every other statement of that claim in this file points here rather
-	 * than restating it.**
+	 * A stopped child does not always skip the election, and THE CASES ARE FOUR. **This is
+	 * the component's one condition on "a released child still elects", and every other
+	 * statement of that claim in this file points here rather than restating it, so a gap
+	 * here is a gap at every site that points here.** The list has been short twice -- it
+	 * said two, then three, and a reachable shape was missing each time -- so read it as
+	 * the shapes that have been found rather than as a proof that there is no fifth.
 	 *
 	 * - PARKED ON AN ALT WAIT PRIMITIVE THAT THIS FRAME AWAITS DIRECTLY. It is resumed
 	 *   *released* rather than torn down -- that is what those primitives do with a
 	 *   parked waiter -- so it runs on, writes a released value into its slot and
-	 *   reaches this election too. Only this case elects.
+	 *   reaches this election too. **This is the only case the stop's own walk drives to
+	 *   an election**, which is all the publication order above needs; it is not the only
+	 *   case that ever elects. See the fourth.
 	 * - PARKED, BUT THROUGH A NESTED alt::task. The waiter is released the same way and
 	 *   the nested task's body does run on past its wait, but the child dies at that
 	 *   task's final suspend before control ever gets back here: alt::task's
 	 *   final_awaiter reads the stop and calls abandon_chain, which destroys ctx.root --
 	 *   and for a when_any_child the root IS this cancellable_task frame, so the whole
 	 *   child frame goes, with a home scheduler merely posting the destruction rather
-	 *   than changing it. The slot write below and the election after it never run. The child still RETIRES: the
-	 *   completion hook fires from the frame's destruction, which is the one point both
-	 *   paths pass through.
+	 *   than changing it. The slot write below and the election after it never run. The
+	 *   child still RETIRES: the completion hook fires from the frame's destruction,
+	 *   which is the one point both paths pass through.
 	 * - STOPPED BEFORE IT REACHED ANY SUSPENSION POINT. Torn down at its first one and
 	 *   never resumed, so it reaches neither the store nor the election; that is the
 	 *   child started after a winner has already stopped the source.
+	 * - PARKED ON SOMETHING THE STOP CANNOT REACH, which the walk does not touch at all.
+	 *   An awaitable that registers no stop callback -- a foreign one, or alt_test::park
+	 *   in the suite -- leaves the child OUTSTANDING when the walk returns, which is what
+	 *   holds the counter above zero while an election is already settled; the four tests
+	 *   that hold a child past the election are all built on it. What happens when
+	 *   its own mechanism finally resumes it is decided by how it is awaited, and
+	 *   NOTHING RE-CHECKS THE STOP ON THE WAY OUT: detail::cancellation_checked::-
+	 *   await_resume is a bare delegation, so a DIRECTLY awaited one runs on, writes its
+	 *   slot and elects, however long ago the stop was requested -- the first case
+	 *   reached late, outside the walk -- while one awaited through a nested alt::task
+	 *   dies at that task's final suspend as in the second. A child parked on a scheduler
+	 *   through alt::resume_on is the one sub-shape that is neither: checked_resume_on::-
+	 *   resume_or_abandon checks the stop AT resumption and calls abandon_chain, so that
+	 *   child reaches neither the store nor the election and is torn down nowhere near a
+	 *   first suspension point or a final suspend.
 	 *
 	 * The first case is why a winner is elected on the cancelled path as well, and why
 	 * when_any_awaiter::await_resume tests the cancellation flag ahead of the election
-	 * rather than after it. The second is why a test over this claim has to be built on
+	 * rather than after it. The fourth is the shape that function's discard witness is
+	 * built on: a child the stop cannot reach keeps the chain parked with the election
+	 * already settled, which is how a cancellation comes to arrive after a winner. The
+	 * second is why a test over the first's claim has to be built on
 	 * a direct awaitable, and it is MEASURED rather than reasoned: rebuild
 	 * WhenAnyTest.ACompletedLosersResultIsDiscarded and ALosersExceptionIsDiscarded with
 	 * their losers as nested alt::tasks and both PASS under the unconditional-election
@@ -696,11 +719,13 @@ namespace alt::detail
 		 * really does elect one: a child already PARKED on an alt wait primitive THAT
 		 * when_any_child AWAITS DIRECTLY is resumed released rather than torn down, so
 		 * it runs on, writes whatever a released wait is worth into its slot and reaches
-		 * its election. (Two kinds of child reach neither: one stopped before it reached
-		 * any suspension point, torn down at its first one, and one whose awaitable is a
-		 * nested alt::task, which dies at that task's final suspend ahead of its slot
-		 * write. when_any_child's note is where all three cases are set out, and the
-		 * condition is not restated below.)
+		 * its election. (Other children do not reach it on this path: one stopped before it
+		 * reached any suspension point, torn down at its first one; one whose awaitable is a
+		 * nested alt::task, which dies at that task's final suspend ahead of its slot write;
+		 * and one parked on something the stop cannot reach, which the walk does not touch
+		 * at all and which may therefore elect at any later moment instead.
+		 * when_any_child's note is where all four cases are set out, and the condition is
+		 * not restated below.)
 		 *
 		 * WHICH HALF OF THE TEST BELOW ACTUALLY DECIDES depends on things outside this
 		 * function, so it is set out as an invariant, then the conclusion that invariant
@@ -747,15 +772,21 @@ namespace alt::detail
 		 * library walks a token's callbacks in reverse registration order, and m_link is
 		 * registered in await_suspend, ahead of the park. The claim attempt therefore
 		 * always runs first, and **on every single-threaded path whose chain relays ONE
-		 * token -- which is every alt::cancellable_task chain, and so all of production --
-		 * the FIRST half of the test below is what returns the error.** That is the whole
-		 * of the conclusion. It is scoped to single-threaded because the suite is, and to
-		 * one token because the clause above needs a claim attempt to EXIST: a chain that
-		 * answered this awaiter's context read and the joiner's with two different tokens
-		 * leaves the joiner with no stop callback and so no claim attempt, which is the
-		 * third case below. An earlier draft of this sentence said "every single-threaded
-		 * path" without that qualification, and the suite now holds a single-threaded path
-		 * it is false of.
+		 * token -- which is every chain alt itself builds -- the FIRST half of the test
+		 * below is what returns the error.** That is the whole of the conclusion. It is
+		 * scoped to single-threaded because the suite is, and to one token because the
+		 * clause above needs a claim attempt to EXIST: a chain that answered this awaiter's
+		 * context read and the joiner's with two different tokens leaves the joiner with no
+		 * stop callback and so no claim attempt, which is the third case below. An earlier
+		 * draft of this sentence said "every single-threaded path" without that
+		 * qualification, and the suite now holds a single-threaded path it is false of.
+		 *
+		 * "EVERY CHAIN ALT ITSELF BUILDS" rather than all of production, and the
+		 * difference is not pedantic: detail::relays_cancellation is a duck-typed requires
+		 * test on the promise, so a caller's own coroutine type can answer the two context
+		 * reads with two tokens exactly as the suite's split_token_chain does, and get the
+		 * third case in its own program. alt::cancellable_task keeps one context per
+		 * chain; nothing makes a foreign promise do the same.
 		 *
 		 * It rests on an order [stopcallback] does not fix. Name it rather than rely on
 		 * it quietly, because when_all's own fan-out note and
@@ -1170,22 +1201,30 @@ namespace alt
 	 *
 	 * The winner stops its siblings, and **the await returns only once every child has
 	 * retired**, not when the winner is elected -- so no child of the caller's is still
-	 * running when a won await returns. That is what keeps the lvalue precondition below
-	 * enforceable: a caller's referents need only outlive the await, which it can
-	 * observe, rather than a teardown it cannot. It costs latency, the winner's value
-	 * being held back until the losers have unwound.
+	 * running when a won await returns. That is what makes the lvalue precondition below
+	 * checkable **on a won await**: there, and only there, referents that outlive the
+	 * await have outlived the children too, which is something a caller can observe
+	 * rather than a teardown it cannot. It costs latency, the winner's value being held
+	 * back until the losers have unwound.
+	 *
+	 * **A CANCELLED await does not wait**, deliberately: it returns with children still
+	 * unwinding, and their teardown may be posted to a @c home scheduler besides. So the
+	 * precondition below is phrased against THE CHILDREN and that is the rule to hold to;
+	 * the sentence above narrows it to an observable point on one path, and does not
+	 * weaken it on the other. A caller that lets its referents die with a cancelled
+	 * await has a use-after-free.
 	 *
 	 * **TWO WAYS A LOSER'S RESULT IS DISCARDED, and the second is an asymmetry with
 	 * alt::when_all.** A loser that completes with a valid value loses it: every child
-	 * writes its own slot, because a child cannot know it has won until it has elected,
-	 * and only the elected slot is ever read. And a loser that completes by THROWING
-	 * loses its exception the same way -- a when_all rethrows the lowest-position child's
-	 * exception, a when_any rethrows only the winner's, and nothing anywhere reports a
-	 * loser's. Behind both sits the loss alt::when_all documents on its cancellation
-	 * path: a loser stopped before it completed loses whatever its work had already
-	 * consumed, a semaphore permit taken and not returned or a task_completion_source
-	 * value set and never read. An alt::async_mutex loser is harmless, its guard
-	 * unlocking on destruction.
+	 * that completes writes its own slot, because a child cannot know it has won until it
+	 * has elected, and only the elected slot is ever read. And a loser that completes by
+	 * THROWING loses its exception the same way -- a when_all rethrows the
+	 * lowest-position child's exception, a when_any rethrows only the winner's, and
+	 * nothing anywhere reports a loser's. Behind both sits the loss alt::when_all
+	 * documents on its cancellation path: a loser stopped before it completed loses
+	 * whatever its work had already consumed, a semaphore permit taken and not returned
+	 * or a task_completion_source value set and never read. An alt::async_mutex loser is
+	 * harmless, its guard unlocking on destruction.
 	 *
 	 * Cancellation is an observable *result*, as for alt::when_all: when the awaiting
 	 * chain is cancelled the await yields @c std::errc::operation_canceled, even if a
