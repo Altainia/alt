@@ -133,40 +133,48 @@ namespace alt::detail
 		// touching these two lines.
 		//
 		// Measured rather than argued, and the instrument matters. **EVERY FIGURE BELOW
-		// IS A MEASUREMENT OF THIS COPY OF THE HOOK**, when_all's; when_any's copy has
-		// its own, recorded with the test that takes it, and neither stands in for the
-		// other.
+		// IS A MEASUREMENT OF THIS COPY OF THE HOOK**, when_all's. Swapping these two
+		// lines, measured 2026-11-16 against the suite at 799 tests:
 		//
-		// Swapping these two lines IS CAUGHT IN A PLAIN DEBUG BUILD. Re-measured
-		// 2026-11-16 against the suite at 799 tests: the whole suite aborts after 749
-		// tests, in WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheir-
-		// Teardown, on waiter_list's liveness assert inside detach_all -- "detaching
-		// every alt waiter on a destroyed list" -- and run one test at a time, 10 of the
-		// 35 WhenAllTest tests abort the same way, deterministically: 5 of 5 runs each
-		// for the eight checked that way, 1 of 1 for the other two. Under
-		// AddressSanitizer the swap is a heap-use-after-free in
-		// completion_counter::complete() with this function one frame above it,
-		// re-confirmed on that same test; the earlier 200/200 count for it was not
-		// re-taken. That ASan citation is sound where a waiter_list one would not be:
-		// what the freed chunk is touched by here is the counter's own atomic word, an
-		// ordinary instrumented access, not a pthread mutex inside glibc.
+		// - DEBUG, whole suite: ABORTS after 749 tests, in
+		//   WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown, on
+		//   waiter_list's liveness assert inside detach_all -- "detaching every alt
+		//   waiter on a destroyed list".
+		// - DEBUG, one test at a time: 10 of the 35 WhenAllTest tests abort the same
+		//   way. Eight of them were run five times each and aborted every time; the
+		//   other two were run once.
+		// - ADDRESSSANITIZER, on that same test: heap-use-after-free in
+		//   completion_counter::complete(), this function one frame above it. The
+		//   earlier 200/200 count for it was not re-taken.
+		// - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped.
 		//
-		// **AN EARLIER FIGURE HERE SAID A DEBUG BUILD SEES NOTHING** -- "fails nothing
-		// in a debug build, 0/200 against the cancellation tests and 0 across the whole
-		// suite, 763 tests at the time of that measurement", the freed block's counter
-		// word usually still holding a plausible value. It was honest when taken, and
-		// what falsified it is not an edit to this file but a later INSTRUMENT: PR 1 of
-		// the when_any stage added waiter_list's liveness sentinel, whose whole purpose
-		// is to make a destroyed-but-not-freed use detectable without a sanitizer, and a
-		// block freed by release() before complete() touches the counter is exactly that
-		// use. A measured zero can therefore go stale because the thing watching
-		// changed rather than because the code did -- which is why both figures above
-		// carry a date and a suite size, and why neither should be quoted without them.
+		// **THE DEBUG CATCH EXISTS ONLY BECAUSE AN ASSERT EXISTS**, which is what that
+		// last line measures: NDEBUG takes away both the sentinel's check and the
+		// alive() load that gives AddressSanitizer an instrumented access, and the swap
+		// is silent again with the use-after-free still there. DO NOT READ A GREEN RUN
+		// AS EVIDENCE THAT THE ORDER DOES NOT MATTER.
 		//
-		// The guards of record, by preset. In debug: the ten tests above, of which
-		// TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown is simply the first
-		// the suite reaches. Under AddressSanitizer: that same test, which reports it
-		// first across the pre-existing suite, and
+		// Which of waiter_list's three windows this lands in, because it is not the
+		// obvious one: release() has FREED the block before complete() touches the
+		// counter, so this is the second or third -- freed-and-poisoned, or
+		// freed-and-reused -- not the first, which is destroyed-but-not-yet-freed and
+		// the only one the sentinel covers with certainty. In the freed windows it only
+		// rejects every value but alive_pattern, so the debug figure above is what those
+		// ten tests did with the bytes they had. ASan's report comes earlier still, at
+		// the counter's own atomic word, and that citation is sound where a waiter_list
+		// one would not be: an ordinary instrumented access, not a pthread mutex inside
+		// glibc.
+		//
+		// One superseded figure, kept for its lesson: this note used to record "fails
+		// nothing in a debug build, 0/200 ... 763 tests at the time", and what falsified
+		// it was PR 1's liveness sentinel rather than any edit here. A measured zero can
+		// go stale because the instrument changed, so quote a figure with the date and
+		// the suite size it was taken at.
+		//
+		// The guards of record, by preset. In debug the first the suite reaches is
+		// WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown. Under
+		// AddressSanitizer: that same test, which reports it first across the
+		// pre-existing suite, and
 		// WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock, which
 		// reports it among the combinator tests added for this.
 		shared->counter().complete();

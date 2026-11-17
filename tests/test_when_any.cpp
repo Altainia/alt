@@ -1537,11 +1537,15 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 // - AN UNCONDITIONAL ELECTION (every caller wins, last completer takes it) is caught by
 //   seven tests, the two loser tests above among them. This one passes under it, for the
 //   same reason.
-// - SWAPPING complete() AND release() in on_when_any_child_complete aborts
-//   ACancelledRaceReportsOperationCanceled on waiter_list's liveness assert in debug and
-//   reports heap-use-after-free under both sanitizers, and passes the whole suite in
-//   release-tests. Run alone under it, this test is green in all four presets over five
-//   repeats.
+// - SWAPPING complete() AND release() in on_when_any_child_complete, re-measured
+//   2026-11-16 against the 799-test suite: the whole debug suite ABORTS after 786 tests,
+//   in ACancelledRaceReportsOperationCanceled, on waiter_list's liveness assert inside
+//   detach_all; run one test at a time, 2 of the 16 WhenAnyTest tests abort, that one and
+//   ACancellationDiscardsAWinnerAlreadyElected, with no other failure; AddressSanitizer
+//   and ThreadSanitizer each report heap-use-after-free in completion_counter::complete()
+//   on that test; and release-tests PASSES the whole suite, 794 of 799 with 5 skipped,
+//   the debug catch being an assert that NDEBUG takes away. THIS test is green under the
+//   swap, 5 of 5 runs alone in debug -- it is not one of the two.
 //
 // What it does assert, and what no other test in this file does: that two children
 // completing at once yield one resumption, an index and a value that agree, and both

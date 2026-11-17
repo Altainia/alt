@@ -217,17 +217,23 @@ namespace alt::detail
 	 * only point both the normal and the cancelled path pass through.
 	 *
 	 * The same two statements in the same order as detail::on_combinator_child_complete
-	 * in when_all.hpp. That is where the measured account of why the order is
-	 * load-bearing lives, and it is not restated here -- but **the figures there measure
-	 * THAT copy of the hook, not this one**, and this sentence used to restate when_all's
-	 * old "invisible in a debug build" as though it covered this function. It did not,
-	 * and that figure has since been re-measured and no longer holds for when_all either.
-	 * Swapping THESE two statements has its own recorded outcome, taken on this
-	 * component: it aborts WhenAnyTest.ACancelledRaceReportsOperationCanceled on
-	 * waiter_list's liveness assert in debug and reports heap-use-after-free under both
-	 * sanitizers, which the note on
-	 * WhenAnyTest.TwoChildrenCompletingConcurrentlyYieldExactlyOneWinner records. Two
-	 * things to carry away from when_all's account rather than re-derive:
+	 * in when_all.hpp. That is where the account of why the order is load-bearing lives,
+	 * and it is not restated here -- but **its figures measure THAT copy of the hook, not
+	 * this one.** Swapping THESE two statements, measured 2026-11-16 against the suite at
+	 * 799 tests:
+	 *
+	 * - DEBUG, whole suite: ABORTS after 786 tests, in
+	 *   WhenAnyTest.ACancelledRaceReportsOperationCanceled, on waiter_list's liveness
+	 *   assert inside detach_all.
+	 * - DEBUG, one test at a time: 2 of the 16 WhenAnyTest tests abort, that one and
+	 *   ACancellationDiscardsAWinnerAlreadyElected, and nothing else fails. The first was
+	 *   run five times and aborted every time.
+	 * - ADDRESSSANITIZER and THREADSANITIZER, on that same test: heap-use-after-free in
+	 *   completion_counter::complete() under each.
+	 * - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped. The debug catch is
+	 *   an assert, so NDEBUG takes it away and the swap is silent again.
+	 *
+	 * Two things to carry away from when_all's account rather than re-derive:
 	 *
 	 * - complete() may reach zero and resume the awaiting chain on this thread, whose
 	 *   body may drop its own reference. release() must follow it, and nothing may be
@@ -860,9 +866,9 @@ namespace alt::detail
 		 *   The verdict there is still !waited, through the first half: the park emplaces
 		 *   its callback on an already-stopped token, the claim finds the node, and
 		 *   m_released is set. And because nothing elects, this shape is **a further reason
-		 *   the statement below exists**, one none of the cases above covers and
-		 *   one nothing else in this file claims: the verdict has to be settled BEFORE the
-		 *   election is read at all, because here there is no position to read.
+		 *   the statement below exists**, one none of the cases above covers: the verdict
+		 *   has to be settled BEFORE the election is read at all, because here there is no
+		 *   position to read.
 		 *
 		 *   Measured rather than argued, and the two symptoms come apart exactly along
 		 *   the two reasons. Delete the whole verdict statement below -- not just the flag

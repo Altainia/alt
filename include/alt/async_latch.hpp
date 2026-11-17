@@ -99,10 +99,10 @@ namespace alt
 	 * clause does too. **It also adds no overlap that alt::when_all does not already
 	 * have**, which is the part a reader is likeliest to assume rather than check: the two
 	 * carry the same completion hook, when_any's being a byte-for-byte copy of when_all's
-	 * rather than a second design (each note says so and names the other), both park
-	 * exactly one joiner on a detail::completion_counter, and both are resumed by the same
-	 * zero transition inside that counter's complete(). So (C)'s overlap is the same two
-	 * shapes in both, and neither is peculiar to either component:
+	 * rather than a second design, both park exactly one joiner on a
+	 * detail::completion_counter, and both are resumed by the same zero transition inside
+	 * that counter's complete(). So (C)'s overlap is the same two shapes in both, and
+	 * neither is peculiar to either component:
 	 *
 	 * - On a SATISFIED wait that parked, the chain is resumed from inside the LAST child's
 	 *   completion hook. That hook fires from the child's FRAME DESTRUCTION and calls
@@ -130,17 +130,11 @@ namespace alt
 	 *
 	 * **BOTH SHAPES ARE DERIVED, NOT MEASURED.** They are read off the hook, the counter
 	 * and ~when_all_awaiter's note. No test fails if the satisfied-path overlap stops being
-	 * what this says, and nothing instruments it. What the suite does guard is the
-	 * neighboring property -- the hook's STATEMENT ORDER -- and the guards of record for
-	 * that are per component and per preset: for when_all's copy, ten WhenAllTest tests in
-	 * a debug build and a heap-use-after-free under AddressSanitizer; for when_any's,
-	 * WhenAnyTest.ACancelledRaceReportsOperationCanceled in debug and both sanitizers. Each
-	 * of those measures the use-after-free a swap produces, not the overlap described here.
-	 * The CONCLUSION survives that gap, resting on (A) rather than on the shape, so a wrong
-	 * description here cannot make the library unsafe; the DESCRIPTION does not, so check
-	 * it against the code rather than citing this note as evidence for it. Figures
-	 * elsewhere in these components are mutation measurements with a date, a preset and a
-	 * suite size attached: this paragraph is not one of them.
+	 * what this says, and nothing instruments it. What the suite guards instead is the
+	 * hook's STATEMENT ORDER, which is a different property from the overlap described
+	 * here. The CONCLUSION survives that gap, resting on (A) rather than on the shape, so
+	 * a wrong description here cannot make the library unsafe; the DESCRIPTION does not,
+	 * so check it against the code rather than citing this note as evidence for it.
 	 *
 	 * An earlier version of this paragraph made (C) a matter of FREQUENCY -- the overlap
 	 * cancellation-only in when_all, every-success in when_any -- and the first bullet

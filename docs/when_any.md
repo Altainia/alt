@@ -240,8 +240,7 @@ keeps the same park-until-zero discipline, so invariant (C)'s overlap is the sam
 both — one child whose frame is being destroyed, still holding a block reference across a
 satisfied resumption, and that child may be a loser the winner's stop tore down rather
 than one that finished its body; and many children still unwinding on a cancellation. The
-`async_latch` note also says which parts of that are derived from the code rather than
-measured by a test.
+`async_latch` note carries the derivation behind that.
 
 A `when_any` awaited in a promise with **no cancellation context** — an `alt::task`
 driven by `alt::sync_wait`, with no `cancellable_task` root above it — is simply
