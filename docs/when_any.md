@@ -162,6 +162,9 @@ a race.
   [`alt::async_mutex`](async_mutex.md) loser is harmless, since the guard's destructor
   unlocks.
 
+All three are documented rather than fixed, which was a deliberate decision rather than an
+oversight, and are tracked as [issue #27](https://github.com/Altainia/alt/issues/27).
+
 A loser that is still parked on an `alt` wait primitive when the winner's stop arrives is
 *released* rather than torn down — that is what those primitives do with a parked waiter —
 so its body runs on and produces the value or exception that is then discarded. Two kinds

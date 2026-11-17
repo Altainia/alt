@@ -38,7 +38,7 @@ static_assert(std::is_same_v<alt::await_result_t<decltype(std::declval<alt::task
 // left silent. The destructor's is the one a caller can reach without a mistake,
 // through a cancelled joiner, and
 // ACancelledJoinerIsReleasedWithOperationCanceledWhileTasksAreLive pins the state that
-// assert exists to catch.
+// assert exists to catch. Tracked, with task_completion_source's two, as issue #29.
 
 namespace
 {
