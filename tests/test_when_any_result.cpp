@@ -27,22 +27,21 @@ static_assert(std::same_as<when_any_value_t<alt::task<const int&>>, std::referen
 namespace
 {
 
-	// The build-detection constants and the death test style holder are shared from
-	// tests/death_test_support.hpp, which records why they live there. The skip messages
-	// below stay local, each naming this file's own assert.
+	// The build-detection constants, the death test style holder and the two halves of
+	// the ThreadSanitizer skip message are shared from tests/death_test_support.hpp,
+	// which records why they live there. Only the assert skip message below stays local:
+	// it names this file's own assert, where the ThreadSanitizer one names a property of
+	// GoogleTest and of the tool and so is shared.
 	using alt_test::asserts_are_compiled_in;
+	using alt_test::debug_and_asan_presets_run_it;
 	using alt_test::scoped_death_test_style;
+	using alt_test::thread_sanitizer_forks_death_tests;
 	using alt_test::thread_sanitizer_is_active;
 
 	/** Why the death test is skipped in a build whose asserts are gone. */
 	constexpr std::string_view skipped_without_asserts =
 	  "the position check is an assert, and NDEBUG compiles it away, so this build has no guard "
 	  "for a death test to observe.";
-
-	/** Why the death test is skipped under ThreadSanitizer. */
-	constexpr std::string_view skipped_under_thread_sanitizer =
-	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
-	  "die of the tool rather than of the assert. The debug and AddressSanitizer presets run it.";
 
 } // namespace
 
@@ -152,7 +151,7 @@ TEST(WhenAnyResultDeathTest, GettingAPositionThatDidNotWinAborts)
 
 	if(thread_sanitizer_is_active)
 	{
-		GTEST_SKIP() << skipped_under_thread_sanitizer;
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << debug_and_asan_presets_run_it;
 	}
 
 	const scoped_death_test_style style{"threadsafe"};
