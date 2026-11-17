@@ -37,6 +37,9 @@ namespace alt
 	 * indistinguishable by type, so a visitor would invite exactly the ambiguity the
 	 * indexed accessor exists to avoid.
 	 *
+	 * Declared in <alt/detail/when_any_result.hpp>, which <alt/when_any.hpp> includes,
+	 * so including alt::when_any is enough to name this.
+	 *
 	 * @tparam Vs The value type of each child, in argument order.
 	 */
 	template<typename... Vs>
@@ -107,6 +110,9 @@ namespace alt
 	 * winner's position is a run-time number rather than a variant index. That is why
 	 * this is a class of its own and not when_any_result over a single type, whose
 	 * index() is fixed at 0 by construction.
+	 *
+	 * Declared in <alt/detail/when_any_result.hpp>, which <alt/when_any.hpp> includes,
+	 * so including alt::when_any is enough to name this.
 	 *
 	 * @tparam V The value type every element contributes.
 	 */

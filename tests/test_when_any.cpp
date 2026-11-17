@@ -5,6 +5,7 @@
 #include <alt/cancellable_task.hpp>
 #include <alt/detail/cancellation.hpp>
 #include <alt/detail/when_any_result.hpp>
+#include <alt/scheduler.hpp>
 #include <alt/sync_wait.hpp>
 #include <alt/task.hpp>
 #include <alt/task_completion_source.hpp>
@@ -186,6 +187,45 @@ namespace
 		// -- the tracker lives in tracked_wait, and the loser's when_any_child frame is
 		// torn down at that task's final suspend without running on, which no tracker
 		// here sees.
+		frames_at_return = live_frames.load(std::memory_order_acquire);
+		record_outcome(record, result);
+
+		if(result)
+		{
+			winner = result->index();
+		}
+
+		co_await alt::cancellation_point{};
+	}
+
+	/**
+	 * Parks on @p gate, then hops to @p home, then yields @p value.
+	 *
+	 * The shape that gives a LOSER a suspension point PAST the one the winner's stop
+	 * reaches, which is what makes its teardown posted rather than immediate: released
+	 * from the gate by the winner's request_children_stop(), this body runs on into the
+	 * resume_on, and detail::checked_resume_on tests the stop at RESUMPTION, so the
+	 * child is abandoned out of the scheduler's queue rather than inside the walk. The
+	 * tracker is body-scoped and so lives in this frame, which abandon_chain destroys
+	 * whole; test_when_all.cpp's homed_wait is the same scaffolding over a child whose
+	 * teardown the CHAIN'S cancellation posts instead.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event and the scheduler are owned by the calling test, which drains the scheduler and waits for live_frames to reach zero before leaving their scope.
+	alt::task<int> hop_then_yield(alt::async_event& gate, alt::manual_scheduler& home, int value)
+	{
+		const frame_tracker tracker{value};
+		static_cast<void>(co_await gate);
+		co_await alt::resume_on(home);
+		co_return value;
+	}
+
+	/** Races two hop_then_yield children and reads live_frames at the instant the await returns. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which drains the scheduler and waits for live_frames to reach zero before leaving their scope.
+	alt::cancellable_task homed_race_root(alt::async_event& first, alt::async_event& second, alt::manual_scheduler& home, wait_record& record, std::size_t& winner, int& frames_at_return)
+	{
+		const auto result = co_await alt::when_any(hop_then_yield(first, home, 1), hop_then_yield(second, home, 2));
+
+		// Read first, for tracked_race_root's reason.
 		frames_at_return = live_frames.load(std::memory_order_acquire);
 		record_outcome(record, result);
 
@@ -719,7 +759,17 @@ TEST_F(WhenAnyTest, TheFirstChildToCompleteIsTheWinner)
 	// The loser was resumed released by the winner's request_children_stop(), ran its
 	// body to the end and retired, which is why the chain was resumed at all: the
 	// counter reaches zero only once every child has retired, winner or not.
-	EXPECT_FALSE(handle.stop_requested()) << "the chain itself was never cancelled";
+	//
+	// That the winner stopped its sibling with request_children_stop() and NOT with
+	// cancel() is pinned by the satisfied check above, which fails if the flag was set:
+	// await_resume tests that flag ahead of the election. An
+	// EXPECT_FALSE(handle.stop_requested()) << "the chain itself was never cancelled"
+	// stood here and was REMOVED as an assertion that cannot fail. Neither cancel() nor
+	// request_children_stop() touches the chain's own stop source -- both request the
+	// stop on the block's children source -- and cancellation_handle::stop_requested()
+	// reads the chain's, which this test leaves as alt::start made it, no
+	// start_options::token being set. So no mutation of this component could make it
+	// true. Do not re-add it here or in the range form's counterpart.
 }
 
 TEST_F(WhenAnyTest, TheWinnersValueAndIndexComeBack)
@@ -772,6 +822,80 @@ TEST_F(WhenAnyTest, NoChildIsRunningWhenAWonAwaitReturns)
 	EXPECT_EQ(live_frames, 0);
 }
 
+// The one path on which a loser's frame genuinely OUTLIVES the winner's
+// request_children_stop(), which is the claim in when_any_child's note: a sibling that
+// runs on and reaches a further suspension point is torn down there by abandon_chain,
+// which POSTS when start_options::home is set. Nothing else in this file gives a
+// when_any a home scheduler, so child_options.home = context->home ran only with an
+// empty scheduler_ref until this test existed.
+//
+// The scheduler is stepped one item at a time rather than drained, because the ordering
+// is the whole property and a drain cannot see it. What each run_one() does:
+//
+//   set     -- the winner's gate resumes its body inline, which hops: ONE item queued.
+//   run_one -- the winner completes, writes its slot, elects and wins, and its
+//              request_children_stop() releases the loser inline. The loser runs on into
+//              its own resume_on, which POSTS; the winner's frame then retires. The
+//              counter is still above zero, so THE CHAIN IS NOT RESUMED.
+//   run_one -- the posted item finds the stop requested, abandons the loser's chain and
+//              destroys its frame. That retirement drives the counter to zero and
+//              resumes the awaiting chain, satisfied.
+//
+// The assertions between the two run_one() calls are what make this a witness rather
+// than a race that merely completes, and that is MEASURED rather than argued. Debug
+// preset, 2026-11-16, suite at 800 tests: drop the child_options.home assignment in
+// when_any_awaiter::await_suspend -- the one line this test exists to exercise -- and
+// this test FAILS 3 of 3 runs, on exactly those three assertions and no others.
+// record.resumptions reads 1 where 0 is asserted, live_frames reads 0 where 1 is, and
+// home.empty() is true. It is ALONE in the suite under that mutation: 798 of the other
+// 799 tests pass and one is skipped.
+//
+// The other half of the property -- an await that returned on the ELECTION rather than
+// on the counter -- is not measured here, and this test is not where it is guarded.
+// Expressing that mutation means changing the resumption mechanism rather than one
+// line, and NoChildIsRunningWhenAWonAwaitReturns is the test that holds it.
+TEST_F(WhenAnyTest, AHomedLosersPostedTeardownStillDelaysTheWonAwait)
+{
+	alt::manual_scheduler home;
+	alt::async_event      first;
+	alt::async_event      second;
+	wait_record           record;
+	std::size_t           winner           = 99;
+	int                   frames_at_return = -1;
+
+	const auto handle = alt::start(homed_race_root(first, second, home, record, winner, frames_at_return),
+	                               {.home = alt::scheduler_ref{home}});
+	ASSERT_EQ(live_frames, 2) << "both children are parked on their own event";
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_TRUE(home.empty()) << "a parked child queues nothing";
+
+	// The winner's gate. Its body resumes inline and hops to the home scheduler, so
+	// nothing of the race has advanced past that hop yet.
+	second.set();
+
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_FALSE(home.empty()) << "the winner's own hop is queued";
+
+	// The winner completes, elects, wins and stops the loser -- which posts the loser's
+	// teardown instead of performing it.
+	ASSERT_TRUE(home.run_one());
+
+	EXPECT_EQ(record.resumptions, 0) << "the won await returned before the loser retired";
+	EXPECT_EQ(live_frames, 1) << "the loser's frame outlived request_children_stop()";
+	ASSERT_FALSE(home.empty()) << "the loser's teardown was posted, not performed in the walk";
+
+	// Draining that one posted item is what retires the loser, and only then is the
+	// chain resumed.
+	ASSERT_TRUE(home.run_one());
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_TRUE(record.satisfied);
+	EXPECT_EQ(winner, 1U) << "the second child is the one whose gate was set";
+	EXPECT_EQ(frames_at_return, 0) << "the await returned with the loser's frame still alive";
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_TRUE(home.empty());
+}
+
 TEST_F(WhenAnyTest, EveryChildAlreadyCompleteYieldsAWinnerWithoutSuspending)
 {
 	wait_record record;
@@ -794,8 +918,14 @@ TEST_F(WhenAnyTest, EveryChildAlreadyCompleteYieldsAWinnerWithoutSuspending)
 	EXPECT_TRUE(record.satisfied);
 	EXPECT_EQ(winner, 0U) << "the first child to complete wins, and here that is the first started";
 	EXPECT_EQ(value, 1);
-	EXPECT_FALSE(parked) << "no awaiter handed this frame away";
 	EXPECT_EQ(record.resumed_on, std::this_thread::get_id());
+
+	// An EXPECT_FALSE(parked) << "no awaiter handed this frame away" stood here, carried
+	// over verbatim from test_when_all.cpp's ready-children tests, and was REMOVED as an
+	// assertion that cannot fail: alt_test::parked is written only by the park* awaiters
+	// in coroutine_test_support.hpp and ready_children_probe uses none of them, so
+	// SetUp's reset leaves it empty whatever this component does. The guard it looked
+	// like is the one the comment above names.
 }
 
 TEST_F(WhenAnyTest, ACancelledRaceReportsOperationCanceled)
@@ -1211,6 +1341,57 @@ namespace
 		}
 	};
 
+	/** How many times counting_copy_ready's copy constructor has run. Reset by its one test. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state, written by a copy constructor the test cannot reach any other way.
+	int counting_copy_constructions = 0;
+
+	/**
+	 * A copyable awaitable, ready at once, that counts its own copies.
+	 *
+	 * copyable_ready's counterpart for the one thing a CONST range does that an lvalue
+	 * range does not: its elements cannot be moved out, so start_children copies each
+	 * into its child's frame instead. flagged_ready records its move on the source
+	 * object, which a const source cannot do for a copy -- the copy leaves it
+	 * untouched -- so the count lives outside the type.
+	 *
+	 * The move constructor is left in place on purpose. It is never selected here: a
+	 * const range's iter_move yields a const rvalue, which binds to the copy
+	 * constructor and not to the move one, so the count measures exactly the copies
+	 * start_children takes.
+	 */
+	struct counting_copy_ready
+	{
+		explicit counting_copy_ready(const int v): value(v)
+		{
+		}
+
+		counting_copy_ready(const counting_copy_ready& other): value(other.value)
+		{
+			++counting_copy_constructions;
+		}
+
+		counting_copy_ready(counting_copy_ready&&)                 = default;
+		counting_copy_ready& operator=(const counting_copy_ready&) = delete;
+		counting_copy_ready& operator=(counting_copy_ready&&)      = delete;
+		~counting_copy_ready()                                     = default;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*h*/) const noexcept
+		{
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return value;
+		}
+
+		int value;
+	};
+
 	/**
 	 * Both an awaitable and a sized range, and a range OF awaitables, so that the range
 	 * overload's other constraints are all satisfied and only !awaitable<R> keeps it out.
@@ -1506,7 +1687,9 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 	EXPECT_EQ(winner, 1U) << "the second element completed first, so its position is the winner";
 	EXPECT_EQ(value, race_child_values[1]);
 	EXPECT_EQ(live_frames, 0) << "the loser must have retired before a won await returns";
-	EXPECT_FALSE(handle.stop_requested());
+
+	// No handle.stop_requested() check here. It stood in this test too; see
+	// TheFirstChildToCompleteIsTheWinner for why that assertion cannot fail.
 }
 
 // WHAT THIS TEST CATCHES, measured rather than asserted, because the honest answer is a
@@ -1626,11 +1809,25 @@ TEST_F(WhenAnyTest, AnLvalueRangeIsBoundAndLeftMovedFrom)
 
 TEST_F(WhenAnyTest, AConstRangeOfCopyableElementsIsCopied)
 {
-	const std::vector<copyable_ready> children{{.value = 7}, {.value = 8}};
+	const std::vector<counting_copy_ready> children{counting_copy_ready{7}, counting_copy_ready{8}};
+
+	// The vector's own construction copies its elements out of the initializer list,
+	// which is not the copy this test is about. Count only what the await takes.
+	counting_copy_constructions = 0;
 
 	const auto result = alt::sync_wait(alt::when_any(children));
 
 	ASSERT_TRUE(result.has_value());
 	EXPECT_EQ(result->index(), 0U);
 	EXPECT_EQ(result->value(), 7);
+
+	// The property the name claims, which an earlier version of this test did not
+	// observe at all: it asserted only that a const range is accepted and that position
+	// 0's value comes back, and a copy is unobservable on a const SOURCE by
+	// construction. The element type counts its own copies instead, so the copy is read
+	// rather than assumed -- one per child, taken where start_children constructs the
+	// child's by-value parameter from the range's const rvalue.
+	EXPECT_EQ(counting_copy_constructions, 2) << "one copy per child, taken by start_children";
+	EXPECT_EQ(children[0].value, 7) << "a copied element leaves the caller's intact";
+	EXPECT_EQ(children[1].value, 8);
 }

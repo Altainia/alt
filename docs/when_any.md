@@ -226,6 +226,18 @@ because a window closing while one of its coroutines still runs work on a worker
 is the requirement the whole cancellation design exists for. That is why the precondition
 is phrased against *the children* and not against the await.
 
+**A satisfied race that elected no winner also reports `operation_canceled`.** Every
+child retired, none of them by completing, and no cancellation was requested: there is no
+winning slot to read, so the await reports the same released error a cancelled race
+reports rather than reading a slot no child filled.
+
+No route to that state is known, and none is claimed. Nothing in the test suite reaches
+it and no mechanism in the library is known to produce it. The report exists because the
+alternative in a release build is worse than an error: an out-of-range slot read in the
+range form, and in the argument-list form a `std::bad_variant_access` thrown out of an
+await whose documented error channel holds only the two errors above. Treat it as a
+defensive return rather than as a behavior to design against.
+
 ### Each child is its own cancellation root
 
 The children observe one stop source the combinator owns, not the awaiting chain's

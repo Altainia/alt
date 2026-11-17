@@ -144,7 +144,9 @@ namespace alt::detail
 	 * things that make that true are all elsewhere: the positions handed to elect() are
 	 * @c I from make_index_sequence<tuple_size_v<Storage>> in start_child, the slot
 	 * tuple is the same length by make_combinator_slots's own assert, and
-	 * when_any_awaiter::await_resume rules out no_winner before calling. So the walk
+	 * when_any_awaiter::await_resume rules out no_winner before calling -- with a
+	 * BRANCH and not only with a debug assert, which is what makes this hold in a
+	 * release build too; see decision 11 there. So the walk
 	 * cannot fall off the end, and the final branch below is position @c I by
 	 * elimination rather than by assumption. An assert here would be one that cannot
 	 * fire; it was written and removed for that reason.
@@ -193,8 +195,9 @@ namespace alt::detail
 	 * @p winner indexes the range form's vector unchecked, and is in range for the
 	 * counterpart of the reason the walk above gives: the positions handed to elect()
 	 * are the loop index in start_children, which asserts itself under the range's own
-	 * size, and the vector was sized from that same size. An assert here would be one
-	 * that cannot fire.
+	 * size, and the vector was sized from that same size. no_winner is not among them,
+	 * and is excluded by the same branch in when_any_awaiter::await_resume. An assert
+	 * here would be one that cannot fire.
 	 */
 	template<typename Result, typename Slots>
 	[[nodiscard]] Result assemble_when_any_result(Slots& slots, const std::size_t winner)
@@ -219,10 +222,11 @@ namespace alt::detail
 	 * The same two statements in the same order as detail::on_combinator_child_complete
 	 * in when_all.hpp. That is where the account of why the order is load-bearing lives,
 	 * and it is not restated here -- but **its figures measure THAT copy of the hook, not
-	 * this one.** Swapping THESE two statements, measured 2026-11-16 against the suite at
-	 * 799 tests:
+	 * this one.** Swapping THESE two statements, measured 2026-11-16, each row naming the
+	 * build it was taken under and, where it reports a whole-suite run, the suite it was
+	 * taken against:
 	 *
-	 * - DEBUG, whole suite: ABORTS after 786 tests, in
+	 * - DEBUG, whole suite: ABORTS after 786 of the suite's then 799 tests, in
 	 *   WhenAnyTest.ACancelledRaceReportsOperationCanceled, on waiter_list's liveness
 	 *   assert inside detach_all.
 	 * - DEBUG, one test at a time: 2 of the 16 WhenAnyTest tests abort, that one and
@@ -231,9 +235,29 @@ namespace alt::detail
 	 * - ADDRESSSANITIZER and THREADSANITIZER, on that same test: heap-use-after-free in
 	 *   completion_counter::complete() under each.
 	 * - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped -- a build with
-	 *   NDEBUG, which takes the sentinel's assert away, and no sanitizer. The fault is
-	 *   still there: the two sanitizer reports above come from complete()'s own first
-	 *   touch of the freed counter, not from an assert.
+	 *   NDEBUG, which takes the sentinel's assert away, and no sanitizer.
+	 * - A STANDALONE PROBE AT -O2 -DNDEBUG, WITH AND WITHOUT SANITIZERS, taken
+	 *   2026-11-16 by the whole-branch reviewer against the tree at 1c016b2, where the
+	 *   suite stood at 799 tests. NO preset and NO suite count belongs to this row, which
+	 *   is why neither is quoted for it: no preset compiles this suite with NDEBUG and a
+	 *   sanitizer together, so the probe replicates
+	 *   ACancelledRaceReportsOperationCanceled's shape outside the suite instead -- two
+	 *   counting waits awaited DIRECTLY, each parked on its own async_event, then
+	 *   handle.request_stop(). Bare at -O2 -DNDEBUG the swap SURVIVES with the correct
+	 *   verdict, which is the row above reproduced outside the preset. Under
+	 *   -fsanitize=address,undefined it is an AddressSanitizer heap-use-after-free, WRITE
+	 *   of size 8, at completion_counter::complete()'s fetch_sub
+	 *   (completion_counter.hpp:96), on memory freed by when_any_state::destroy in this
+	 *   file; under -fsanitize=thread, a ThreadSanitizer heap-use-after-free, atomic write
+	 *   of size 8, in that same frame. The instrument has teeth on its own terms: the same
+	 *   probe unmutated at -O0 gives the shipped test's result, and swapped at -O0 aborts
+	 *   on waiter_list's liveness assert, as the first row does.
+	 *
+	 * The fault survives NDEBUG rather than being an artifact of the sentinel's assert,
+	 * and that is now MEASURED rather than derived: it is the last row's two reports, both
+	 * of them in a build with no assert at all, both at complete()'s own first touch of
+	 * the freed counter. The derivation that stood here before said the same thing from
+	 * the debug sanitizer row, which is a weaker source for it.
 	 *
 	 * Two things to carry away from when_all's account rather than re-derive:
 	 *
@@ -312,7 +336,11 @@ namespace alt::detail
 	 *   An awaitable that registers no stop callback -- a foreign one, or alt_test::park
 	 *   in the suite -- leaves the child OUTSTANDING when the walk returns, which is what
 	 *   holds the counter above zero while an election is already settled; the four tests
-	 *   that hold a child past the election are all built on it. What happens when
+	 *   that hold a child past the election THAT way are all built on it. A fifth,
+	 *   AHomedLosersPostedTeardownStillDelaysTheWonAwait, holds one past the election the
+	 *   OTHER way available -- through the posted teardown of the resume_on sub-shape
+	 *   named at the end of this bullet, where the stop does reach the child and its
+	 *   frame outlives the walk anyway. What happens when
 	 *   its own mechanism finally resumes it is decided by how it is awaited, and
 	 *   NOTHING RE-CHECKS THE STOP ON THE WAY OUT: detail::cancellation_checked::-
 	 *   await_resume is a bare delegation, so a DIRECTLY awaited one runs on, writes its
@@ -397,6 +425,14 @@ namespace alt::detail
 			// and reaches a further suspension point is torn down there by
 			// abandon_chain, which POSTS when start_options::home is set, so its frame
 			// can outlive this call by as long as that scheduler takes to drain.
+			//
+			// WITNESSED, which it was not until the whole-branch review asked for it:
+			// WhenAnyTest.AHomedLosersPostedTeardownStillDelaysTheWonAwait is the only test
+			// in the suite that gives a when_any a home scheduler at all, and it steps that
+			// scheduler one item at a time so the loser's frame is READ as still alive after
+			// this walk has returned. Before it the sentence above was derived from the code
+			// and exercised nowhere, child_options.home having only ever been assigned an
+			// empty scheduler_ref by this suite.
 			//
 			// Neither conclusion below depends on that, which is why the qualification
 			// is only wording. It cannot free the block from under this frame: this
@@ -636,6 +672,10 @@ namespace alt::detail
 					// thread-affine state is destroyed on the thread start_options::home
 					// promises. The shared block is what makes that safe: the chain may be
 					// gone long before the home is drained.
+					//
+					// WhenAnyTest.AHomedLosersPostedTeardownStillDelaysTheWonAwait is the
+					// only test that reaches this line with a non-empty scheduler_ref, and it
+					// carries the figure for dropping it.
 					child_options.home = context->home;
 
 					// Before any child starts. when_all's note on this line gives the
@@ -689,7 +729,7 @@ namespace alt::detail
 			// repeats in debug and 0 of 20 under each of AddressSanitizer and
 			// ThreadSanitizer, for each of the five WhenAnyTest tests that existed then
 			// run alone, plus one whole-suite run of the suite as it then stood, all 788
-			// tests green in each of the three presets. The suite is 799 now, and that
+			// tests green in each of the three presets. The suite is 800 now, and that
 			// figure is a measurement about the smaller one; what makes the POSITION
 			// defensive rather than load-bearing is the mechanism above, that this
 			// component parks after its fan-out, which no test can change.
@@ -873,14 +913,37 @@ namespace alt::detail
 		 *
 		 *   Measured rather than argued, and the two symptoms come apart exactly along
 		 *   the two reasons. Delete the whole verdict statement below -- not just the flag
-		 *   half -- and in debug:
-		 *   ACancelledRaceReportsOperationCanceled, whose children have not elected when
-		 *   this function runs, ABORTS 3 of 3 on assert(winner != no_winner) with "an alt
-		 *   when_any was satisfied with no child elected"; while
-		 *   ACancellationDiscardsAWinnerAlreadyElected, where a winner HAS been elected,
-		 *   FAILS 3 of 3 instead, returning that winner. A third test with no cancellation
-		 *   at all passes. So the statement guards two different faults, and the assert is
-		 *   the backstop for the one with nothing elected.
+		 *   half -- and, RE-TAKEN 2026-11-16 against the suite at 800 tests, after
+		 *   decision 11's no-winner branch was added below the assert:
+		 *
+		 *   - DEBUG PRESET, one test at a time, three runs each.
+		 *     ACancelledRaceReportsOperationCanceled, whose children have not elected when
+		 *     this function runs, ABORTS 3 of 3 on
+		 *     assert(winner != combinator_election::no_winner) with "an alt when_any was
+		 *     satisfied with no child elected"; ACancellationDiscardsAWinnerAlreadyElected,
+		 *     where a winner HAS been elected, FAILS 3 of 3 instead, returning that winner.
+		 *     BOTH FIGURES ARE WHAT THEY WERE BEFORE THE BRANCH, and the read order is why:
+		 *     the assert stands AHEAD of the branch, so wherever asserts are compiled in it
+		 *     is still what the first of the two walks into.
+		 *   - RELEASE-TESTS PRESET, which is NDEBUG and so has no assert, three runs each.
+		 *     ACancelledRaceReportsOperationCanceled PASSES 3 of 3 -- the branch returns the
+		 *     same released error the deleted statement would have returned -- while
+		 *     ACancellationDiscardsAWinnerAlreadyElected still FAILS 3 of 3, the branch not
+		 *     firing where a winner was elected. So in a release build the branch ABSORBS the
+		 *     first of the two symptoms, and this mutation is then caught by the second test
+		 *     alone.
+		 *   - THE SAME RELEASE-TESTS BUILD WITH THE BRANCH ALSO REMOVED, as the control for
+		 *     that attribution, three runs. ACancelledRaceReportsOperationCanceled aborts
+		 *     3 of 3 on an uncaught std::bad_variant_access -- "std::get: wrong index for
+		 *     variant" -- thrown out of when_any_result_at's last position, which reads an
+		 *     unset slot once no_winner has walked past every earlier one. That is the fault
+		 *     the branch replaces, measured rather than derived, and it is what makes the
+		 *     absorption above the BRANCH'S doing rather than the mutation's.
+		 *
+		 *   A third test with no cancellation at all passes in every one of those builds. So
+		 *   the statement still guards two different faults; the assert is the backstop for
+		 *   the one with nothing elected wherever asserts are compiled in, and decision 11's
+		 *   branch is the backstop for it everywhere else.
 		 * - A winner elected and a sibling still outstanding when the stop arrives. This
 		 *   is the shape ACancellationDiscardsAWinnerAlreadyElected holds.
 		 * - A stop landing mid-fan-out after an early election.
@@ -910,9 +973,10 @@ namespace alt::detail
 		 *   measurement: let an elected winner outrank the whole verdict -- return the
 		 *   assembled result ahead of both halves -- and that test fails 5 of 5 in debug
 		 *   on its satisfied assertion. It was ALONE in the suite under that mutation when
-		 *   that figure was taken, against 789 tests; the suite stands at 799 now and
+		 *   that figure was taken, against 789 tests; at 799 tests
 		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner fails under it too,
-		 *   so the count is two and the witness is unchanged.
+		 *   so the count is two and the witness is unchanged. The suite is 800 now, one test
+		 *   added since, and the mutation was not re-run against it.
 		 * - THE FLAG HALF IS WITNESSED TOO, by
 		 *   WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, through
 		 *   the THIRD of the cases above. It drives the race from a hand-built
@@ -945,8 +1009,9 @@ namespace alt::detail
 		 *
 		 * - Moving the cancelled() test below the winner check, so that an elected winner
 		 *   outranks the flag, fails exactly one test:
-		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, alone in the suite at
-		 *   its current 799 tests, in a debug build and again under AddressSanitizer + UBSan.
+		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, alone in the suite,
+		 *   which stood at 799 tests when that was taken, in a debug build and again under
+		 *   AddressSanitizer + UBSan.
 		 *   Dropping the flag half outright fails the same test and nothing else.
 		 *
 		 *   AN EARLIER FIGURE HERE RECORDED THAT SAME MUTATION AS FAILING NOTHING -- 0 of
@@ -973,6 +1038,37 @@ namespace alt::detail
 		 * fully assembled winner is discarded with it. That is deliberate: a caller that
 		 * cancelled a race is told the race was cancelled, not handed a result it may no
 		 * longer have anywhere to put.
+		 *
+		 * A SATISFIED RACE THAT ELECTED NO WINNER reports the same released error, which
+		 * is the shape the design document's decision 11 binds
+		 * (docs/superpowers/specs/2026-11-15-when-any-design.md). The branch is below the
+		 * assert rather than instead of it: the assert still says that no path here is
+		 * meant to reach that state, and the branch says what happens if one does. What it
+		 * replaces is worth naming, because it is not an assert failure in a release
+		 * build: with no branch the range form evaluates slots[no_winner], an unchecked
+		 * std::vector::operator[] at SIZE_MAX, and the argument-list form walks its
+		 * positions to the last one and reads an unset slot, which under NDEBUG is a
+		 * std::bad_variant_access thrown out of an await whose error channel is documented
+		 * as std::errc::operation_canceled and std::errc::invalid_argument only. The second
+		 * of those two is MEASURED -- it is the control row in the figure list above, where
+		 * removing this branch under NDEBUG aborts a test on exactly that exception -- and
+		 * the first is read from the code, no test reaching the range form in this state.
+		 *
+		 * **NO ROUTE TO THAT STATE IS KNOWN, AND NONE IS CLAIMED HERE.** Nothing in the
+		 * suite reaches it, and this branch is therefore unwitnessed by construction
+		 * rather than by omission. The route decision 11 itself names does NOT produce it:
+		 * it says a child's frame destroyed by its home scheduler being torn down with the
+		 * teardown still queued fires the completion hook, drives the counter to zero and
+		 * fills no slot, but start_options::home documents that scheduler as leaking the
+		 * whole chain silently rather than crashing (cancellable_task.hpp), so the frame is
+		 * never destroyed, the hook never fires and the counter never drains -- a chain
+		 * parked forever, not a satisfied wait with no winner. And every other way a child
+		 * can retire without completing goes through a stop: either cancel(), whose flag is
+		 * stored before the children's stop and tested above ahead of the election, or
+		 * request_children_stop(), which only an already elected winner calls. So the
+		 * branch below is a defensive return for a state this component has no account of
+		 * reaching, and that is the whole of what it claims. Do not add a reachability
+		 * story to it without a test that exhibits one.
 		 *
 		 * May rethrow the winner's exception, which result_store::value() does from
 		 * inside the assembly. **A cancelled race rethrows nothing**, and that follows
@@ -1017,12 +1113,22 @@ namespace alt::detail
 			//
 			// An empty range would be the one way past that argument -- zero children,
 			// nothing elected -- and is answered above, before the block exists, so it
-			// never reaches here. That is what the assert below relies on. An
-			// argument-list race over no awaitables is a different case and also never
-			// reaches here: it fails to compile in when_any_result_at. See
-			// await_suspend, which separates the two.
+			// never reaches here. An argument-list race over no awaitables is a different
+			// case and also never reaches here: it fails to compile in
+			// when_any_result_at. See await_suspend, which separates the two.
 			const std::size_t winner = m_state->election().winner();
+
+			// The assert documents a state no path above reaches; the branch under it is
+			// what the component does if one ever does. Both are kept deliberately, and
+			// the note above says what is known about reaching this -- which is that
+			// nothing in the suite does and that the mechanism the design document named
+			// does not produce it.
 			assert(winner != combinator_election::no_winner && "an alt when_any was satisfied with no child elected");
+
+			if(winner == combinator_election::no_winner)
+			{
+				return std::expected<Result, std::error_code>{std::unexpect, wait_released_error()};
+			}
 
 			return assemble_when_any_result<Result>(m_state->slots(), winner);
 		}
@@ -1251,6 +1357,12 @@ namespace alt
 	 * rethrown, a winner's exception included. A winner that completed by throwing is a
 	 * completed child and wins; its exception is rethrown at the await, after the losers
 	 * have retired like any other winner's result.
+	 *
+	 * A race that ends with every child retired, NONE of them elected and no
+	 * cancellation requested reports @c std::errc::operation_canceled as well, there
+	 * being no winning slot to read. No mechanism in the library is known to produce
+	 * that state and no test reaches it; detail::when_any_awaiter::await_resume carries
+	 * what is and is not known about it, and why the branch is there anyway.
 	 *
 	 * **At least one awaitable is required, and that is checked at the call site.** A
 	 * race over no awaitables has no winner to yield, so the call is ill formed: the

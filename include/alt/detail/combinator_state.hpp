@@ -179,6 +179,23 @@ namespace alt::detail
 			// for this block's LIFETIME on this toolchain, and not only for some other
 			// implementation's verdict.
 			//
+			// BOTH HALVES OF THAT RE-TAKEN 2026-11-16, by the whole-branch reviewer, against
+			// the tree at 1c016b2, where the suite stood at 799 tests -- though no suite count
+			// belongs to these figures, which come from a standalone probe and not from a suite
+			// run. The probe replicates
+			// WhenAllTest.CancellingTheAwaitingChainReportsOperationCanceled -- a when_all over
+			// two children parked on their own async_event, then handle.request_stop().
+			// Unmutated, -O0 with asserts on: 0 failures in 200 repeats. Swapped, -O0 with
+			// asserts on and NO sanitizer: 0 failures in 200 repeats, so the zero above is
+			// today's zero and not only the one it was when first taken. Swapped, -O0 under
+			// -fsanitize=address,undefined: heap-use-after-free, WRITE of size 1, at this
+			// function's flag store, reached through combinator_stop_forwarder::operator() from
+			// cancellation_handle::request_stop. The re-take was worth its two compiles for one
+			// reason: PR 1's waiter_list sentinel falsified the nearest relative of this figure
+			// by changing what a CLAIM can see, and this path has no claim in it -- the swapped
+			// store lands on this block's own flag word, which is not a waiter_list -- so the
+			// zero was predicted to survive the sentinel and did.
+			//
 			// The debug reason the flag is not the deciding half in when_all is in
 			// when_all_awaiter's await_resume note: the chain's own stop claims the joiner
 			// before cancel() ever runs, so that verdict is settled on !waited. That is a
