@@ -1207,8 +1207,14 @@ namespace alt
 	 * rather than a teardown it cannot. It costs latency, the winner's value being held
 	 * back until the losers have unwound.
 	 *
-	 * **A CANCELLED await does not wait**, deliberately: it returns with children still
-	 * unwinding, and their teardown may be posted to a @c home scheduler besides. So the
+	 * **AN AWAIT THE CANCELLATION RELEASES DOES NOT WAIT**, deliberately: it returns with
+	 * children still unwinding, and their teardown may be posted to a @c home scheduler
+	 * besides. That is the shape a stop callback delivers, and the reason to say
+	 * "releases" rather than "cancelled": a wait ALREADY SATISFIED when the flag is set
+	 * did wait for every child, and still reports the cancellation --
+	 * WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner holds that
+	 * half. Reporting a cancellation and having skipped the wait are not the same
+	 * condition. So the
 	 * precondition below is phrased against THE CHILDREN and that is the rule to hold to;
 	 * the sentence above narrows it to an observable point on one path, and does not
 	 * weaken it on the other. A caller that lets its referents die with a cancelled

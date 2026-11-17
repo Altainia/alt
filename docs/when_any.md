@@ -171,7 +171,7 @@ a scheduler through [`alt::resume_on`](scheduler.md), which is abandoned when th
 scheduler comes to resume it. And a loser parked on something the stop cannot reach — an
 awaitable of your own that registers no stop callback — is not resumed by the stop at all:
 it stays outstanding until its own mechanism resumes it, and then produces its value or
-not by the same two rules. Every one of them retires, whichever way it goes, and the await
+not by the same two rules. Every one of them retires, whichever way it goes, and a won await
 waits for all of them.
 
 ## The winner's exception
@@ -212,13 +212,14 @@ no longer have anywhere to put.
 
 **A won await returns only once every child has retired.** The awaiting chain parks on
 the completion counter, and the losers retire into it like the winner, so no child of
-the caller's is running when a satisfied await comes back. That is what keeps the lvalue
-precondition below enforceable — a caller's referents need only outlive the *await*,
-which it can observe, rather than a teardown it cannot. It costs latency: the winner's
+the caller's is running when a satisfied await comes back. That is what makes the lvalue
+precondition below checkable **on a won await** — there, and only there, referents that
+outlive the *await* have outlived the children too, which a caller can observe rather
+than a teardown it cannot. It costs latency: the winner's
 value is held back until the losers have finished unwinding.
 
-The **cancellation** path deliberately does not wait. It resumes at once, with children
-still unwinding, exactly as a cancelled [`when_all`](when_all.md) does, because a window
+An await **the cancellation releases** deliberately does not wait. It resumes at once,
+with children still unwinding, exactly as a cancelled [`when_all`](when_all.md) does, because a window
 closing while one of its coroutines still runs work on a worker thread is the
 requirement the whole cancellation design exists for. That is why the precondition is
 phrased against *the children* and not against the await.
