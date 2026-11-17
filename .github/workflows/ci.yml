@@ -1,15 +1,25 @@
 name: CI
 
 on:
+  # Pull requests carry branch CI, including for forks: 'synchronize' is a default
+  # type, so a fork PR is tested when opened and on every push after. 'push' is
+  # restricted to main because it does not fire in this repository for fork
+  # pushes, and because a branch with an open PR would otherwise fire both events
+  # and have one run cancel the other on the same SHA -- cancelled jobs display
+  # as failed. A branch with no PR open yet runs on demand:
+  # 'gh workflow run CI --ref <branch>'.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
-# A branch with an open pull request fires both events. Sharing one group per
-# branch keeps that to a single run, and lets a new push cancel a stale one.
+# Keyed on the PR number rather than the head branch name, because head_ref for
+# a fork PR is the fork's own branch name and is not namespaced by owner: two
+# contributors who both push a branch called 'patch-1' would otherwise share one
+# group and cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
