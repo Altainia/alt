@@ -104,3 +104,33 @@ gtest_discover_tests(alt_tests
     DISCOVERY_MODE PRE_TEST
     PROPERTIES TIMEOUT 60
 )
+
+# A CMake-level test rather than a GoogleTest case, because what it exercises is not
+# reachable from C++: find_package's version comparison, and the explanatory note that
+# the root CMakeLists.txt appends to the generated AltConfigVersion.cmake. It installs
+# this build to a scratch prefix under the build tree and configures the tiny consumer
+# project in package/consumer against it once per case.
+#
+# It exists because two defects in that note shipped past careful hand-checking and
+# were caught only by building a real consumer: a remedy reading "install <version> or
+# newer", which SameMinorVersion makes false since it rejects a later minor as firmly
+# as an earlier one, and a guard that fired the note on a versionless
+# find_package(Alt), announcing a refusal that was not happening. Both are cases in
+# the driver, and each was re-checked by mutation: dropping either guard, or weakening
+# the remedy, fails this test by name.
+#
+# TIMEOUT is its own rather than the 60s the GoogleTest cases carry, because the cost
+# here is an install plus six nested CMake configures rather than a unit test's. That
+# cost turned out to be small: 1.0s for the whole test on the development machine,
+# where one fresh consumer configure measures 0.19s. The timeout is set far above that
+# rather than near it, because a cold CI runner performing full compiler-ABI detection
+# per case is a different number and this measurement says nothing about it.
+add_test(NAME package_version_gate
+    COMMAND ${CMAKE_COMMAND}
+        -DALT_BUILD_DIR=${CMAKE_BINARY_DIR}
+        -DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/package/consumer
+        -DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/package-version-gate
+        -DALT_VERSION=${PROJECT_VERSION}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/package/run_version_gate_test.cmake
+)
+set_tests_properties(package_version_gate PROPERTIES TIMEOUT 300)
