@@ -181,8 +181,11 @@ namespace
 		const auto result = co_await make_race(tracked_wait(first, 1), tracked_wait(second, 2));
 
 		// Read before anything else, because this instant is the only place the
-		// property is observable: by the time the requesting thread is back, every
-		// child's body has finished either way.
+		// property is observable: by the time the requesting thread is back, both
+		// tracked_wait bodies have ended either way. WHOSE body is the load-bearing word
+		// -- the tracker lives in tracked_wait, and the loser's when_any_child frame is
+		// torn down at that task's final suspend without running on, which no tracker
+		// here sees.
 		frames_at_return = live_frames.load(std::memory_order_acquire);
 		record_outcome(record, result);
 

@@ -217,8 +217,8 @@ the completion counter, and the losers retire into it like the winner, so no chi
 the caller's is running when a satisfied await comes back. That is what makes the lvalue
 precondition below checkable **on a won await** — there, and only there, referents that
 outlive the *await* have outlived the children too, which a caller can observe rather
-than a teardown it cannot. It costs latency: the winner's
-value is held back until the losers have finished unwinding.
+than a teardown it cannot. It costs latency: the winner's value is held back until the
+losers have finished unwinding.
 
 An await **the cancellation releases** deliberately does not wait. It resumes at once,
 with children still unwinding, exactly as a cancelled [`when_all`](when_all.md) does,

@@ -113,12 +113,13 @@ namespace alt
 	 *   first bullet on exactly that reference. One child, in both components.
 	 *
 	 *   **The FRAME is what the reference hangs on, not the body**, and the two come apart
-	 *   in when_any: its last retiree may be a LOSER the winner's stop tore down without
-	 *   finishing -- when_any_child's second and fourth cases -- where a satisfied when_all
-	 *   has no stop and its last retiree ran its body to the end. Either way the hook fires
-	 *   from the destruction and the reference is held across the resumption, which is why
-	 *   the shape is the same. An earlier draft of this bullet said "its body already
-	 *   finished" and was false of when_any for exactly that reason.
+	 *   in when_any: its last retiree may be a LOSER the winner's stop TORE DOWN rather
+	 *   than released, which never finished its body -- any of when_any_child's cases that
+	 *   destroy a child rather than let it run on, which is the second, the third, and the
+	 *   fourth where what the child was parked on is a scheduler or a nested task. A
+	 *   satisfied when_all has no stop, so its last retiree ran its body to the end. Either
+	 *   way the hook fires from the destruction and the reference is held across the
+	 *   resumption, which is why the shape is the same.
 	 *
 	 *   A when_any that resumed on the election instead would be the component that
 	 *   differed here -- it would resume with its losers still running -- and that is
@@ -128,26 +129,25 @@ namespace alt
 	 *   scheduler. Many children, really alive, in both components.
 	 *
 	 * **BOTH SHAPES ARE DERIVED, NOT MEASURED.** They are read off the hook, the counter
-	 * and ~when_all_awaiter's note. No test in the suite fails if the satisfied-path
-	 * overlap stops being what this says, and no instrument watches it: the nearest guard
-	 * is the hook's own statement order, which a debug build misses entirely and only
-	 * AddressSanitizer catches, and what that measures is the use-after-free, not this
-	 * shape. The CONCLUSION survives the gap, resting on (A) rather than on the shape, so a
-	 * wrong description here cannot make the library unsafe; the DESCRIPTION does not, so
-	 * check it against the code rather than citing this note as evidence for it. Figures
-	 * elsewhere in these components are mutation measurements with presets and suite sizes
-	 * attached: this paragraph is not one of them.
+	 * and ~when_all_awaiter's note. No test fails if the satisfied-path overlap stops being
+	 * what this says, and nothing instruments it. What the suite does guard is the
+	 * neighboring property -- the hook's STATEMENT ORDER -- and the guards of record for
+	 * that are per component and per preset: for when_all's copy, ten WhenAllTest tests in
+	 * a debug build and a heap-use-after-free under AddressSanitizer; for when_any's,
+	 * WhenAnyTest.ACancelledRaceReportsOperationCanceled in debug and both sanitizers. Each
+	 * of those measures the use-after-free a swap produces, not the overlap described here.
+	 * The CONCLUSION survives that gap, resting on (A) rather than on the shape, so a wrong
+	 * description here cannot make the library unsafe; the DESCRIPTION does not, so check
+	 * it against the code rather than citing this note as evidence for it. Figures
+	 * elsewhere in these components are mutation measurements with a date, a preset and a
+	 * suite size attached: this paragraph is not one of them.
 	 *
-	 * An earlier version of this paragraph made (C) a matter of FREQUENCY: the overlap
-	 * cancellation-only in when_all, every-success in when_any. Both halves were false.
-	 * ~when_all_awaiter's first bullet refutes the first, resting as it does on the
-	 * resuming child's reference on the SATISFIED path; and when_any's park-until-zero
-	 * guarantee refutes the second, no loser being left RUNNING when a won await returns --
-	 * the last retiree's frame is mid-destruction there, which is the first bullet's point
-	 * and not a loser still in flight. The conclusion they were offered in support of
-	 * never needed either: (A) is what keeps the sibling hazard away across both shapes,
-	 * however often each happens, because the children that outlive the frame destroy
-	 * nothing but themselves. So a reader need not re-derive this per combinator.
+	 * An earlier version of this paragraph made (C) a matter of FREQUENCY -- the overlap
+	 * cancellation-only in when_all, every-success in when_any -- and the first bullet
+	 * above refutes both halves at once. The conclusion never needed them: (A) is what
+	 * keeps the sibling hazard away across both shapes, however often each happens,
+	 * because the children that outlive the frame destroy nothing but themselves. So a
+	 * reader need not re-derive this per combinator.
 	 *
 	 * What WOULD break it is not another combinator but a change to who claims. A change
 	 * to waiter_list::claim or to resume_claimed would: resuming one node per detach, and

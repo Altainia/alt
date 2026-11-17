@@ -218,9 +218,16 @@ namespace alt::detail
 	 *
 	 * The same two statements in the same order as detail::on_combinator_child_complete
 	 * in when_all.hpp. That is where the measured account of why the order is
-	 * load-bearing lives -- a swap is invisible in a debug build and 200/200 under
-	 * AddressSanitizer there -- and it is not restated here. Two things to carry away
-	 * from it rather than re-derive:
+	 * load-bearing lives, and it is not restated here -- but **the figures there measure
+	 * THAT copy of the hook, not this one**, and this sentence used to restate when_all's
+	 * old "invisible in a debug build" as though it covered this function. It did not,
+	 * and that figure has since been re-measured and no longer holds for when_all either.
+	 * Swapping THESE two statements has its own recorded outcome, taken on this
+	 * component: it aborts WhenAnyTest.ACancelledRaceReportsOperationCanceled on
+	 * waiter_list's liveness assert in debug and reports heap-use-after-free under both
+	 * sanitizers, which the note on
+	 * WhenAnyTest.TwoChildrenCompletingConcurrentlyYieldExactlyOneWinner records. Two
+	 * things to carry away from when_all's account rather than re-derive:
 	 *
 	 * - complete() may reach zero and resume the awaiting chain on this thread, whose
 	 *   body may drop its own reference. release() must follow it, and nothing may be
@@ -1214,11 +1221,10 @@ namespace alt
 	 * did wait for every child, and still reports the cancellation --
 	 * WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner holds that
 	 * half. Reporting a cancellation and having skipped the wait are not the same
-	 * condition. So the
-	 * precondition below is phrased against THE CHILDREN and that is the rule to hold to;
-	 * the sentence above narrows it to an observable point on one path, and does not
-	 * weaken it on the other. A caller that lets its referents die with a cancelled
-	 * await has a use-after-free.
+	 * condition. So the precondition below is phrased against THE CHILDREN and that is the
+	 * rule to hold to; the sentence above narrows it to an observable point on one path,
+	 * and does not weaken it on the other. A caller that lets its referents die with an
+	 * await THE CANCELLATION RELEASED has a use-after-free.
 	 *
 	 * **TWO WAYS A LOSER'S RESULT IS DISCARDED, and the second is an asymmetry with
 	 * alt::when_all.** A loser that completes with a valid value loses it: every child
