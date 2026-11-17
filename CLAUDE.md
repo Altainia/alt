@@ -38,8 +38,8 @@ ctest --preset debug --output-on-failure
 
 Run these before committing. All must pass with zero errors.
 
-CI runs **eight** jobs on every branch push and pull request, and every one of them
-corresponds to a check below: `Build & Test (GCC)`, `Build & Test (Clang)`,
+CI runs **eight** jobs on every pull request and on every push to `main`, and every
+one of them corresponds to a check below: `Build & Test (GCC)`, `Build & Test (Clang)`,
 `Build & Test (optimized)`, `AddressSanitizer + UBSan`, `ThreadSanitizer`,
 `clang-tidy`, `cppcheck` and `Coverage`. A local sweep that skips one is not a
 green branch, however it reports itself — a sweep that omitted `Coverage` and a
@@ -209,7 +209,10 @@ deliberate refusal is distinguishable from a broken install.
 All work reaches `main` through a pull request. `main` is never pushed to directly.
 
 1. Branch: `feature/<name>` for new work, `bug/<name>` for fixes.
-2. Commit once tests pass. No need to ask for permission to commit. CI runs on every branch push, so a broken branch shows up before the pull request exists.
+2. Commit once tests pass. No need to ask for permission to commit. A bare branch push does not
+   run CI — only pull requests and `main` do. To see a branch go green before the pull request
+   is ready, open it as a draft (a draft PR fires the full eight jobs) or run the suite on
+   demand with `gh workflow run CI --ref <branch>`.
 3. Open a pull request against `main` once the work is ready.
 4. Add the version bump as its own commit on the branch. See below.
 5. Merge with `gh pr merge --merge` after CI is green.
