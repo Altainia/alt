@@ -115,13 +115,13 @@ namespace
 	 * start_options::on_completion. Never called: the assert fires before spawn starts
 	 * anything, and the group overwrites the field in any case.
 	 *
-	 * A named function rather than a captureless lambda written at the call site, for a
-	 * preprocessor reason worth recording: the call site is inside an EXPECT_DEATH
-	 * statement, and the preprocessor separates macro arguments on commas protected only
-	 * by PARENTHESES, not by braces. A lambda spelled inline needs no comma, but
-	 * anything of the form {.invoke = ..., .state = ...} does, and that comma ends the
-	 * macro's first argument mid-expression -- measured, as "too many arguments provided
-	 * to function-like macro invocation".
+	 * A named function purely for readability: the call site is already inside an
+	 * EXPECT_DEATH statement, and a lambda spelled there would put a function body in the
+	 * middle of one. It is NOT a necessity. Substituting
+	 * {.invoke = [](void*) noexcept {}} at the call site was measured to compile, the
+	 * only diagnostic being that this function had become unused. What genuinely cannot
+	 * be written there is a second designated initializer -- see the call site, which
+	 * records why.
 	 */
 	void unused_completion_hook(void* /*state*/) noexcept
 	{}
@@ -699,7 +699,7 @@ TEST_F(TaskGroupTest, ASpawnRacingACompletionNeverUndercountsOrOvercounts)
 //
 // These take no fixture, as the suite's other death tests do not, so SetUp never runs
 // and reset_coroutine_test_state() is never called for them. They must therefore not
-// read live_frames or destroyed_tags. GoogleTest runs *DeathTest suites ahead of the
+// read live_frames or destruction_order. GoogleTest runs *DeathTest suites ahead of the
 // others, and the fixtures that follow reset that state themselves.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. Measured in this file with the pinned clang-tidy-19 (19.1.7): all three bodies below score 39 against the threshold of 25, and this one scores 0 when its two skip guards are removed and the macro left in place. So the guards are what let the expansion count, and they cannot move -- GTEST_SKIP only skips the function it is written in. tests/test_waiter_list.cpp measured the same figures for an identically shaped body. What this body actually contains is two skip guards and one expectation.
 TEST(TaskGroupDeathTest, DestroyingAGroupWithALiveTaskAborts)
@@ -742,8 +742,8 @@ TEST(TaskGroupDeathTest, DestroyingAGroupWithALiveTaskAborts)
 	// process then aborts in waiter_list::detach_all's liveness sentinel instead --
 	// "detaching every alt waiter on a destroyed list",
 	// include/alt/detail/waiter_list.hpp:618. The mutated build does NOT exit 0; it dies
-	// of a different assert one step further on. The other two tests in this file do
-	// exit 0 when mutated.
+	// of a different assert one step further on. The other two tests in this file do exit
+	// cleanly when mutated, which GoogleTest reports as "failed to die".
 	//
 	// That measurement is the whole argument for matching this assert's own text below.
 	// A matcher of "Assertion", or anything else both aborts share, would have PASSED on

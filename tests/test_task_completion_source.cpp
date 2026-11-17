@@ -77,7 +77,8 @@ namespace
 	constexpr std::string_view skipped_without_asserts =
 	  "the set-twice and await-twice preconditions are asserts, and NDEBUG compiles them away, so "
 	  "this build has no guard for a death test to observe. That is a real gap rather than a "
-	  "configuration detail: in a release build a second set is a silent no-op instead.";
+	  "configuration detail: in a release build a second set is a silent no-op, and a second await "
+	  "parks a waiter that no set will resume, since publish detaches only one.";
 
 	/** Why a death test is skipped under ThreadSanitizer. */
 	constexpr std::string_view skipped_under_thread_sanitizer =
@@ -581,7 +582,7 @@ TEST_F(TaskCompletionSourceTest, AStopRacingSetValueResumesTheWaiterExactlyOnce)
 //
 // These take no fixture, as the suite's other death tests do not, so SetUp never runs
 // and reset_coroutine_test_state() is never called for them. They must therefore not
-// read live_frames or destroyed_tags. GoogleTest runs *DeathTest suites ahead of the
+// read live_frames or destruction_order. GoogleTest runs *DeathTest suites ahead of the
 // others, and the fixtures that follow reset that state themselves.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. The two skip guards are that `if`, and they cannot move: GTEST_SKIP only skips the function it is written in. Measured in this file with the pinned clang-tidy-19 (19.1.7): both bodies below score 39 against the threshold of 25, the same figure tests/test_task_group.cpp's three identically shaped bodies measured in this same change, where one of them was also measured at 0 with its two skip guards removed and the macro left in place. What this body actually contains is two skip guards and one expectation.
 TEST(TaskCompletionSourceDeathTest, SettingASourceTwiceAborts)
@@ -635,15 +636,16 @@ TEST(TaskCompletionSourceDeathTest, AwaitingASourceTwiceAborts)
 	// the mistake a caller actually makes: the first parks on the unset source, and the
 	// second's co_await is what aborts.
 	//
-	// DELICATE. The records are declared BEFORE the source, and that order matters only
-	// for the mutated build the step-5 check produces -- but it is what makes that
-	// check's result mean anything. With the assert at :272 removed, the second waiter
-	// links and parks too, and both are released by the source's destructor, resuming to
-	// write their outcomes into the records. Destruction being in reverse, a source
-	// declared first would be destroyed last, after the records it is about to make those
-	// waiters write to, and the mutated build would be undefined rather than merely
-	// wrong. In the shipped build the abort happens at the second co_await and none of
-	// this is reached.
+	// The records are declared BEFORE the source, which keeps the mutated build the
+	// step-5 check produces free of formal undefined behavior. With the assert at :272
+	// removed, the second waiter links and parks too, and both are released by the
+	// source's destructor, resuming to write their outcomes into the records; destruction
+	// being in reverse, a source declared first would be destroyed last, after the
+	// records those waiters are about to write to. The hazard is formal rather than
+	// observable, completion_record<int> being trivially destructible, and the mutation
+	// check's verdict is not known to depend on it. Nothing in this suite enforces the
+	// order: inverting it leaves the shipped build passing, because the abort happens at
+	// the second co_await and none of this is reached.
 	EXPECT_DEATH(
 	  {
 		  completion_record<int> first;

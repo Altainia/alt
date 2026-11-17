@@ -24,7 +24,7 @@ the assert's own text. No library code changes.
 - Each matcher is the project's own assert text, never a generic `Assertion`.
   `_GLIBCXX_ASSERTIONS` is on by default here and aborts with its own message.
 - The suite's death tests take no fixture, so these get no
-  `reset_coroutine_test_state()`. They must not read `live_frames` or `destroyed_tags`.
+  `reset_coroutine_test_state()`. They must not read `live_frames` or `destruction_order`.
 - `tests/death_test_support.hpp` is included, not re-derived. Skip messages stay local
   to each file and name that file's own assert.
 - `tests/.clang-tidy` is appended to, never rewritten.

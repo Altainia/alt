@@ -68,7 +68,7 @@ What would make this a failure even though the tests pass:
   the `alt_tests` sources list.
 - The suite's death tests take no fixture, so these get no
   `reset_coroutine_test_state()`. The two that build coroutine frames must therefore
-  not read `live_frames` or `destroyed_tags`.
+  not read `live_frames` or `destruction_order`.
 - `tests/death_test_support.hpp` is included, not re-derived. Skip messages stay local
   to each file and name that file's own assert, as the header's documentation requires.
 
