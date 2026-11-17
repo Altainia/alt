@@ -788,7 +788,7 @@ TEST(WaiterListDeathTest, ClaimingAWaiterOnADestroyedListAborts)
 	EXPECT_DEATH(static_cast<void>(storage->claim(node)), "claiming an alt waiter on a destroyed list");
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. Measured with the pinned tool at threshold 0: the macro alone in a test body is 0, the macro alone in a named helper is 37, and one skip guard ahead of it is 38 -- so hoisting the macro into a helper moves the finding rather than removing it, and the guard cannot move because GTEST_SKIP only skips the function it is written in. What this body actually contains is two skip guards and one expectation.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body. See the test above, whose suppression carries the measurement.
 TEST(WaiterListDeathTest, LinkingAWaiterOnADestroyedListAborts)
 {
 	if(!asserts_are_compiled_in)

@@ -391,8 +391,7 @@ namespace alt::detail
 		 * shipped tree faults; this order is what prevents it. The honest statement of
 		 * what the order buys is: the callback is deregistered before the list can be
 		 * freed by construction, rather than by the argument above. Four things break that
-		 * argument, two of the four are local to when_all, and the last needs no change
-		 * anywhere:
+		 * argument:
 		 *
 		 * - Swapping complete() and release() in on_combinator_child_complete. The
 		 *   satisfied path's immunity is exactly "the resumer still holds a reference", and

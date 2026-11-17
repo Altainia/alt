@@ -1507,7 +1507,7 @@ namespace
 			// makes them say what they say. After the co_await, so a resumption has
 			// already happened and publishing it cannot influence which party achieved
 			// it. Before the co_return, so this body is still short of the slot write and
-			// the completion hook when the awaiting thread's stop starts travelling the
+			// the completion hook when the awaiting thread's stop starts traveling the
 			// chain.
 			handshake->resumed.store(true, std::memory_order_release);
 
@@ -2407,7 +2407,7 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	//
 	// The ordering itself is program order on one thread: pin_the_satisfiers_win stores
 	// released and only then does the caller enter request_stop(), so the child is
-	// certainly let go before the stop starts travelling the chain. Whether the child's
+	// certainly let go before the stop starts traveling the chain. Whether the child's
 	// teardown is still IN FLIGHT while that stop walks is timing, and no assertion in
 	// this file observes it. The handful of satisfied verdicts per thousand runs is not
 	// that witness either: it says the two are close enough in time for their order to
