@@ -335,21 +335,32 @@ documentation. New public API, so a **minor** bump, **1.11.1 to 1.12.0**.
     stop, which is either `combinator_state::cancel()` — whose flag is stored before the
     children's stop and tested in `await_resume` ahead of the election — or
     `request_children_stop()`, which only an already elected winner calls. The only
-    evidence the branch does anything at all is a negative control, measured 2026-11-16
-    against the suite at 800 tests: remove the branch under `NDEBUG` and
+    evidence the branch does anything at all is a negative control, and the control took
+    **two** changes at once: measured 2026-11-16 against the suite at 800 tests, with
+    `await_resume`'s verdict statement deleted *and* the branch removed, under `NDEBUG`,
     `WhenAnyTest.ACancelledRaceReportsOperationCanceled` aborts 3 of 3 on an uncaught
-    `std::bad_variant_access`, out of `when_any_result_at`'s last position. The range
-    form's `slots[SIZE_MAX]` is read from the code and was not measured. The honest
-    account lives with the code, in `await_resume`'s note and in `docs/when_any.md`, and
-    neither offers a reachability story.
+    `std::bad_variant_access` out of `when_any_result_at`'s last position. **Removing the
+    branch alone is caught by nothing**: all 800 tests pass in debug with it gone, which
+    the scoped re-review measured on the committed tree. An earlier draft of this
+    paragraph quoted the control with only its second half, which claimed something that
+    does not happen. The range form's `slots[SIZE_MAX]` is read from the code and was not
+    measured at all. The honest account lives with the code, in `await_resume`'s note and
+    in `docs/when_any.md`, and neither offers a reachability story.
 
     **The flag worked and the check did not.** This decision's last line asked to be
     checked on precisely this point, and nothing checked it: the implementation shipped
     with the assert and no branch, and `docs/superpowers/plans/2026-11-16-when-any.md`'s
     own coverage self-check recorded the decision as implemented by a plan step that never
-    specified it. The gap was found only by the whole-branch review of the finished branch.
-    Both of those records are corrected in place with their corrections attached; this one
-    is the source the others argued from.
+    specified it. That self-check did not merely MISS the question — it **closed** it. A
+    reader of the plan who wanted to know whether decision 11 was covered found the answer
+    "yes" in writing, so the one document whose job was to catch the gap is the document
+    that made the gap invisible, and the three stages then agreed with each other all the
+    way to the finished branch. The claim was about COVERAGE rather than about code, which
+    is why nothing compiled or ran could contradict it; a grep of Task 3 Step 5's own text
+    for the branch it named would have refuted it in one line, and that is the check to
+    run on a coverage claim. The gap was found only by the whole-branch review of the
+    finished branch. All three records are corrected in place with their corrections
+    attached; this one is the source the other two argued from.
 
 ## Corrections to the combinators spec
 

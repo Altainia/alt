@@ -940,7 +940,10 @@ namespace alt::detail
 		 *     the branch replaces, measured rather than derived, and it is what makes the
 		 *     absorption above the BRANCH'S doing rather than the mutation's.
 		 *
-		 *   A third test with no cancellation at all passes in every one of those builds. So
+		 *   A third test with no cancellation at all passed in the debug build this figure
+		 *   was first taken in, and was NOT re-run in the three builds above -- an earlier
+		 *   draft of this sentence said "in every one of those builds", which no row here
+		 *   supports. So
 		 *   the statement still guards two different faults; the assert is the backstop for
 		 *   the one with nothing elected wherever asserts are compiled in, and decision 11's
 		 *   branch is the backstop for it everywhere else.
@@ -1050,9 +1053,14 @@ namespace alt::detail
 		 * positions to the last one and reads an unset slot, which under NDEBUG is a
 		 * std::bad_variant_access thrown out of an await whose error channel is documented
 		 * as std::errc::operation_canceled and std::errc::invalid_argument only. The second
-		 * of those two is MEASURED -- it is the control row in the figure list above, where
-		 * removing this branch under NDEBUG aborts a test on exactly that exception -- and
-		 * the first is read from the code, no test reaching the range form in this state.
+		 * of those two is MEASURED, and the control it was measured by took TWO changes at
+		 * once: it is the control row in the figure list above, where the verdict statement
+		 * is deleted AND this branch removed, under NDEBUG, and a test aborts on exactly
+		 * that exception. **Removing this branch ALONE is caught by nothing** -- all 800
+		 * tests pass in debug with it gone, measured 2026-11-16 by the scoped re-review --
+		 * so the exception is what the branch prevents in a state nothing reaches, not a
+		 * fault any test walks into today. The first of the two is read from the code, no
+		 * test reaching the range form in this state at all.
 		 *
 		 * **NO ROUTE TO THAT STATE IS KNOWN, AND NONE IS CLAIMED HERE.** Nothing in the
 		 * suite reaches it, and this branch is therefore unwitnessed by construction
