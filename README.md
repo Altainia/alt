@@ -141,6 +141,9 @@ enforces this: requesting `1.12.0` accepts 1.12.0 and later 1.12.x releases, but
 against 1.12.0) also fails. Update the requested version when you upgrade across a minor
 release.
 
+A refused request prints which minor series the installed package accepts and why, so a
+deliberate refusal is distinguishable from a broken install.
+
 Then include headers as needed:
 
 ```cpp

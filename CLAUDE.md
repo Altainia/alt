@@ -170,6 +170,9 @@ accepts 1.12.0 and later 1.12.x releases, but rejects 1.13.0 and 1.11.x, and a r
 a higher patch than the installed one (1.12.1 against 1.12.0) also fails. When upgrading
 across a minor release, update the version your project requests.
 
+A refused request prints which minor series the installed package accepts and why, so a
+deliberate refusal is distinguishable from a broken install.
+
 ## Coding guidelines
 
 **Naming**
