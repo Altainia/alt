@@ -1525,11 +1525,12 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 //   are nested alt::tasks, so on any repeat where the winner's request_children_stop()
 //   beats the loser's final suspend, the loser is abandoned there and reaches no election
 //   at all -- see counting_event_wait -- so there is frequently no second election for a
-//   broken one to race. And when there is, every child writes its OWN slot, so a second
-//   winner changes only which position the last store names, and that position's value
-//   still agrees with it. So "exactly one winner" in the name is exactly one RESUMPTION
-//   with one coherent result, and the election's own exactly-one-winner is pinned by that
-//   test and not by this one.
+//   broken one to race. And when there is, every child THAT GETS THAT FAR writes its OWN
+//   slot -- the sentence above is the case that does not, and when_any_child's note has
+//   all four -- so a second winner changes only which position the last store names, and
+//   that position's value still agrees with it. So "exactly one winner" in the name is
+//   exactly one RESUMPTION with one coherent result, and the election's own
+//   exactly-one-winner is pinned by that test and not by this one.
 // - AN UNCONDITIONAL ELECTION (every caller wins, last completer takes it) is caught by
 //   seven tests, the two loser tests above among them. This one passes under it, for the
 //   same reason.

@@ -170,9 +170,11 @@ is destroyed at that task's final suspend once a stop has been requested, and on
 a scheduler through [`alt::resume_on`](scheduler.md), which is abandoned when the
 scheduler comes to resume it. And a loser parked on something the stop cannot reach — an
 awaitable of your own that registers no stop callback — is not resumed by the stop at all:
-it stays outstanding until its own mechanism resumes it, and then produces its value or
-not by the same two rules. Every one of them retires, whichever way it goes, and a won await
-waits for all of them.
+it stays outstanding until its own mechanism resumes it, and what happens then is decided
+by how it was awaited: awaited directly it produces its value or exception, as a released
+loser does, because nothing re-checks the stop on the way out of a wait; awaited through a
+nested `alt::task` it is destroyed at that task's final suspend and produces nothing.
+Every one of them retires, whichever way it goes, and a won await waits for all of them.
 
 ## The winner's exception
 
@@ -219,10 +221,10 @@ than a teardown it cannot. It costs latency: the winner's
 value is held back until the losers have finished unwinding.
 
 An await **the cancellation releases** deliberately does not wait. It resumes at once,
-with children still unwinding, exactly as a cancelled [`when_all`](when_all.md) does, because a window
-closing while one of its coroutines still runs work on a worker thread is the
-requirement the whole cancellation design exists for. That is why the precondition is
-phrased against *the children* and not against the await.
+with children still unwinding, exactly as a cancelled [`when_all`](when_all.md) does,
+because a window closing while one of its coroutines still runs work on a worker thread
+is the requirement the whole cancellation design exists for. That is why the precondition
+is phrased against *the children* and not against the await.
 
 ### Each child is its own cancellation root
 
@@ -235,9 +237,11 @@ and in the note on [`alt::async_latch`](async_latch.md), where the hazard they a
 lives. `when_any` fits them unchanged, and the `async_latch` note says why: it carries a
 copy of `when_all`'s completion hook, parks one joiner on the same completion counter and
 keeps the same park-until-zero discipline, so invariant (C)'s overlap is the same in
-both — one child whose body has already finished, holding a block reference while its
-frame is destroyed, across a satisfied resumption; and many children still unwinding on a
-cancellation.
+both — one child whose frame is being destroyed, still holding a block reference across a
+satisfied resumption, and that child may be a loser the winner's stop tore down rather
+than one that finished its body; and many children still unwinding on a cancellation. The
+`async_latch` note also says which parts of that are derived from the code rather than
+measured by a test.
 
 A `when_any` awaited in a promise with **no cancellation context** — an `alt::task`
 driven by `alt::sync_wait`, with no `cancellable_task` root above it — is simply
