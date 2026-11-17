@@ -70,8 +70,10 @@ namespace
 
 	// asserts_are_compiled_in, thread_sanitizer_is_active and scoped_death_test_style
 	// come from tests/death_test_support.hpp, which records why they live there, and are
-	// already visible through this file's using namespace alt_test. The two skip messages
-	// stay local, each naming this file's own asserts.
+	// already visible through this file's using namespace alt_test, as are the two halves
+	// of the ThreadSanitizer skip message. Only the assert skip message below stays
+	// local: it names this file's own asserts, where the ThreadSanitizer one names a
+	// property of GoogleTest and of the tool and so is shared.
 
 	/** Why a death test is skipped in a build whose asserts are gone. */
 	constexpr std::string_view skipped_without_asserts =
@@ -79,11 +81,6 @@ namespace
 	  "this build has no guard for a death test to observe. That is a real gap rather than a "
 	  "configuration detail: in a release build a second set is a silent no-op, and a second await "
 	  "parks a waiter that no set will resume, since publish detaches only one.";
-
-	/** Why a death test is skipped under ThreadSanitizer. */
-	constexpr std::string_view skipped_under_thread_sanitizer =
-	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
-	  "die of the tool rather than of the assert. The debug and AddressSanitizer presets run it.";
 
 	/** What one waiter coroutine recorded about its wait, for the test to inspect. */
 	template<typename T>
@@ -594,7 +591,7 @@ TEST(TaskCompletionSourceDeathTest, SettingASourceTwiceAborts)
 
 	if(thread_sanitizer_is_active)
 	{
-		GTEST_SKIP() << skipped_under_thread_sanitizer;
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << debug_and_asan_presets_run_it;
 	}
 
 	// The child re-executes this binary rather than forking a process that has already
@@ -627,7 +624,7 @@ TEST(TaskCompletionSourceDeathTest, AwaitingASourceTwiceAborts)
 
 	if(thread_sanitizer_is_active)
 	{
-		GTEST_SKIP() << skipped_under_thread_sanitizer;
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << debug_and_asan_presets_run_it;
 	}
 
 	const scoped_death_test_style style{"threadsafe"};

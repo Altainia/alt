@@ -33,8 +33,13 @@ namespace
 	using root_handle = std::coroutine_handle<alt::cancellable_task::promise_type>;
 
 	// The build-detection constants and the death test style holder are shared from
-	// tests/death_test_support.hpp, which records why they live there. The skip messages
-	// below stay local, each naming this file's own assert.
+	// tests/death_test_support.hpp, which records why they live there. Both skip messages
+	// below stay local. The assert one names this file's own assert. The ThreadSanitizer
+	// one does NOT use that header's shared lead, although the other four death-test
+	// files do: these are exit tests as well as death tests, so the kind and the
+	// consequence both differ from the shared sentence ("death or exit test", "report its
+	// own exit status"), and it is a different sentence rather than the same one with a
+	// different tail. death_test_support.hpp records the same exemption from its side.
 	using alt_test::asserts_are_compiled_in;
 	using alt_test::scoped_death_test_style;
 	using alt_test::thread_sanitizer_is_active;

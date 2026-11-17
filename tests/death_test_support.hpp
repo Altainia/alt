@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 
 // Scaffolding shared by this suite's death and exit tests.
 //
@@ -53,6 +54,40 @@ namespace alt_test
 #else
 	inline constexpr bool thread_sanitizer_is_active = false;
 #endif
+
+	/**
+	 * The shared reason a forked death test is skipped under ThreadSanitizer.
+	 *
+	 * Unlike the assert messages, this one names nothing file-specific: it states a
+	 * property of GoogleTest and of the tool, which is why it is shared where those
+	 * stay local. Three files carried this sentence byte-identically and a fourth
+	 * carried it with a different tail, which is the drift the note at the top of this
+	 * header records the suite paying for once already.
+	 *
+	 * Deliberately only the lead, with no trailing clause about which presets do run
+	 * the test: the files that have more to say about that say it differently, and a
+	 * combined constant here would have to spell this sentence a second time, which is
+	 * the copy being removed. A skip streams this and then its own next sentence --
+	 * debug_and_asan_presets_run_it below where there is nothing else to add.
+	 *
+	 * tests/test_async_wait.cpp deliberately does not use this. Its tests are exit
+	 * tests as well as death tests, so both the kind and the consequence differ
+	 * ("death or exit test", "report its own exit status") and its lead is not this
+	 * sentence. Parameterizing that one variation would cost more than the copy does.
+	 */
+	inline constexpr std::string_view thread_sanitizer_forks_death_tests =
+	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
+	  "die of the tool rather than of the assert.";
+
+	/**
+	 * The trailing clause of a ThreadSanitizer skip that has nothing file-specific to
+	 * add, streamed after thread_sanitizer_forks_death_tests.
+	 *
+	 * Separate from the lead rather than joined to it so that the lead has exactly one
+	 * definition in the suite. tests/test_waiter_list.cpp streams its own sentence here
+	 * instead, because what it pins is single-threaded by construction and it says so.
+	 */
+	inline constexpr std::string_view debug_and_asan_presets_run_it = "The debug and AddressSanitizer presets run it.";
 
 	/**
 	 * @brief Sets GoogleTest's death test style for one scope and puts back what was

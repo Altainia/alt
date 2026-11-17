@@ -33,11 +33,14 @@ namespace
 	 */
 	constexpr std::size_t contended_nodes = 32;
 
-	// The build-detection constants and the death test style holder are shared from
-	// tests/death_test_support.hpp, which records why they live there. The skip messages
-	// below stay local, each naming this file's own assert.
+	// The build-detection constants, the death test style holder and the lead sentence of
+	// the ThreadSanitizer skip message are shared from tests/death_test_support.hpp,
+	// which records why they live there. The assert skip message below stays local,
+	// naming this file's own assert, and so does the ThreadSanitizer message's second
+	// sentence, which says something true only here.
 	using alt_test::asserts_are_compiled_in;
 	using alt_test::scoped_death_test_style;
+	using alt_test::thread_sanitizer_forks_death_tests;
 	using alt_test::thread_sanitizer_is_active;
 
 	/** Why a death test is skipped in a build whose asserts are gone. */
@@ -46,12 +49,17 @@ namespace
 	  "guard for a death test to observe. That is a real gap rather than a configuration detail: a "
 	  "release build gets no liveness check at all, which waiter_list's own notes state.";
 
-	/** Why a death test is skipped under ThreadSanitizer. */
-	constexpr std::string_view skipped_under_thread_sanitizer =
-	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
-	  "die of the tool rather than of the assert. What this test pins is single-threaded by "
-	  "construction and nothing about it is sanitizer-specific, so the debug and AddressSanitizer "
-	  "presets both run it.";
+	/**
+	 * What this file adds to the shared ThreadSanitizer skip reason, streamed after
+	 * thread_sanitizer_forks_death_tests.
+	 *
+	 * Local because it is true only here: the shared lead states why any forked death
+	 * test cannot run under the tool, and this says why losing this particular one
+	 * costs nothing.
+	 */
+	constexpr std::string_view this_test_is_single_threaded =
+	  "What this test pins is single-threaded by construction and nothing about it is "
+	  "sanitizer-specific, so the debug and AddressSanitizer presets both run it.";
 
 	// The two-party rendezvous both contended tests below are built around lives in
 	// coroutine_test_support.hpp, because alt::async_event's tests need the same one.
@@ -689,7 +697,7 @@ TEST(WaiterListDeathTest, ClaimingAWaiterOnADestroyedListAborts)
 
 	if(thread_sanitizer_is_active)
 	{
-		GTEST_SKIP() << skipped_under_thread_sanitizer;
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << this_test_is_single_threaded;
 	}
 
 	// The child re-executes this binary rather than forking a process that has already
@@ -730,7 +738,7 @@ TEST(WaiterListDeathTest, LinkingAWaiterOnADestroyedListAborts)
 
 	if(thread_sanitizer_is_active)
 	{
-		GTEST_SKIP() << skipped_under_thread_sanitizer;
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << this_test_is_single_threaded;
 	}
 
 	const scoped_death_test_style style{"threadsafe"};
@@ -762,7 +770,7 @@ TEST(WaiterListDeathTest, AClaimThatWouldLoseTheElectionOnADestroyedListAborts)
 
 	if(thread_sanitizer_is_active)
 	{
-		GTEST_SKIP() << skipped_under_thread_sanitizer;
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << this_test_is_single_threaded;
 	}
 
 	const scoped_death_test_style style{"threadsafe"};
