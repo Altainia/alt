@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Alt VERSION 1.12.0 LANGUAGES CXX)
+project(Alt VERSION 1.12.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -139,6 +139,20 @@ write_basic_package_version_file(
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMinorVersion
 )
+
+# Append the explanatory note for a rejected version request. CMake's own report of a
+# refusal names neither the same-minor rule nor a remedy, so the generated file carries
+# a block that explains the refusal it has already decided. The note is explanatory
+# only and never sets PACKAGE_VERSION_COMPATIBLE: the generated comparison above stays
+# authoritative. write_basic_package_version_file rewrites the file on every configure,
+# so the append cannot accumulate.
+configure_file(
+    cmake/AltConfigVersionNote.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/AltConfigVersionNote.cmake
+    @ONLY
+)
+file(READ ${CMAKE_CURRENT_BINARY_DIR}/AltConfigVersionNote.cmake ALT_CONFIG_VERSION_NOTE)
+file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/AltConfigVersion.cmake "${ALT_CONFIG_VERSION_NOTE}")
 
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/AltConfig.cmake
