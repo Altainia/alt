@@ -9,11 +9,14 @@
 #include <cstddef>
 #include <exception>
 #include <stdexcept>
+#include <stop_token>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <type_traits>
 
 #include "coroutine_test_support.hpp"
+#include "death_test_support.hpp"
 
 using namespace alt_test;
 
@@ -25,20 +28,33 @@ static_assert(!std::is_copy_assignable_v<alt::task_group>);
 static_assert(!std::is_move_assignable_v<alt::task_group>);
 static_assert(std::is_same_v<alt::await_result_t<decltype(std::declval<alt::task_group&>().join())>, alt::wait_result>);
 
-// Three asserts are documented preconditions that no test exercises: the destructor's
-// "no live tasks", and spawn's two ownership claims (a start_options::token and a
-// start_options::on_completion of the caller's own). The reason is no longer that the
-// mechanism is unavailable: tests/test_waiter_list.cpp carries EXPECT_DEATH cases and
-// tests/test_async_wait.cpp an EXPECT_EXIT one, and tests/death_test_support.hpp carries
-// what a death test in this project needs -- the scoped restore of the "threadsafe"
-// style, and the NDEBUG and ThreadSanitizer build checks its skip guards read. Including
-// that header is the whole of the setup; nobody has written these three. They
-// compile away under NDEBUG, so no release-build behavior is reachable from a Debug
-// preset either. They are therefore a known gap in coverage, stated here rather than
-// left silent. The destructor's is the one a caller can reach without a mistake,
-// through a cancelled joiner, and
-// ACancelledJoinerIsReleasedWithOperationCanceledWhileTasksAreLive pins the state that
-// assert exists to catch. Tracked, with task_completion_source's two, as issue #29.
+// Three documented preconditions assert in a debug build, and the TaskGroupDeathTest
+// cases at the bottom of this file are what pin them: the destructor's "no live tasks"
+// (src/task_group.cpp:12) and spawn's two ownership claims (:17 and :18), a
+// start_options::token and a start_options::on_completion of the caller's own. They
+// were a stated gap in coverage until issue #29; the three tests close it.
+//
+// Each of the three was checked by removing just its own assert and confirming that
+// exactly its own test failed while the other two passed. That mutation check is this
+// work's substitute for a red phase: the asserts predate the tests by many commits, so
+// no test here could ever have failed before the code it guards existed, and a test
+// that aborted for some unrelated reason would otherwise look identical to one that
+// works.
+//
+// What they do NOT reach, stated rather than left for a reader to assume:
+//
+// - A spawn running CONCURRENTLY with the destructor, as opposed to either observed on
+//   its own. The last-statement rule inside spawn exists for that interleaving, but no
+//   rendezvous a test can write pins a point inside a destructor body against another
+//   thread's spawn. Uncovered, not covered.
+// - Anything under NDEBUG, which compiles all three asserts away. No release-build
+//   behavior is reachable from a Debug preset, and the three tests skip there and say
+//   which guard is gone. They also skip under ThreadSanitizer, which does not support
+//   fork.
+//
+// The destructor's assert is also the one a caller can reach without a mistake, through
+// a cancelled joiner, and ACancelledJoinerIsReleasedWithOperationCanceledWhileTasksAreLive
+// pins the state that assert exists to catch.
 
 namespace
 {
@@ -47,6 +63,22 @@ namespace
 
 	/** The condition every released wait reports. See alt::wait_result. */
 	constexpr std::errc released_error = std::errc::operation_canceled;
+
+	// asserts_are_compiled_in, thread_sanitizer_is_active and scoped_death_test_style
+	// come from tests/death_test_support.hpp, which records why they live there, and are
+	// already visible through this file's using namespace alt_test. The two skip messages
+	// stay local, each naming this file's own asserts.
+
+	/** Why a death test is skipped in a build whose asserts are gone. */
+	constexpr std::string_view skipped_without_asserts =
+	  "the destructor's liveness check and spawn's two ownership claims are asserts, and NDEBUG "
+	  "compiles them away, so this build has no guard for a death test to observe. That is a real "
+	  "gap rather than a configuration detail: a release build gets none of the three checks.";
+
+	/** Why a death test is skipped under ThreadSanitizer. */
+	constexpr std::string_view skipped_under_thread_sanitizer =
+	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
+	  "die of the tool rather than of the assert. The debug and AddressSanitizer presets run it.";
 
 	/** What one joiner coroutine recorded about its wait, for the test to inspect. */
 	struct wait_record
@@ -77,6 +109,22 @@ namespace
 		// to tear its frames down, and a home scheduler something to defer.
 		co_await alt::cancellation_point{};
 	}
+
+	/**
+	 * A completion hook of a caller's own, for the death test that pins spawn's claim on
+	 * start_options::on_completion. Never called: the assert fires before spawn starts
+	 * anything, and the group overwrites the field in any case.
+	 *
+	 * A named function purely for readability: the call site is already inside an
+	 * EXPECT_DEATH statement, and a lambda spelled there would put a function body in the
+	 * middle of one. It is NOT a necessity. Substituting
+	 * {.invoke = [](void*) noexcept {}} at the call site was measured to compile, the
+	 * only diagnostic being that this function had become unused. What genuinely cannot
+	 * be written there is a second designated initializer -- see the call site, which
+	 * records why.
+	 */
+	void unused_completion_hook(void* /*state*/) noexcept
+	{}
 
 	/** A task with no suspension point: it runs to completion inside start. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the counter is owned by the calling test, which outlives the synchronous run.
@@ -633,4 +681,140 @@ TEST_F(TaskGroupTest, ASpawnRacingACompletionNeverUndercountsOrOvercounts)
 	// are deliberately not asserted: recorded in the run's XML output, nothing more.
 	RecordProperty("raise_first", raise_first);
 	RecordProperty("released_inside_spawn", released_inside_spawn);
+}
+
+// The three death tests that pin src/task_group.cpp's asserts. See the note at the top
+// of this file for what they cover and what they do not.
+//
+// Each puts its whole setup INSIDE the EXPECT_DEATH statement, which runs only in the
+// child process. Nothing is constructed in the parent, so there is no parent-side
+// lifetime or leak question to reason about, and nothing here depends on the order these
+// tests run in.
+//
+// Each matcher is the assert's own text rather than a generic "Assertion".
+// _GLIBCXX_ASSERTIONS is on by default on this distribution's GCC and its Clang alike
+// and aborts with a message of its own, so a loose matcher would pass on a death that
+// had nothing to do with the precondition. tests/test_waiter_list.cpp records hitting
+// exactly that.
+//
+// These take no fixture, as the suite's other death tests do not, so SetUp never runs
+// and reset_coroutine_test_state() is never called for them. They must therefore not
+// read live_frames or destruction_order. GoogleTest runs *DeathTest suites ahead of the
+// others, and the fixtures that follow reset that state themselves.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. Measured in this file with the pinned clang-tidy-19 (19.1.7): all three bodies below score 39 against the threshold of 25, and this one scores 0 when its two skip guards are removed and the macro left in place. So the guards are what let the expansion count, and they cannot move -- GTEST_SKIP only skips the function it is written in. tests/test_waiter_list.cpp measured the same figures for an identically shaped body. What this body actually contains is two skip guards and one expectation.
+TEST(TaskGroupDeathTest, DestroyingAGroupWithALiveTaskAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	// The child re-executes this binary rather than forking a process that has already
+	// run every test ahead of this one. GoogleTest recommends this style for a
+	// multi-threaded program, and this suite is one, even though these death tests are
+	// single-threaded by construction. Scoped so the flag does not outlive this test;
+	// see scoped_death_test_style.
+	const scoped_death_test_style style{"threadsafe"};
+
+	// DELICATE. The declaration order inside this block is what the test rests on.
+	//
+	// The gate is declared BEFORE the group, so destruction, being in reverse, destroys
+	// the group FIRST -- while parked_root is still suspended on the gate and
+	// outstanding() is 1, which is the state the assert exists to catch. Declared after
+	// the group, the gate would be destroyed first, release the waiter, let the task run
+	// to completion and bring the count to zero, and the destructor would pass.
+	//
+	// Nothing requests a stop and nothing joins, deliberately: a cancellation_handle has
+	// no stop-on-destruction, so discarding spawn's return value leaves the task parked.
+	// OutstandingCountsLiveTasks relies on the same thing.
+	//
+	// The abort lands inside the group's destructor, which is ahead of the gate's, so the
+	// task's completion hook never fires against the destroyed group. That dangling hook
+	// is the harm the assert documents, and the mutation check measured it rather than
+	// taking it on trust: with src/task_group.cpp:12 commented out, this block runs on,
+	// the gate's destructor releases the parked task, and the task's completion hook
+	// calls m_counter.complete() on the destroyed group, whose joiner list is dead. The
+	// process then aborts in waiter_list::detach_all's liveness sentinel instead --
+	// "detaching every alt waiter on a destroyed list",
+	// include/alt/detail/waiter_list.hpp:618. The mutated build does NOT exit 0; it dies
+	// of a different assert one step further on. The other two tests in this file do exit
+	// cleanly when mutated, which GoogleTest reports as "failed to die".
+	//
+	// That measurement is the whole argument for matching this assert's own text below.
+	// A matcher of "Assertion", or anything else both aborts share, would have PASSED on
+	// the mutated build: the test would have survived the removal of the very assert it
+	// exists to pin, and reported nothing.
+	EXPECT_DEATH(
+	  {
+		  alt::async_event gate;
+		  int              started = 0;
+
+		  alt::task_group group;
+		  group.spawn(parked_root(gate, started, 1));
+	  },
+	  "destroying an alt::task_group with live tasks");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): same cause, same shape, same measured 39 as the test above, whose suppression carries the measurement.
+TEST(TaskGroupDeathTest, SpawningWithACallersStopTokenAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	// A token from a live std::stop_source, which is what makes stop_possible() true and
+	// so what the assert tests. A default-constructed std::stop_token would pass it.
+	EXPECT_DEATH(
+	  {
+		  std::stop_source signal;
+		  alt::task_group  group;
+		  int              ran = 0;
+
+		  const alt::start_options options{.token = signal.get_token()};
+		  group.spawn(immediate_root(ran), options);
+	  },
+	  "alt::task_group supplies its own stop token");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): same cause, same shape, same measured 39 as the test above, whose suppression carries the measurement.
+TEST(TaskGroupDeathTest, SpawningWithACallersCompletionHookAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	// Only .invoke is named. alt::completion_handler::state already defaults to nullptr,
+	// and the assert reads invoke alone, so naming state would add nothing but a comma --
+	// which the preprocessor would read as the end of this macro's first argument. See
+	// unused_completion_hook.
+	EXPECT_DEATH(
+	  {
+		  alt::task_group group;
+		  int             ran = 0;
+
+		  const alt::start_options options{.on_completion = {.invoke = &unused_completion_hook}};
+		  group.spawn(immediate_root(ran), options);
+	  },
+	  "alt::task_group owns start_options::on_completion");
 }
