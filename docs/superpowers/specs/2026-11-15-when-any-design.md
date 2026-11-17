@@ -303,6 +303,54 @@ documentation. New public API, so a **minor** bump, **1.11.1 to 1.12.0**.
     children all vanish without completing is reported as released. My call, not the
     author's; flagged here so it can be checked.
 
+    **CORRECTION, 2026-11-16, after the whole-branch review.** The requirement above stands
+    and is implemented. The *reason* given for it is wrong, and both facts are left here
+    rather than one of them edited away, because a decision made on a false premise should
+    not be able to read afterwards as though it had been made on a true one.
+
+    **The requirement stands.** `detail::when_any_awaiter::await_resume` returns the
+    released error when the election reports `combinator_election::no_winner`, and the
+    debug assert is kept *above* that branch rather than replaced by it — so the assert is
+    still the backstop wherever asserts are compiled in, and the branch is what the
+    component does in a build where they are not. Reporting
+    `std::errc::operation_canceled` was the right call: the alternative in a release build
+    is not a diagnosable failure but an out-of-range slot read in the range form, and in
+    the argument-list form a `std::bad_variant_access` thrown out of an await whose
+    documented error channel holds only `operation_canceled` and `invalid_argument`.
+
+    **The mechanism named above does not produce the state.** The second sentence of this
+    decision says a child's frame destroyed by its home scheduler being torn down "fires
+    the completion hook, drives the counter to zero and fills no slot". It does not.
+    `start_options::home`'s own documentation
+    (`include/alt/cancellable_task.hpp:110-112`) says the opposite about exactly that
+    scheduler: one "that is never drained, or that is destroyed with this work still
+    queued, leaks the whole chain silently rather than crashing." A dropped `work_item` is
+    two pointers; the frame is never destroyed, so the hook never fires, the counter never
+    drains, and the awaiting chain parks forever. The outcome is a **hang**, not a
+    satisfied wait with no winner. So this decision cited the one mechanism that cannot
+    reach the shape it was written for.
+
+    **What is actually known about reaching it.** Nothing. No test in the suite reaches the
+    state, and every other route to a child retiring without completing goes through a
+    stop, which is either `combinator_state::cancel()` — whose flag is stored before the
+    children's stop and tested in `await_resume` ahead of the election — or
+    `request_children_stop()`, which only an already elected winner calls. The only
+    evidence the branch does anything at all is a negative control, measured 2026-11-16
+    against the suite at 800 tests: remove the branch under `NDEBUG` and
+    `WhenAnyTest.ACancelledRaceReportsOperationCanceled` aborts 3 of 3 on an uncaught
+    `std::bad_variant_access`, out of `when_any_result_at`'s last position. The range
+    form's `slots[SIZE_MAX]` is read from the code and was not measured. The honest
+    account lives with the code, in `await_resume`'s note and in `docs/when_any.md`, and
+    neither offers a reachability story.
+
+    **The flag worked and the check did not.** This decision's last line asked to be
+    checked on precisely this point, and nothing checked it: the implementation shipped
+    with the assert and no branch, and `docs/superpowers/plans/2026-11-16-when-any.md`'s
+    own coverage self-check recorded the decision as implemented by a plan step that never
+    specified it. The gap was found only by the whole-branch review of the finished branch.
+    Both of those records are corrected in place with their corrections attached; this one
+    is the source the others argued from.
+
 ## Corrections to the combinators spec
 
 - **Decision 6 as written is not implementable for heterogeneous children.** It is honored
