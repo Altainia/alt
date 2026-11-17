@@ -2426,6 +2426,9 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// hide the one that moves. Only the raced phase's two numbers are a sample at all:
 	// of the four below them, two are the asserted equalities, one is the degenerate
 	// bound, and the last is the verdict the paragraph above says why nothing asserts.
+	//
+	// The contended case this paragraph leaves unwitnessed is tracked as issue #28, which
+	// carries the measured flakiness that retired the bound it replaced.
 	// All four are recorded so that a reader of a failure sees what the run actually
 	// reported rather than only which equality it missed.
 	//

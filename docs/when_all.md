@@ -214,4 +214,4 @@ slots, never delivered. A child that yields something that owns a resource there
 releases it by destruction and nothing else. This is the stage A form of a wider
 question, taken up in [`when_any`](when_any.md), where a loser's result — and a
 loser's exception — are discarded on every successful call and not only on a
-cancellation.
+cancellation. Tracked as [issue #27](https://github.com/Altainia/alt/issues/27).

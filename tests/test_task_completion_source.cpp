@@ -45,7 +45,8 @@ static_assert(std::is_same_v<alt::await_result_t<alt::task_completion_source<>&>
 // read. Including that header is the whole of the setup; nobody has written these two. The
 // release-build behavior of a second set, a no-op, is not reachable from a Debug preset
 // at all, because NDEBUG is what compiles the assert away. These are therefore a known
-// gap in coverage, stated here rather than left silent.
+// gap in coverage, stated here rather than left silent. Tracked, with task_group's three,
+// as issue #29.
 
 namespace
 {

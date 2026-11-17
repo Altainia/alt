@@ -380,7 +380,7 @@ documentation. New public API, so a **minor** bump, **1.11.1 to 1.12.0**.
 **`when_any_succeed`** — completes with the first child that completes *successfully*,
 treating a throwing child as a loser. Explicitly not designed here, and **not built**: the
 owner went looking for a caller on 2026-11-17 and did not find one, so it stays unbuilt
-until a real one turns up. What follows is what that search established, recorded so the
+until a real one turns up. Tracked as [issue #30](https://github.com/Altainia/alt/issues/30). What follows is what that search established, recorded so the
 next reader starts from it instead of re-deriving it.
 
 **The storage question is already answered, and the framing it rested on was wrong.** An
