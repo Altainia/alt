@@ -94,6 +94,18 @@ namespace alt::detail
 	 * @p state is the detail::combinator_state the child shares with its siblings and
 	 * with the awaiting chain. Fired from the child's frame destruction, which is the
 	 * only point both the normal and the cancelled path pass through.
+	 *
+	 * **THIS FUNCTION HAS A DUPLICATE: detail::on_when_any_child_complete, in
+	 * when_any.hpp.** Same two statements, same order, byte for byte. It is a copy
+	 * rather than a call into this header so that including alt/when_any.hpp does not
+	 * drag this whole component into every translation unit that awaits a when_any.
+	 * The consequence is a constraint on THIS function, which is why it is recorded
+	 * on this side too: **the order of the two statements below cannot be revisited
+	 * here alone.** A change to it must be made in both, and the derivation that change
+	 * would invalidate lives in each component's own awaiter destructor -- ~when_all_-
+	 * awaiter below, and ~when_any_awaiter there, which re-derives rather than cites.
+	 * If a third combinator ever wants this hook, move it to combinator_state.hpp and
+	 * carry this note with it rather than making a third copy.
 	 */
 	inline void on_combinator_child_complete(void* state) noexcept
 	{
@@ -119,22 +131,53 @@ namespace alt::detail
 		// as well as the use-after-free described below. Read that destructor before
 		// touching these two lines.
 		//
-		// Measured rather than argued, and the instrument matters. Swapping these two
-		// lines fails nothing in a debug build -- 0/200 against the cancellation tests
-		// and 0 across the whole suite, 763 tests at the time of that measurement --
-		// because the freed block's counter word usually still holds a plausible value.
-		// Under AddressSanitizer the same swap is 200/200, reported as
-		// heap-use-after-free in completion_counter::complete() with this function one
-		// frame above it. That citation is sound where a waiter_list one would not be:
-		// what the freed chunk is touched by here is the counter's own atomic word, an
-		// ordinary instrumented access, not a pthread mutex inside glibc. Do not read a
-		// green debug run as evidence that the order does not matter.
+		// Measured rather than argued, and the instrument matters. **EVERY FIGURE BELOW
+		// IS A MEASUREMENT OF THIS COPY OF THE HOOK**, when_all's. Swapping these two
+		// lines, measured 2026-11-16 against the suite at 799 tests:
 		//
-		// The guards of record under AddressSanitizer are
+		// - DEBUG, whole suite: ABORTS after 749 tests, in
+		//   WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown, on
+		//   waiter_list's liveness assert inside detach_all -- "detaching every alt
+		//   waiter on a destroyed list".
+		// - DEBUG, one test at a time: 10 of the 35 WhenAllTest tests abort the same
+		//   way. Eight of them were run five times each and aborted every time; the
+		//   other two were run once.
+		// - ADDRESSSANITIZER, on that same test: heap-use-after-free in
+		//   completion_counter::complete(), this function one frame above it. The
+		//   earlier 200/200 count for it was not re-taken.
+		// - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped.
+		//
+		// **THE DEBUG CATCH EXISTS ONLY BECAUSE AN ASSERT EXISTS**, which is what that
+		// last line measures: a build with NDEBUG and no sanitizer, where the assert is
+		// gone and the swap runs green with the use-after-free still there. It does not
+		// say the fault becomes undetectable without the assert -- complete() opens by
+		// touching the freed counter's own word, which is where AddressSanitizer
+		// reported it above. DO NOT READ A GREEN RUN AS EVIDENCE THAT THE ORDER DOES
+		// NOT MATTER.
+		//
+		// Which of waiter_list's three windows this lands in, because it is not the
+		// obvious one: release() has FREED the block before complete() touches the
+		// counter, so this is the second or third -- freed-and-poisoned, or
+		// freed-and-reused -- not the first, which is destroyed-but-not-yet-freed and
+		// the only one the sentinel covers with certainty. In the freed windows it only
+		// rejects every value but alive_pattern, so the debug figure above is what those
+		// ten tests did with the bytes they had. ASan's report comes earlier still, at
+		// the counter's own atomic word, and that citation is sound where a waiter_list
+		// one would not be: an ordinary instrumented access, not a pthread mutex inside
+		// glibc.
+		//
+		// One superseded figure, kept for its lesson: this note used to record "fails
+		// nothing in a debug build, 0/200 ... 763 tests at the time", and what falsified
+		// it was PR 1's liveness sentinel rather than any edit here. A measured zero can
+		// go stale because the instrument changed, so quote a figure with the date and
+		// the suite size it was taken at.
+		//
+		// The guards of record, by preset. In debug the first the suite reaches is
+		// WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown. Under
+		// AddressSanitizer: that same test, which reports it first across the
+		// pre-existing suite, and
 		// WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock, which
-		// reports it among the combinator tests added for this, and the older
-		// WhenAllTest.TheChildrenInheritTheChainsHomeSchedulerForTheirTeardown, which
-		// reports it first across the pre-existing suite.
+		// reports it among the combinator tests added for this.
 		shared->counter().complete();
 		shared->release();
 	}
@@ -360,9 +403,11 @@ namespace alt::detail
 		 *   resumption to a scheduler would decouple the resumer's reference from this
 		 *   destructor, and the satisfied path would gain the window the same way.
 		 * - A second claimer on the counter's list: a combinator that parks more than one
-		 *   joiner on it, or one that parks before its fan-out has ended -- which when_any
-		 *   may -- has a claimer that is neither this thread's own callback nor an
-		 *   already-retired child.
+		 *   joiner on it, or one that parks before its fan-out has ended, has a claimer that
+		 *   is neither this thread's own callback nor an already-retired child. No shipped
+		 *   combinator does either -- alt::when_any was the candidate for the second and
+		 *   parks strictly after its fan-out, measured there -- so this is a condition on a
+		 *   future one.
 		 * - A CALLER whose co_await full-expression holds a SECOND suspension point. This
 		 *   one is not a change to the library: consume(co_await when_all(a, b), co_await
 		 *   other) is legal C++ today. This awaiter is a temporary of that full-expression
@@ -380,8 +425,8 @@ namespace alt::detail
 		 * In all four the window above is a use-after-free with nothing left to argue
 		 * about. Keep the reset first.
 		 *
-		 * AND FOR WHOEVER WRITES when_any. If it parks more than one joiner on a counter,
-		 * or parks before its fan-out has ended, every enumeration in this note -- the two
+		 * AND FOR THE NEXT COMBINATOR. If one parks more than one joiner on a counter, or
+		 * parks before its fan-out has ended, every enumeration in this note -- the two
 		 * complete() calls, the one resume_claimed that writes satisfied, the three
 		 * unsatisfied resumers, the four parties that touch the counter's list -- must be
 		 * RE-DERIVED FROM SCRATCH rather than cited. Each of them is correct today, for
@@ -390,6 +435,12 @@ namespace alt::detail
 		 * bullet turned out to be. An enumeration over call sites is the instrument that
 		 * already failed once in stage A, and citing one of these from a component with a
 		 * different parking shape repeats that failure at greater length.
+		 *
+		 * alt::when_any, which this paragraph was addressed to before it existed, parks one
+		 * joiner strictly after its fan-out, so the derivation does carry to it -- and
+		 * ~when_any_awaiter re-derived all four enumerations against its own call sites
+		 * anyway rather than taking them on trust. That is the standard for the one after
+		 * it too.
 		 *
 		 * The ordering is also still what satisfies detail::wait_awaiter's stated
 		 * precondition locally, "the primitive must outlive every claim on its waiters":
@@ -894,16 +945,23 @@ namespace alt
 	 * cancels a single child on its own.
 	 *
 	 * **Each child is its own cancellation root**, and the reason this is safe rests on
-	 * three invariants. (A) The combinator never owns or destroys a child frame; it only
-	 * ever requests stops, and the children are self-owning alt::cancellable_task
-	 * roots. (B) The claim election cannot free an already-claimed node: a loser whose
-	 * node a satisfier already won loses the compare-and-swap in waiter_list::claim, so
-	 * its waiter_stop_release resumes and frees nothing; the only way a child frame dies
-	 * is the child itself running, which happens only when the walk reaches it. (C) The
-	 * combinator never destroys a child, though it may resume the awaiting chain while
-	 * children are still alive; (A) is what makes that safe for the sibling hazard. The
+	 * three invariants. **(A) Ownership.** No combinator owns or destroys a child frame;
+	 * the children are self-owning alt::cancellable_task roots, and a combinator only
+	 * ever requests their stop. **(B) The claim election cannot free an already-claimed
+	 * node:** a loser whose node a satisfier already won loses the compare-and-swap in
+	 * waiter_list::claim, so its waiter_stop_release resumes and frees nothing; the only
+	 * way a child frame dies is the child itself running, which happens only when the
+	 * walk reaches it. **(C) Lifetime overlap.** A combinator may resume the awaiting
+	 * chain -- and so let that chain destroy the combinator's own frame -- while children
+	 * are still alive; this is why the shared state is reference counted off the frame
+	 * instead of owned by it, and (A) is what keeps the sibling hazard away across that
+	 * overlap, the children that outlive the frame destroying nothing but themselves. The
 	 * argument is recorded where the hazard is: see the note on alt::async_latch, which
-	 * states the same three under the same labels.
+	 * states the same three under the same labels, and which also says why alt::when_any
+	 * fits the same argument unchanged: it carries a copy of this component's completion
+	 * hook, parks one joiner on the same detail::completion_counter, and keeps the same
+	 * park-until-zero discipline, so it adds no overlap this component does not already
+	 * have.
 	 *
 	 * A when_all awaited in a promise with no cancellation context -- an alt::task
 	 * driven by alt::sync_wait, with no alt::cancellable_task root above it -- is simply

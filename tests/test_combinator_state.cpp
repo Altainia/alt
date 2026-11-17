@@ -319,3 +319,27 @@ TEST_F(CombinatorStateTest, ACancelFromAnotherThreadIsObservedThroughCancelled)
 		state.release();
 	}
 }
+
+TEST_F(CombinatorStateTest, RequestingTheChildrensStopDoesNotMarkTheWaitCancelled)
+{
+	combinator_state state{0, &m_probe, &deleter_probe::destroy};
+
+	state.request_children_stop();
+
+	EXPECT_FALSE(state.cancelled());
+}
+
+TEST_F(CombinatorStateTest, RequestingTheChildrensStopStopsTheChildrensToken)
+{
+	combinator_state state{0, &m_probe, &deleter_probe::destroy};
+	int              invocations = 0;
+
+	const std::stop_callback observer{state.children_token(), [&] { ++invocations; }};
+	EXPECT_FALSE(state.children_token().stop_requested());
+
+	state.request_children_stop();
+	state.request_children_stop();
+
+	EXPECT_TRUE(state.children_token().stop_requested());
+	EXPECT_EQ(invocations, 1);
+}

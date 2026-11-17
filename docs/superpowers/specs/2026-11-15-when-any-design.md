@@ -267,7 +267,7 @@ measured.)
 
 **PR 2 — `when_any`.** Everything else here, including decision 4's additive
 `combinator_state` member, decision 10's rewording across the three live files, and the
-documentation. New public API, so a **minor** bump, **1.11.0 to 1.12.0**.
+documentation. New public API, so a **minor** bump, **1.11.1 to 1.12.0**.
 
 10. **Invariants (A) and (C) are sharpened here**, discharging the item stage A deferred.
     They read as near-duplicates in the combinators spec's Global Constraints, which is
@@ -302,6 +302,65 @@ documentation. New public API, so a **minor** bump, **1.11.0 to 1.12.0**.
     `std::errc::operation_canceled` rather than asserting, and documents that a race whose
     children all vanish without completing is reported as released. My call, not the
     author's; flagged here so it can be checked.
+
+    **CORRECTION, 2026-11-16, after the whole-branch review.** The requirement above stands
+    and is implemented. The *reason* given for it is wrong, and both facts are left here
+    rather than one of them edited away, because a decision made on a false premise should
+    not be able to read afterwards as though it had been made on a true one.
+
+    **The requirement stands.** `detail::when_any_awaiter::await_resume` returns the
+    released error when the election reports `combinator_election::no_winner`, and the
+    debug assert is kept *above* that branch rather than replaced by it — so the assert is
+    still the backstop wherever asserts are compiled in, and the branch is what the
+    component does in a build where they are not. Reporting
+    `std::errc::operation_canceled` was the right call: the alternative in a release build
+    is not a diagnosable failure but an out-of-range slot read in the range form, and in
+    the argument-list form a `std::bad_variant_access` thrown out of an await whose
+    documented error channel holds only `operation_canceled` and `invalid_argument`.
+
+    **The mechanism named above does not produce the state.** The second sentence of this
+    decision says a child's frame destroyed by its home scheduler being torn down "fires
+    the completion hook, drives the counter to zero and fills no slot". It does not.
+    `start_options::home`'s own documentation
+    (`include/alt/cancellable_task.hpp:110-112`) says the opposite about exactly that
+    scheduler: one "that is never drained, or that is destroyed with this work still
+    queued, leaks the whole chain silently rather than crashing." A dropped `work_item` is
+    two pointers; the frame is never destroyed, so the hook never fires, the counter never
+    drains, and the awaiting chain parks forever. The outcome is a **hang**, not a
+    satisfied wait with no winner. So this decision cited the one mechanism that cannot
+    reach the shape it was written for.
+
+    **What is actually known about reaching it.** Nothing. No test in the suite reaches the
+    state, and every other route to a child retiring without completing goes through a
+    stop, which is either `combinator_state::cancel()` — whose flag is stored before the
+    children's stop and tested in `await_resume` ahead of the election — or
+    `request_children_stop()`, which only an already elected winner calls. The only
+    evidence the branch does anything at all is a negative control, and the control took
+    **two** changes at once: measured 2026-11-16 against the suite at 800 tests, with
+    `await_resume`'s verdict statement deleted *and* the branch removed, under `NDEBUG`,
+    `WhenAnyTest.ACancelledRaceReportsOperationCanceled` aborts 3 of 3 on an uncaught
+    `std::bad_variant_access` out of `when_any_result_at`'s last position. **Removing the
+    branch alone is caught by nothing**: all 800 tests pass in debug with it gone, which
+    the scoped re-review measured on the committed tree. An earlier draft of this
+    paragraph quoted the control with only its second half, which claimed something that
+    does not happen. The range form's `slots[SIZE_MAX]` is read from the code and was not
+    measured at all. The honest account lives with the code, in `await_resume`'s note and
+    in `docs/when_any.md`, and neither offers a reachability story.
+
+    **The flag worked and the check did not.** This decision's last line asked to be
+    checked on precisely this point, and nothing checked it: the implementation shipped
+    with the assert and no branch, and `docs/superpowers/plans/2026-11-16-when-any.md`'s
+    own coverage self-check recorded the decision as implemented by a plan step that never
+    specified it. That self-check did not merely MISS the question — it **closed** it. A
+    reader of the plan who wanted to know whether decision 11 was covered found the answer
+    "yes" in writing, so the one document whose job was to catch the gap is the document
+    that made the gap invisible, and the three stages then agreed with each other all the
+    way to the finished branch. The claim was about COVERAGE rather than about code, which
+    is why nothing compiled or ran could contradict it; a grep of Task 3 Step 5's own text
+    for the branch it named would have refuted it in one line, and that is the check to
+    run on a coverage claim. The gap was found only by the whole-branch review of the
+    finished branch. All three records are corrected in place with their corrections
+    attached; this one is the source the other two argued from.
 
 ## Corrections to the combinators spec
 

@@ -51,6 +51,7 @@ add_executable(alt_tests
     test_async_wait.cpp
     test_async_event.cpp
     test_combinator_state.cpp
+    test_combinator_election.cpp
     test_completion_counter.cpp
     test_async_latch.cpp
     test_async_semaphore.cpp
@@ -66,6 +67,8 @@ add_executable(alt_tests
     test_scheduler_integration.cpp
     test_combinator_results.cpp
     test_when_all.cpp
+    test_when_any_result.cpp
+    test_when_any.cpp
 )
 
 target_link_libraries(alt_tests

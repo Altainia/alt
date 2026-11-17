@@ -114,19 +114,26 @@ The children observe one stop source that the combinator owns, not the awaiting
 chain's token. Nothing cancels a single child on its own: a stop is all or nothing.
 Three invariants make that safe:
 
-- **(A)** The combinator never owns or destroys a child frame. It only ever
-  requests stops, and each child is a self-owning `cancellable_task`.
-- **(B)** The claim election cannot free an already-claimed node. A loser whose node
+- **(A) Ownership.** No combinator owns or destroys a child frame. The children are
+  self-owning `alt::cancellable_task` roots, and a combinator only ever requests their
+  stop.
+- **(B) The claim election cannot free an already-claimed node.** A loser whose node
   a satisfier already won loses the compare-and-swap in `waiter_list::claim`, so its
   `waiter_stop_release` resumes and frees nothing; the only way a child frame dies is
   the child itself running, which happens only when the walk reaches it.
-- **(C)** The combinator never destroys a child. It may resume the awaiting chain
-  while children are still alive, and (A) is what makes that safe for the sibling
-  hazard.
+- **(C) Lifetime overlap.** A combinator may resume the awaiting chain — and so let that
+  chain destroy the combinator's own frame — while children are still alive. This is why
+  the shared state is reference counted off the frame instead of owned by it, and (A) is
+  what keeps the sibling hazard away across that overlap: the children that outlive the
+  frame destroy nothing but themselves.
 
 The argument is recorded where the hazard lives, in the note on
 [`alt::async_latch`](async_latch.md) in `include/alt/async_latch.hpp`, which states the
-same three invariants under the same labels. Nesting one `when_all` inside a child is
+same three invariants under the same labels and says why
+[`when_any`](when_any.md) fits the same argument unchanged — it carries a copy of this
+component's completion hook, parks one joiner on the same completion counter, and keeps
+the same park-until-zero discipline, so it adds no overlap this component does not
+already have. Nesting one `when_all` inside a child is
 the case that makes the root property observable, and `tests/test_when_all.cpp` guards
 it with a nested case.
 
@@ -205,6 +212,6 @@ chain never parks. It is the same no-rollback contract as
 Results produced by children after the chain was cancelled are discarded with the
 slots, never delivered. A child that yields something that owns a resource therefore
 releases it by destruction and nothing else. This is the stage A form of a wider
-question, which is taken up with `when_any`, where the losers' results are discarded
-on every successful call and not only on a cancellation. That note is deferred to
-that component.
+question, taken up in [`when_any`](when_any.md), where a loser's result — and a
+loser's exception — are discarded on every successful call and not only on a
+cancellation.
