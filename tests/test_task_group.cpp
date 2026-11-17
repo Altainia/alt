@@ -29,9 +29,10 @@ static_assert(std::is_same_v<alt::await_result_t<decltype(std::declval<alt::task
 // "no live tasks", and spawn's two ownership claims (a start_options::token and a
 // start_options::on_completion of the caller's own). The reason is no longer that the
 // mechanism is unavailable: tests/test_waiter_list.cpp carries EXPECT_DEATH cases and
-// tests/test_async_wait.cpp an EXPECT_EXIT one, with the "threadsafe" style, the scoped
-// restore of that flag, and the NDEBUG and ThreadSanitizer skips a death test in this
-// project needs. The pattern to copy exists; nobody has written these three. They
+// tests/test_async_wait.cpp an EXPECT_EXIT one, and tests/death_test_support.hpp carries
+// what a death test in this project needs -- the scoped restore of the "threadsafe"
+// style, and the NDEBUG and ThreadSanitizer build checks its skip guards read. Including
+// that header is the whole of the setup; nobody has written these three. They
 // compile away under NDEBUG, so no release-build behavior is reachable from a Debug
 // preset either. They are therefore a known gap in coverage, stated here rather than
 // left silent. The destructor's is the one a caller can reach without a mistake,

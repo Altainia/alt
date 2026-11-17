@@ -729,7 +729,7 @@ namespace alt::detail
 			// repeats in debug and 0 of 20 under each of AddressSanitizer and
 			// ThreadSanitizer, for each of the five WhenAnyTest tests that existed then
 			// run alone, plus one whole-suite run of the suite as it then stood, all 788
-			// tests green in each of the three presets. The suite is 800 now, and that
+			// tests green in each of the three presets. The suite has grown since, and that
 			// figure is a measurement about the smaller one; what makes the POSITION
 			// defensive rather than load-bearing is the mechanism above, that this
 			// component parks after its fan-out, which no test can change.
@@ -978,8 +978,8 @@ namespace alt::detail
 		 *   on its satisfied assertion. It was ALONE in the suite under that mutation when
 		 *   that figure was taken, against 789 tests; at 799 tests
 		 *   ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner fails under it too,
-		 *   so the count is two and the witness is unchanged. The suite is 800 now, one test
-		 *   added since, and the mutation was not re-run against it.
+		 *   so the count is two and the witness is unchanged. Tests have been added since,
+		 *   and the mutation was not re-run against them.
 		 * - THE FLAG HALF IS WITNESSED TOO, by
 		 *   WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, through
 		 *   the THIRD of the cases above. It drives the race from a hand-built

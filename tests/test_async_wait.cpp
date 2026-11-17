@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "coroutine_test_support.hpp"
+#include "death_test_support.hpp"
 
 namespace
 {
@@ -31,39 +32,12 @@ namespace
 	/** The handle type an alt::cancellable_task's frame is named by. */
 	using root_handle = std::coroutine_handle<alt::cancellable_task::promise_type>;
 
-	/**
-	 * Whether this build still has the assert the first test below observes.
-	 *
-	 * detail::waiter_list carries its liveness sentinel in every configuration and
-	 * only the checks on it are assert-guarded, so under NDEBUG a stop callback
-	 * reaching a destroyed list returns claim_result::not_linked and nothing
-	 * observable happens -- the refused-link leak is still there and still a defect,
-	 * but no test in this file can see it. That is a property of the build, so the
-	 * test skips and says so rather than passing vacuously.
-	 */
-#if defined(NDEBUG)
-	constexpr bool asserts_are_compiled_in = false;
-#else
-	constexpr bool asserts_are_compiled_in = true;
-#endif
-
-	/**
-	 * Whether ThreadSanitizer is instrumenting this build. Nested rather than written
-	 * as one condition because the two compilers spell it differently and GCC before
-	 * 14 does not have __has_feature at all, where a single `defined(__has_feature) &&
-	 * __has_feature(...)` would not short-circuit in the preprocessor.
-	 */
-#if defined(__SANITIZE_THREAD__)
-	constexpr bool thread_sanitizer_is_active = true;
-#elif defined(__has_feature)
-#	if __has_feature(thread_sanitizer)
-	constexpr bool thread_sanitizer_is_active = true;
-#	else
-	constexpr bool thread_sanitizer_is_active = false;
-#	endif
-#else
-	constexpr bool thread_sanitizer_is_active = false;
-#endif
+	// The build-detection constants and the death test style holder are shared from
+	// tests/death_test_support.hpp, which records why they live there. The skip messages
+	// below stay local, each naming this file's own assert.
+	using alt_test::asserts_are_compiled_in;
+	using alt_test::scoped_death_test_style;
+	using alt_test::thread_sanitizer_is_active;
 
 	/** Why the exit test is skipped in a build whose asserts are gone. */
 	constexpr std::string_view skipped_without_asserts =
@@ -78,44 +52,6 @@ namespace
 	  "child would die of the tool rather than report its own exit status. What this test pins is "
 	  "single-threaded by construction, so the debug and AddressSanitizer presets both run it; the "
 	  "contended test at the bottom of this file is the one ThreadSanitizer is here for.";
-
-	/**
-	 * @brief Sets GoogleTest's death test style for one scope and puts back what was
-	 *        there.
-	 *
-	 * GTEST_FLAG_SET writes a process-global flag and GoogleTest offers nothing scoped
-	 * of its own, so a death or exit test that sets it leaves it set for everything
-	 * after it in the same process.
-	 *
-	 * Deliberately a second copy of the holder tests/test_waiter_list.cpp carries,
-	 * rather than a shared one: the only header both files already include is
-	 * coroutine_test_support.hpp, which does not depend on GoogleTest, and this class
-	 * cannot be put there without making every test translation unit's support header
-	 * depend on it. Copying the shape is the smaller cost; what must not be copied is a
-	 * bare GTEST_FLAG_SET, which leaks the flag into every test that runs afterwards.
-	 */
-	class scoped_death_test_style
-	{
-	public:
-		explicit scoped_death_test_style(const std::string& style): m_previous(GTEST_FLAG_GET(death_test_style))
-		{
-			GTEST_FLAG_SET(death_test_style, style);
-		}
-
-		~scoped_death_test_style()
-		{
-			GTEST_FLAG_SET(death_test_style, m_previous);
-		}
-
-		scoped_death_test_style(const scoped_death_test_style&)            = delete;
-		scoped_death_test_style& operator=(const scoped_death_test_style&) = delete;
-		scoped_death_test_style(scoped_death_test_style&&)                 = delete;
-		scoped_death_test_style& operator=(scoped_death_test_style&&)      = delete;
-
-	private:
-		/** What the flag held before this object changed it. */
-		std::string m_previous;
-	};
 
 	/** Spins until the predicate holds, yielding once the spin budget is spent. */
 	template<typename Predicate>
