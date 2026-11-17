@@ -230,8 +230,10 @@ namespace alt::detail
 	 *   run five times and aborted every time.
 	 * - ADDRESSSANITIZER and THREADSANITIZER, on that same test: heap-use-after-free in
 	 *   completion_counter::complete() under each.
-	 * - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped. The debug catch is
-	 *   an assert, so NDEBUG takes it away and the swap is silent again.
+	 * - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped -- a build with
+	 *   NDEBUG, which takes the sentinel's assert away, and no sanitizer. The fault is
+	 *   still there: the two sanitizer reports above come from complete()'s own first
+	 *   touch of the freed counter, not from an assert.
 	 *
 	 * Two things to carry away from when_all's account rather than re-derive:
 	 *
@@ -736,9 +738,8 @@ namespace alt::detail
 		 * reached any suspension point, torn down at its first one; one whose awaitable is a
 		 * nested alt::task, which dies at that task's final suspend ahead of its slot write;
 		 * and one parked on something the stop cannot reach, which the walk does not touch
-		 * at all and which may therefore elect at any later moment instead.
-		 * when_any_child's note is where all four cases are set out, and the condition is
-		 * not restated below.)
+		 * at all and which may therefore elect at any later moment instead. See
+		 * when_any_child for the cases.)
 		 *
 		 * WHICH HALF OF THE TEST BELOW ACTUALLY DECIDES depends on things outside this
 		 * function, so it is set out as an invariant, then the conclusion that invariant

@@ -130,11 +130,12 @@ namespace alt
 	 *
 	 * **BOTH SHAPES ARE DERIVED, NOT MEASURED.** They are read off the hook, the counter
 	 * and ~when_all_awaiter's note. No test fails if the satisfied-path overlap stops being
-	 * what this says, and nothing instruments it. What the suite guards instead is the
-	 * hook's STATEMENT ORDER, which is a different property from the overlap described
-	 * here. The CONCLUSION survives that gap, resting on (A) rather than on the shape, so
-	 * a wrong description here cannot make the library unsafe; the DESCRIPTION does not,
-	 * so check it against the code rather than citing this note as evidence for it.
+	 * what this says, and nothing instruments it. What the suite guards instead, in its
+	 * debug and sanitizer presets, is the hook's STATEMENT ORDER -- a different property
+	 * from the overlap described here, and one a release build does not guard either. The
+	 * CONCLUSION survives that gap, resting on (A) rather than on the shape, so a wrong
+	 * description here cannot make the library unsafe; the DESCRIPTION does not, so check
+	 * it against the code rather than citing this note as evidence for it.
 	 *
 	 * An earlier version of this paragraph made (C) a matter of FREQUENCY -- the overlap
 	 * cancellation-only in when_all, every-success in when_any -- and the first bullet

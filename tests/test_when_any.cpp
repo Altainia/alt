@@ -202,10 +202,10 @@ namespace
 	 *        resumption.
 	 *
 	 * The counter is the observable for the claim when_any_child and
-	 * when_any_awaiter::await_resume both rest on, which is the first of when_any_child's
-	 * four cases: a child already PARKED on an alt wait primitive THIS FRAME AWAITS
-	 * DIRECTLY is resumed *released* rather than torn down, so it runs on past its wait
-	 * even on the cancelled path, writes its slot and reaches its election.
+	 * when_any_awaiter::await_resume both rest on, which is the first of the cases
+	 * when_any_child sets out: a child already PARKED on an alt wait primitive THIS FRAME
+	 * AWAITS DIRECTLY is resumed *released* rather than torn down, so it runs on past its
+	 * wait even on the cancelled path, writes its slot and reaches its election.
 	 *
 	 * **Direct rather than a nested alt::task, and that is what makes the claim's second
 	 * half observable at all.** An earlier version of this held an alt::task parked on
@@ -1513,10 +1513,7 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 // narrow one and a comment nobody can trust is worse than a number.
 //
 // It catches nothing that another test does not catch first. Three mutations were run
-// against it, in debug and under AddressSanitizer + UBSan; the ThreadSanitizer and
-// release-tests figures below were taken against the revision of this file that preceded
-// its two cancellation tests, and were not re-taken, nothing in those two touching the
-// concurrent race:
+// against it:
 //
 // - A NON-ATOMIC ELECTION -- combinator_election::elect reading m_winner and then storing
 //   it, which is exactly the "a load followed by a store would let both see no_winner"
@@ -1524,28 +1521,26 @@ TEST_F(WhenAnyTest, TheRangeFormRacesEveryElementAndYieldsTheWinnersIndex)
 //   CombinatorElectionTest.ConcurrentElectionsYieldExactlyOneWinner and by nothing else.
 //   This test passes under it: one run in each of the four presets, plus 20 repeats of
 //   the whole WhenAnyTest suite in each of the three debug presets, which is 2,000
-//   contended races apiece. Two reasons, and the first is the bigger one. Its children
-//   are nested alt::tasks, so on any repeat where the winner's request_children_stop()
-//   beats the loser's final suspend, the loser is abandoned there and reaches no election
-//   at all -- see counting_event_wait -- so there is frequently no second election for a
-//   broken one to race. And when there is, every child THAT GETS THAT FAR writes its OWN
+//   contended races apiece. The ThreadSanitizer and release-tests runs among those were
+//   taken against the revision of this file that preceded its two cancellation tests and
+//   were not re-taken, nothing in those two touching the concurrent race. Two reasons for
+//   the pass, and the first is the bigger one. Its children are nested alt::tasks, so on
+//   any repeat where the winner's request_children_stop() beats the loser's final
+//   suspend, the loser is abandoned there and reaches no election at all -- see
+//   counting_event_wait -- so there is frequently no second election for a broken one to
+//   race. And when there is, every child THAT GETS THAT FAR writes its OWN
 //   slot -- the sentence above is the case that does not, and when_any_child's note has
 //   all four -- so a second winner changes only which position the last store names, and
 //   that position's value still agrees with it. So "exactly one winner" in the name is
 //   exactly one RESUMPTION with one coherent result, and the election's own
 //   exactly-one-winner is pinned by that test and not by this one.
 // - AN UNCONDITIONAL ELECTION (every caller wins, last completer takes it) is caught by
-//   seven tests, the two loser tests above among them. This one passes under it, for the
-//   same reason.
-// - SWAPPING complete() AND release() in on_when_any_child_complete, re-measured
-//   2026-11-16 against the 799-test suite: the whole debug suite ABORTS after 786 tests,
-//   in ACancelledRaceReportsOperationCanceled, on waiter_list's liveness assert inside
-//   detach_all; run one test at a time, 2 of the 16 WhenAnyTest tests abort, that one and
-//   ACancellationDiscardsAWinnerAlreadyElected, with no other failure; AddressSanitizer
-//   and ThreadSanitizer each report heap-use-after-free in completion_counter::complete()
-//   on that test; and release-tests PASSES the whole suite, 794 of 799 with 5 skipped,
-//   the debug catch being an assert that NDEBUG takes away. THIS test is green under the
-//   swap, 5 of 5 runs alone in debug -- it is not one of the two.
+//   seven tests, the two loser tests above among them. This one passes under it in debug
+//   and under AddressSanitizer + UBSan, for the same reason.
+// - SWAPPING complete() AND release() in on_when_any_child_complete. THIS test is green
+//   under it -- 5 of 5 runs alone in debug, 2026-11-16, against the 799-test suite -- and
+//   is not one of the tests that abort under it. See
+//   detail::on_when_any_child_complete.
 //
 // What it does assert, and what no other test in this file does: that two children
 // completing at once yield one resumption, an index and a value that agree, and both

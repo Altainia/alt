@@ -98,9 +98,8 @@ namespace alt::detail
 	 * **THIS FUNCTION HAS A DUPLICATE: detail::on_when_any_child_complete, in
 	 * when_any.hpp.** Same two statements, same order, byte for byte. It is a copy
 	 * rather than a call into this header so that including alt/when_any.hpp does not
-	 * drag this whole component into every translation unit that awaits a when_any, and
-	 * the copy's note points here for the measured account below rather than restating
-	 * it. The consequence is a constraint on THIS function, which is why it is recorded
+	 * drag this whole component into every translation unit that awaits a when_any.
+	 * The consequence is a constraint on THIS function, which is why it is recorded
 	 * on this side too: **the order of the two statements below cannot be revisited
 	 * here alone.** A change to it must be made in both, and the derivation that change
 	 * would invalidate lives in each component's own awaiter destructor -- ~when_all_-
@@ -149,10 +148,12 @@ namespace alt::detail
 		// - RELEASE-TESTS, whole suite: PASSES, 794 of 799 with 5 skipped.
 		//
 		// **THE DEBUG CATCH EXISTS ONLY BECAUSE AN ASSERT EXISTS**, which is what that
-		// last line measures: NDEBUG takes away both the sentinel's check and the
-		// alive() load that gives AddressSanitizer an instrumented access, and the swap
-		// is silent again with the use-after-free still there. DO NOT READ A GREEN RUN
-		// AS EVIDENCE THAT THE ORDER DOES NOT MATTER.
+		// last line measures: a build with NDEBUG and no sanitizer, where the assert is
+		// gone and the swap runs green with the use-after-free still there. It does not
+		// say the fault becomes undetectable without the assert -- complete() opens by
+		// touching the freed counter's own word, which is where AddressSanitizer
+		// reported it above. DO NOT READ A GREEN RUN AS EVIDENCE THAT THE ORDER DOES
+		// NOT MATTER.
 		//
 		// Which of waiter_list's three windows this lands in, because it is not the
 		// obvious one: release() has FREED the block before complete() touches the
