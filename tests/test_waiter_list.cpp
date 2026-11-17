@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "coroutine_test_support.hpp"
+#include "death_test_support.hpp"
 
 namespace
 {
@@ -32,87 +33,18 @@ namespace
 	 */
 	constexpr std::size_t contended_nodes = 32;
 
-	/**
-	 * Whether this build still has the asserts the death tests below observe.
-	 *
-	 * Not a configuration switch over the guard itself: waiter_list carries its
-	 * liveness sentinel in every configuration and only the checks on it are
-	 * assert-guarded, so NDEBUG leaves the member and removes the abort. A death test
-	 * then has nothing to see -- the call it expects to die returns normally -- which
-	 * is a property of the build and not a defect, so the test skips and says so.
-	 */
-#if defined(NDEBUG)
-	constexpr bool asserts_are_compiled_in = false;
-#else
-	constexpr bool asserts_are_compiled_in = true;
-#endif
-
-	/**
-	 * Whether ThreadSanitizer is instrumenting this build.
-	 *
-	 * Nested rather than written as one condition because the two compilers spell it
-	 * differently and GCC before 14 does not have __has_feature at all, where a single
-	 * `defined(__has_feature) && __has_feature(...)` would not short-circuit in the
-	 * preprocessor and would fail to compile.
-	 */
-#if defined(__SANITIZE_THREAD__)
-	constexpr bool thread_sanitizer_is_active = true;
-#elif defined(__has_feature)
-#	if __has_feature(thread_sanitizer)
-	constexpr bool thread_sanitizer_is_active = true;
-#	else
-	constexpr bool thread_sanitizer_is_active = false;
-#	endif
-#else
-	constexpr bool thread_sanitizer_is_active = false;
-#endif
+	// The build-detection constants and the death test style holder are shared from
+	// tests/death_test_support.hpp, which records why they live there. The skip messages
+	// below stay local, each naming this file's own assert.
+	using alt_test::asserts_are_compiled_in;
+	using alt_test::scoped_death_test_style;
+	using alt_test::thread_sanitizer_is_active;
 
 	/** Why a death test is skipped in a build whose asserts are gone. */
 	constexpr std::string_view skipped_without_asserts =
 	  "the liveness precondition is an assert, and NDEBUG compiles it away, so this build has no "
 	  "guard for a death test to observe. That is a real gap rather than a configuration detail: a "
 	  "release build gets no liveness check at all, which waiter_list's own notes state.";
-
-	/**
-	 * @brief Sets GoogleTest's death test style for one scope and puts back what was
-	 *        there.
-	 *
-	 * GTEST_FLAG_SET writes a process-global flag and GoogleTest offers nothing scoped
-	 * of its own, so a death test that sets it leaves it set for everything after it in
-	 * the same process. Harmless while every death test in this file sets the same
-	 * style and ctest runs each test in its own process, and invisible to the next death
-	 * test anyone adds, which would silently inherit a style it never asked for.
-	 * Restoring the previous value is cheaper than that surprise.
-	 * tests/test_async_wait.cpp carries its own copy of this helper, deliberately, for
-	 * the same reason.
-	 *
-	 * Under the "threadsafe" style the child re-executes the binary and runs the test
-	 * body again, so the child constructs one of these too and sets the flag for
-	 * itself. The restore runs after the expectation either way, which is what makes it
-	 * safe to do at all.
-	 */
-	class scoped_death_test_style
-	{
-	public:
-		explicit scoped_death_test_style(const std::string& style): m_previous(GTEST_FLAG_GET(death_test_style))
-		{
-			GTEST_FLAG_SET(death_test_style, style);
-		}
-
-		~scoped_death_test_style()
-		{
-			GTEST_FLAG_SET(death_test_style, m_previous);
-		}
-
-		scoped_death_test_style(const scoped_death_test_style&)            = delete;
-		scoped_death_test_style& operator=(const scoped_death_test_style&) = delete;
-		scoped_death_test_style(scoped_death_test_style&&)                 = delete;
-		scoped_death_test_style& operator=(scoped_death_test_style&&)      = delete;
-
-	private:
-		/** What the flag held before this object changed it. */
-		std::string m_previous;
-	};
 
 	/** Why a death test is skipped under ThreadSanitizer. */
 	constexpr std::string_view skipped_under_thread_sanitizer =

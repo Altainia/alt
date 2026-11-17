@@ -11,6 +11,8 @@
 #include <utility>
 #include <variant>
 
+#include "death_test_support.hpp"
+
 using alt::when_any_range_result;
 using alt::when_any_result;
 using alt::detail::when_any_value_t;
@@ -25,34 +27,12 @@ static_assert(std::same_as<when_any_value_t<alt::task<const int&>>, std::referen
 namespace
 {
 
-	/**
-	 * Whether this build still has the asserts the death test below observes.
-	 *
-	 * The accessor's check is an assert, so NDEBUG compiles it away and the call it
-	 * expects to die returns normally. That is a property of the build, not a defect,
-	 * so the test skips and says so.
-	 */
-#if defined(NDEBUG)
-	constexpr bool asserts_are_compiled_in = false;
-#else
-	constexpr bool asserts_are_compiled_in = true;
-#endif
-
-	/**
-	 * Whether ThreadSanitizer is instrumenting this build. Nested because GCC before 14
-	 * has no __has_feature, where a single condition would fail to preprocess.
-	 */
-#if defined(__SANITIZE_THREAD__)
-	constexpr bool thread_sanitizer_is_active = true;
-#elif defined(__has_feature)
-#	if __has_feature(thread_sanitizer)
-	constexpr bool thread_sanitizer_is_active = true;
-#	else
-	constexpr bool thread_sanitizer_is_active = false;
-#	endif
-#else
-	constexpr bool thread_sanitizer_is_active = false;
-#endif
+	// The build-detection constants and the death test style holder are shared from
+	// tests/death_test_support.hpp, which records why they live there. The skip messages
+	// below stay local, each naming this file's own assert.
+	using alt_test::asserts_are_compiled_in;
+	using alt_test::scoped_death_test_style;
+	using alt_test::thread_sanitizer_is_active;
 
 	/** Why the death test is skipped in a build whose asserts are gone. */
 	constexpr std::string_view skipped_without_asserts =
@@ -63,34 +43,6 @@ namespace
 	constexpr std::string_view skipped_under_thread_sanitizer =
 	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
 	  "die of the tool rather than of the assert. The debug and AddressSanitizer presets run it.";
-
-	/**
-	 * Sets GoogleTest's death test style for one scope and puts back what was there, so
-	 * the process-global flag does not leak to later tests. See the same helper in
-	 * tests/test_waiter_list.cpp, which says why each copy is deliberate.
-	 */
-	class scoped_death_test_style
-	{
-	public:
-		explicit scoped_death_test_style(const std::string& style): m_previous(GTEST_FLAG_GET(death_test_style))
-		{
-			GTEST_FLAG_SET(death_test_style, style);
-		}
-
-		~scoped_death_test_style()
-		{
-			GTEST_FLAG_SET(death_test_style, m_previous);
-		}
-
-		scoped_death_test_style(const scoped_death_test_style&)            = delete;
-		scoped_death_test_style& operator=(const scoped_death_test_style&) = delete;
-		scoped_death_test_style(scoped_death_test_style&&)                 = delete;
-		scoped_death_test_style& operator=(scoped_death_test_style&&)      = delete;
-
-	private:
-		/** What the flag held before this object changed it. */
-		std::string m_previous;
-	};
 
 } // namespace
 
