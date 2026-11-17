@@ -10,11 +10,13 @@
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <type_traits>
 
 #include "coroutine_test_support.hpp"
+#include "death_test_support.hpp"
 
 using namespace alt_test;
 
@@ -37,16 +39,26 @@ static_assert(std::is_same_v<alt::await_result_t<alt::task_completion_source<int
 static_assert(std::is_same_v<alt::await_result_t<alt::task_completion_source<>&>, alt::wait_result>);
 
 // The set-twice and await-twice paths are documented preconditions that assert in a
-// debug build, and nothing in this suite exercises them. The reason is no longer that
-// the mechanism is unavailable: tests/test_waiter_list.cpp carries EXPECT_DEATH cases
-// and tests/test_async_wait.cpp an EXPECT_EXIT one, and tests/death_test_support.hpp
-// carries what a death test in this project needs -- the scoped restore of the
-// "threadsafe" style, and the NDEBUG and ThreadSanitizer build checks its skip guards
-// read. Including that header is the whole of the setup; nobody has written these two. The
-// release-build behavior of a second set, a no-op, is not reachable from a Debug preset
-// at all, because NDEBUG is what compiles the assert away. These are therefore a known
-// gap in coverage, stated here rather than left silent. Tracked, with task_group's three,
-// as issue #29.
+// debug build, and the TaskCompletionSourceDeathTest cases at the bottom of this file
+// are what pin them: include/alt/task_completion_source.hpp:293 for the second set and
+// :272 for the second await. They were a stated gap in coverage until issue #29; the two
+// tests close it.
+//
+// Each was checked by removing just its own assert and confirming that exactly its own
+// test failed while the other passed. That mutation check is this work's substitute for
+// a red phase: both asserts predate the tests, so no test here could ever have failed
+// before the code it guards existed.
+//
+// What they do NOT reach, stated rather than left for a reader to assume:
+//
+// - Two threads setting CONCURRENTLY. The double-set check sits inside the waiter list's
+//   critical section, which is what makes two simultaneous setters unable to both pass
+//   it, and no rendezvous a test can write lands two setters inside that section.
+//   Uncovered, not covered.
+// - The release-build behavior of a second set, a silent no-op. NDEBUG is what compiles
+//   the assert away, so that path is not reachable from a Debug preset at all. Both
+//   tests skip under NDEBUG and say which guard is gone, and skip under ThreadSanitizer,
+//   which does not support fork.
 
 namespace
 {
@@ -55,6 +67,22 @@ namespace
 
 	/** The condition every released wait reports, named the way a caller names it. */
 	constexpr std::errc released_error = std::errc::operation_canceled;
+
+	// asserts_are_compiled_in, thread_sanitizer_is_active and scoped_death_test_style
+	// come from tests/death_test_support.hpp, which records why they live there, and are
+	// already visible through this file's using namespace alt_test. The two skip messages
+	// stay local, each naming this file's own asserts.
+
+	/** Why a death test is skipped in a build whose asserts are gone. */
+	constexpr std::string_view skipped_without_asserts =
+	  "the set-twice and await-twice preconditions are asserts, and NDEBUG compiles them away, so "
+	  "this build has no guard for a death test to observe. That is a real gap rather than a "
+	  "configuration detail: in a release build a second set is a silent no-op instead.";
+
+	/** Why a death test is skipped under ThreadSanitizer. */
+	constexpr std::string_view skipped_under_thread_sanitizer =
+	  "a GoogleTest death test forks, and ThreadSanitizer does not support fork, so the child would "
+	  "die of the tool rather than of the assert. The debug and AddressSanitizer presets run it.";
 
 	/** What one waiter coroutine recorded about its wait, for the test to inspect. */
 	template<typename T>
@@ -535,4 +563,96 @@ TEST_F(TaskCompletionSourceTest, AStopRacingSetValueResumesTheWaiterExactlyOnce)
 		ASSERT_EQ(live_frames, 0) << "repeat " << repeat;
 		expect_value_or_released(record.outcome, 42, repeat);
 	}
+}
+
+// The two death tests that pin include/alt/task_completion_source.hpp's asserts. See the
+// note at the top of this file for what they cover and what they do not.
+//
+// Each puts its whole setup INSIDE the EXPECT_DEATH statement, which runs only in the
+// child process. Nothing is constructed in the parent, so there is no parent-side
+// lifetime or leak question to reason about, and nothing here depends on the order these
+// tests run in.
+//
+// Each matcher is the assert's own text rather than a generic "Assertion".
+// _GLIBCXX_ASSERTIONS is on by default on this distribution's GCC and its Clang alike
+// and aborts with a message of its own, and task_group's own death tests measured a
+// mutated build dying of a DIFFERENT project assert than the one under test -- so a
+// loose matcher can pass on a build whose assert has been deleted outright.
+//
+// These take no fixture, as the suite's other death tests do not, so SetUp never runs
+// and reset_coroutine_test_state() is never called for them. They must therefore not
+// read live_frames or destroyed_tags. GoogleTest runs *DeathTest suites ahead of the
+// others, and the fixtures that follow reset that state themselves.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, and clang-tidy-19 counts it only when some `if` precedes it in the same function. The two skip guards are that `if`, and they cannot move: GTEST_SKIP only skips the function it is written in. Measured in this file with the pinned clang-tidy-19 (19.1.7): both bodies below score 39 against the threshold of 25, the same figure tests/test_task_group.cpp's three identically shaped bodies measured in this same change, where one of them was also measured at 0 with its two skip guards removed and the macro left in place. What this body actually contains is two skip guards and one expectation.
+TEST(TaskCompletionSourceDeathTest, SettingASourceTwiceAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	// The child re-executes this binary rather than forking a process that has already
+	// run every test ahead of this one. GoogleTest recommends this style for a
+	// multi-threaded program, and this suite is one, even though these death tests are
+	// single-threaded by construction. Scoped so the flag does not outlive this test;
+	// see scoped_death_test_style.
+	const scoped_death_test_style style{"threadsafe"};
+
+	// No waiter, deliberately: the double-set check sits inside the waiter list's
+	// critical section, which detach_one enters whether or not anybody is parked, so the
+	// precondition is reachable with nothing awaiting. The second value differs from the
+	// first only to make it obvious in the source that two distinct sets happen.
+	EXPECT_DEATH(
+	  {
+		  alt::task_completion_source<int> source;
+		  source.set_value(1);
+		  source.set_value(2);
+	  },
+	  "setting an alt::task_completion_source twice");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): same cause and same shape as the test above, whose suppression carries the measurement.
+TEST(TaskCompletionSourceDeathTest, AwaitingASourceTwiceAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << skipped_under_thread_sanitizer;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	// Two real waiters rather than two direct calls to operator co_await, because this is
+	// the mistake a caller actually makes: the first parks on the unset source, and the
+	// second's co_await is what aborts.
+	//
+	// DELICATE. The records are declared BEFORE the source, and that order matters only
+	// for the mutated build the step-5 check produces -- but it is what makes that
+	// check's result mean anything. With the assert at :272 removed, the second waiter
+	// links and parks too, and both are released by the source's destructor, resuming to
+	// write their outcomes into the records. Destruction being in reverse, a source
+	// declared first would be destroyed last, after the records it is about to make those
+	// waiters write to, and the mutated build would be undefined rather than merely
+	// wrong. In the shipped build the abort happens at the second co_await and none of
+	// this is reached.
+	EXPECT_DEATH(
+	  {
+		  completion_record<int> first;
+		  completion_record<int> second;
+
+		  alt::task_completion_source<int> source;
+
+		  const auto first_handle  = alt::start(waiting_root<int>(source, first, 1));
+		  const auto second_handle = alt::start(waiting_root<int>(source, second, 2));
+	  },
+	  "awaiting an alt::task_completion_source twice");
 }
