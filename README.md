@@ -94,10 +94,12 @@ Requires GCC and `lcov`/`genhtml`. Produces an HTML report in `build/debug-cover
 
 ```bash
 cmake --preset debug-coverage && cmake --build --preset debug-coverage
-ctest --preset debug-coverage --output-on-failure
 cmake --build --preset debug-coverage --target coverage
 xdg-open build/debug-coverage/coverage/index.html
 ```
+
+The `coverage` target zeroes the counters and runs the suite itself, so there is no
+separate `ctest` step.
 
 ## Installation
 

@@ -127,9 +127,21 @@ Requires GCC and `lcov`. Report lands in `build/debug-coverage/coverage/index.ht
 
 ```bash
 cmake --preset debug-coverage && cmake --build --preset debug-coverage
-ctest --preset debug-coverage --output-on-failure
 cmake --build --preset debug-coverage --target coverage
 ```
+
+There is deliberately no `ctest` step. The `coverage` target zeroes the counters and
+then runs the whole suite itself, with `--output-on-failure`, so a run of your own ahead
+of it buys no extra signal and costs a second pass over all the tests. See
+`cmake/coverage.cmake`, where the `lcov --zerocounters` and `ctest` commands sit in that
+order.
+
+A separate run is also the one test run in the flow that no zeroing precedes, so against
+a reused build directory it reports `libgcov profiling error: ... overwriting an existing
+profile data with a different checksum` for every translation unit whose code changed
+since that directory was last populated. Those lines are harmless -- the report is built
+from the target's own run, not from that data -- but they read like a broken gate, and
+diagnosing them cost a full investigation once. Issue #32 carries the measurements.
 
 ## Local install
 
