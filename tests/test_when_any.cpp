@@ -1831,3 +1831,222 @@ TEST_F(WhenAnyTest, AConstRangeOfCopyableElementsIsCopied)
 	EXPECT_EQ(children[0].value, 7) << "a copied element leaves the caller's intact";
 	EXPECT_EQ(children[1].value, 8);
 }
+
+// The public overloads' shapes below were each probed by hand during the branch's final
+// review and found correct, but none had a runtime test: the suite pinned them only at
+// the type level, or not at all. Each test says what it would catch, because two of the
+// six guard a COMPILE-TIME property and saying otherwise would be the defect this file
+// has spent its length removing.
+
+namespace
+{
+	/** Yields a reference to @p target, so the winner's slot holds a std::reference_wrapper. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the target is owned by the calling test, which outlives the await.
+	alt::task<int&> yield_reference(int& target)
+	{
+		co_return target;
+	}
+
+	/** Ready at once with @p value, for the shapes that need no parking. */
+	alt::task<int> ready_with(int value)
+	{
+		co_return value;
+	}
+
+	/** Parks in a when_any over a vector of move-only children and takes the winner out. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the events and the record are owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task range_move_only_root(alt::async_event& first, alt::async_event& second, wait_record& record, std::size_t& winner, std::unique_ptr<int>& taken)
+	{
+		std::vector<alt::task<std::unique_ptr<int>>> children;
+		children.push_back(wait_then_yield_unique(first, race_child_values[0]));
+		children.push_back(wait_then_yield_unique(second, race_child_values[1]));
+
+		auto result = co_await alt::when_any(std::move(children));
+		record_outcome(record, result);
+
+		if(result)
+		{
+			winner = result->index();
+			taken  = std::move(*result).value();
+		}
+	}
+} // namespace
+
+TEST_F(WhenAnyTest, AReferenceChildsWinnerRefersToTheCallersObject)
+{
+	int target = 1;
+
+	const auto result = alt::sync_wait(alt::when_any(yield_reference(target)));
+
+	ASSERT_TRUE(result.has_value());
+	int& back = result->get<0>().get();
+
+	// WHAT THIS CATCHES, MEASURED. Mutate detail::combinator_value<T&> to
+	// std::remove_cvref_t<T> and the build FAILS -- but it fails first in
+	// test_combinator_results.cpp's own static_asserts, which pin that mapping at the type
+	// level ahead of this test. So this test is NOT what catches that mutation.
+	//
+	// What it adds, and what no static_assert can: the identity below and the write
+	// through it. A mapping that produced a reference_wrapper to a COPY would satisfy every
+	// type-level check in the suite and fail here. No mutation in the tree today produces
+	// that, so these two assertions are unwitnessed by construction, and saying so is worth
+	// more than a guard this test does not have.
+	EXPECT_EQ(&back, &target) << "the winner's reference_wrapper must refer to the caller's object";
+
+	back = 42;
+	EXPECT_EQ(target, 42) << "writing through the winner must reach the caller's object";
+}
+
+TEST_F(WhenAnyTest, AWhenAnyNestedInAWhenAnyIsRacedAsOneChild)
+{
+	const auto result = alt::sync_wait(alt::when_any(alt::when_any(ready_with(7)), ready_with(8)));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(result->index(), 0U) << "the inner race elects before the outer's second child";
+
+	// The inner when_any's own result is this position's value, so a won nested race is
+	// an expected<when_any_result<int>, error_code> inside the outer's variant.
+	const auto& inner = result->get<0>();
+	ASSERT_TRUE(inner.has_value());
+	EXPECT_EQ(inner->get<0>(), 7);
+
+	// WHAT THIS CATCHES IS A COMPILE-TIME PROPERTY, measured: that
+	// detail::when_any_awaitable satisfies alt::awaitable and so is usable as a child of
+	// another when_any. Rename its operator co_await and the build fails -- but it fails at
+	// test_when_any.cpp:226 too, which drives one through the same machinery, so this test
+	// is not the unique witness. What it adds is the nesting itself, which nothing else in
+	// the suite constructs, and the assertion that the inner race's own result arrives as
+	// this position's value.
+}
+
+TEST_F(WhenAnyTest, AHeldResultSurvivesASecondWhenAnyAwait)
+{
+	const auto combined = alt::sync_wait([]() -> alt::task<int> {
+		const auto first = co_await alt::when_any(ready_with(1));
+
+		// The second await allocates and frees a block of its own while the first result
+		// is still held. NO MUTATION IN THE TREE MAKES THIS FAIL: when_any_result owns a
+		// std::variant by value, and there is no type-preserving change that turns that
+		// into a borrow. It is a REGRESSION GUARD for a result that ever started
+		// borrowing from its awaiter's block -- the second await's allocation would then
+		// read as a changed first value, and under AddressSanitizer as a
+		// heap-use-after-free. Stated plainly because a test claiming a guard it does not
+		// have is worse than one that says it has none.
+		const auto second = co_await alt::when_any(ready_with(2));
+
+		co_return first->get<0>() * 10 + second->get<0>();
+	}());
+
+	EXPECT_EQ(combined, 12) << "the first result must still hold its own value after the second await";
+}
+
+TEST_F(WhenAnyTest, AStdArrayRangeIsRacedLikeAnyOtherSizedRange)
+{
+	std::array<flagged_ready, 2> children{flagged_ready{3}, flagged_ready{4}};
+
+	const auto result = alt::sync_wait(alt::when_any(std::move(children)));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(result->index(), 0U) << "both are ready; the first started is the first elected";
+	EXPECT_EQ(result->value(), 3);
+	// flagged_ready's move constructor sets other.moved_from, so the source is left in a state the
+	// type itself defines, and these two reads are exactly what asserts it. std::array's move is
+	// elementwise, so the array object here is never itself moved from -- only its elements are,
+	// which is the property under test.
+	// NOLINTNEXTLINE(bugprone-use-after-move)
+	EXPECT_TRUE(children[0].moved_from) << "a fixed-size range's elements are moved from in place";
+	EXPECT_TRUE(children[1].moved_from);
+
+	// WHAT THIS CATCHES IS MOSTLY A COMPILE-TIME PROPERTY, measured: narrow the range
+	// overload's constraint to require push_back and the build fails -- though it fails at
+	// test_when_any.cpp:1656's static_assert as well, so this test is not the unique
+	// witness of that narrowing. A narrowing that admitted a vector and awaitable_range but
+	// not a fixed-size range would be caught here alone. The moved_from reads are the
+	// runtime half and no mutation in the tree exercises them.
+}
+
+TEST_F(WhenAnyTest, TheRangeFormYieldsAMoveOnlyWinner)
+{
+	alt::async_event     first;
+	alt::async_event     second;
+	wait_record          record;
+	std::size_t          winner = 99;
+	std::unique_ptr<int> taken;
+
+	auto handle = alt::start(range_move_only_root(first, second, record, winner, taken));
+	ASSERT_EQ(record.resumptions, 0);
+	ASSERT_EQ(live_frames, 2);
+
+	second.set();
+
+	EXPECT_EQ(record.resumptions, 1);
+	EXPECT_TRUE(record.satisfied);
+	EXPECT_EQ(winner, 1U);
+
+	// WHAT THIS CATCHES, MEASURED, AND THIS ONE IS THE UNIQUE WITNESS. Take the winner with
+	// slots[winner].value() on an lvalue instead of std::move(...).value() and the build
+	// fails inside when_any.hpp -- "call to deleted constructor of std::unique_ptr<int>" --
+	// reached only because this is the only place in the suite that instantiates the RANGE
+	// form with a move-only value type. Without this test that mutation compiles. The
+	// argument-list form's own move-only test does not reach the path, the two forms
+	// assembling their results separately.
+	ASSERT_NE(taken, nullptr) << "the move-only winner did not come out of the range result";
+	EXPECT_EQ(*taken, race_child_values[1]);
+	EXPECT_EQ(live_frames, 0) << "the loser must have retired before a won await returns";
+}
+
+namespace
+{
+	/**
+	 * @brief Races a throwing element against a parked one in the RANGE form, and records
+	 *        the rethrow.
+	 *
+	 * Element 0 parks on @p gate and throws when it is set, so it stores an exception and
+	 * wins its election with element 1 still outstanding. Element 1 is parked on an
+	 * async_event, so the winner's stop is what retires it; @p returned is what says the
+	 * await had not come back before the throw arrived.
+	 */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): every reference is owned by the calling test, which holds them until live_frames is back to zero.
+	alt::cancellable_task range_throwing_root(alt::async_event& gate, alt::async_event& held, std::string& caught, bool& returned)
+	{
+		std::vector<alt::task<int>> children;
+		children.push_back(wait_then_throw(gate, race_child_values[0]));
+		children.push_back(wait_then_yield(held, race_child_values[1]));
+
+		try
+		{
+			[[maybe_unused]] const auto result = co_await alt::when_any(std::move(children));
+			ADD_FAILURE() << "the winning element's exception did not reach the await";
+		}
+		catch(const std::runtime_error& error)
+		{
+			caught = error.what();
+		}
+
+		returned = true;
+	}
+} // namespace
+
+TEST_F(WhenAnyTest, TheRangeFormRethrowsAThrowingWinner)
+{
+	alt::async_event gate;
+	alt::async_event held;
+	std::string      caught;
+	bool             returned = false;
+
+	auto handle = alt::start(range_throwing_root(gate, held, caught, returned));
+	ASSERT_EQ(live_frames, 2) << "both elements are parked";
+	ASSERT_FALSE(returned);
+
+	gate.set();
+
+	// WHAT THIS CATCHES, MEASURED: stop detail::result_store::value() rethrowing a stored
+	// exception and this test ABORTS on std::bad_variant_access rather than failing an
+	// assertion -- the store still holds the exception and the value read then names the
+	// wrong alternative. The mutation is not range-specific, so every rethrow test in the
+	// suite dies with it; what this test adds is that the RANGE assembly path is exercised
+	// at all, which the argument-list rethrow test never reaches.
+	EXPECT_TRUE(returned) << "the await did not come back";
+	EXPECT_EQ(caught, "winner body") << "the winning element's exception must be rethrown";
+	EXPECT_EQ(live_frames, 0) << "both elements must have retired even though the winner threw";
+}
