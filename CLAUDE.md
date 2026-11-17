@@ -204,6 +204,15 @@ All work reaches `main` through a pull request. `main` is never pushed to direct
 
 Do not merge to `main` until explicitly asked to.
 
+### Deferrals
+
+A finding deferred rather than fixed is filed as a GitHub issue with `gh issue create`,
+never left only in a plan ledger or a review report: those live in the plan workspace,
+which is deleted when the branch finishes. PR #19's deferred-minors list went with it and
+could not be recovered. Reference the issue number wherever the deferral is recorded, and
+re-verify a deferred item against the code before acting on it later — most of PR #19's
+recoverable ones had already been fixed by the work that followed.
+
 ### Version bump
 
 The bump is a standalone commit on the pull request branch, never bundled into a
