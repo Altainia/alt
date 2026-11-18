@@ -923,10 +923,11 @@ TEST_F(CancellationRefTest, AnOffThreadCompletionRacesAStopRequest)
 	// adding a line to the output of a passing run. It is also the census instrument --
 	// run this case alone N times and count the values:
 	//
-	//   for i in $(seq 1 2000); do alt_tests \
-	//     --gtest_filter='CancellationRefTest.AnOffThreadCompletionRacesAStopRequest' \
-	//     --gtest_output=xml:c.xml >/dev/null; \
-	//     grep -o 'value="[a-z]*"' c.xml; done | sort | uniq -c
+	//   F=CancellationRefTest.AnOffThreadCompletionRacesAStopRequest
+	//   for i in $(seq 1 2000); do
+	//     alt_tests --gtest_filter=$F --gtest_output=xml:c.xml >/dev/null
+	//     grep -o 'value="[a-z]*"' c.xml
+	//   done | sort | uniq -c
 	//
 	// Both branches are reached in the compiled case, not merely in a standalone
 	// harness: 2000 runs of the debug build gave 1988 resumed / 12 abandoned, and 500
