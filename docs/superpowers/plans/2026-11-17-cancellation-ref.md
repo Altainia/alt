@@ -387,28 +387,30 @@ git commit -m "Document cancellation_ref and correct the entry-only claim"
 
 ---
 
-### Task 6: Version bump to 1.13.0
+### Task 6: Version bump to 1.14.0
 
-Its own commit, per `CLAUDE.md`. Minor, decided with the owner: a new public header and type mean 1.12.x headers and this library are not interchangeable.
+Its own commit, per `CLAUDE.md`. Minor, decided with the owner: a new public header and type mean the previous minor's headers and this library are not interchangeable.
+
+The target was 1.13.0 when this plan was written, against a `main` at 1.12.3. `main` then reached 1.13.0 itself (commit `470c36e`, with MSVC support), colliding with this branch's bump, so the merge of `main` re-bumped the branch to **1.14.0** on top of it. The reasoning is unchanged; only the number moved.
 
 **Files:** `CMakeLists.txt`, `include/alt/version.hpp`, `src/version.cpp`, `tests/test_version.cpp`, `README.md`, `CLAUDE.md`
 
 - [ ] **Step 1: Change all six**
 
-`CMakeLists.txt` `project(Alt VERSION 1.13.0 ...)`; `version.hpp` macros and constexpr variables; `src/version.cpp`'s string. In `tests/test_version.cpp` change **three** places: the `EXPECT_EQ` macros, the `static_assert`s on `alt::version_patch` and friends — which spell the number bare, so a grep for `1.12.3` misses them — and the version string. In `README.md` and `CLAUDE.md`, the project version occurrences plus the `find_package` compatibility prose, whose operands illustrate the rule rather than this release and must still agree with the snippet above them.
+`CMakeLists.txt` `project(Alt VERSION 1.14.0 ...)`; `version.hpp` macros and constexpr variables; `src/version.cpp`'s string. In `tests/test_version.cpp` change **three** places: the `EXPECT_EQ` macros, the `static_assert`s on `alt::version_patch` and friends — which spell the number bare, so a grep for the old version string misses them — and the version string. In `README.md` and `CLAUDE.md`, the project version occurrences plus the `find_package` compatibility prose, whose operands illustrate the rule rather than this release and must still agree with the snippet above them.
 
 - [ ] **Step 2: Verify**
 
 Run: `cmake --preset debug && cmake --build --preset debug && ctest --preset debug --output-on-failure -R Version`
 Expected: PASS. A missed `static_assert` fails the **build**, not `ctest`, so a green build is part of the check.
 
-Run: `grep -rn "1\.12\.3" . --exclude-dir=build --exclude-dir=.git`
+Run: `grep -rn "1\.13\.0" . --exclude-dir=build --exclude-dir=.git`
 Expected: only historical mentions — dated specs and plans under `docs/superpowers/`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git commit -am "Bump version to 1.13.0"
+git commit -am "Bump version to 1.14.0"
 ```
 
 ---

@@ -565,10 +565,12 @@ separate `ctest` pass ahead of it.
 
 ## Version bump
 
-Decided with the owner on 2026-11-17: **minor, 1.12.3 → 1.13.0.** A new public header and
+Decided with the owner on 2026-11-17: **a minor bump.** The number was 1.12.3 → 1.13.0 when
+this was decided; `main` subsequently took 1.13.0 for itself (commit `470c36e`, MSVC
+support), so after the merge of `main` this branch is **1.13.0 → 1.14.0**. A new public header and
 a new public type mean headers from 1.12.x and this library are not interchangeable, which
 is what `README.md`'s `SameMinorVersion` rule expresses and what the package config
-refuses on. It lands as its own commit on the branch, message `Bump version to 1.13.0`,
+refuses on. It lands as its own commit on the branch, message `Bump version to 1.14.0`,
 touching all six files in `CLAUDE.md`'s table — including the third place in
 `tests/test_version.cpp`, where the `static_assert` spells the number bare and a grep for
 the old string misses it, and the `find_package` compatibility prose in both `README.md`
