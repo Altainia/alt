@@ -173,6 +173,96 @@ namespace
 		co_await view_recorder{};
 	}
 
+	// What an operation does when it completes. The two values are the only difference
+	// between the mutation pair.
+	enum class completion
+	{
+		resume_or_abandon,
+		plain_resume,
+	};
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	int operation_starts = 0;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	bool completion_resumed = false;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	int awaited_result = 0;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	completion pending_completion = completion::resume_or_abandon;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	alt::cancellation_ref pending_view{};
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	std::coroutine_handle<> pending_handle{};
+
+	// Finishes the parked operation the way the awaiter was told to. Nothing here may
+	// touch the awaiter afterwards: either branch can free the frame it lives in.
+	void complete_pending_operation() noexcept
+	{
+		const alt::cancellation_ref   view = pending_view;
+		const std::coroutine_handle<> h    = pending_handle;
+		const completion              mode = pending_completion;
+
+		if(mode == completion::resume_or_abandon)
+		{
+			completion_resumed = view.resume_or_abandon(h);
+		}
+		else
+		{
+			h.resume();
+			completion_resumed = true;
+		}
+	}
+
+	// Parks until the test (or a scheduler) calls complete_pending_operation.
+	struct completing_awaiter
+	{
+		completion             on_completion;
+		alt::manual_scheduler* scheduler = nullptr;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return false;
+		}
+
+		template<typename Promise>
+		void await_suspend(std::coroutine_handle<Promise> h) const
+		{
+			++operation_starts;
+			pending_completion = on_completion;
+			pending_view       = alt::get_cancellation_ref(h);
+			pending_handle     = h;
+
+			if(scheduler != nullptr)
+			{
+				scheduler->post(alt::work_item{.invoke = [](void*) noexcept { complete_pending_operation(); }, .state = nullptr});
+			}
+		}
+
+		[[nodiscard]] int await_resume() const noexcept
+		{
+			return 42;
+		}
+	};
+
+	alt::cancellable_task cancellable_completing(completion on_completion)
+	{
+		const frame_tracker t{1};
+		awaited_result       = co_await completing_awaiter{on_completion};
+		body_ran_after_await = true;
+	}
+
+	alt::task<void> plain_completing(alt::manual_scheduler* scheduler)
+	{
+		const frame_tracker t{1};
+		awaited_result       = co_await completing_awaiter{completion::resume_or_abandon, scheduler};
+		body_ran_after_await = true;
+	}
+
 	using alt_test::asserts_are_compiled_in;
 	using alt_test::scoped_death_test_style;
 	using alt_test::thread_sanitizer_forks_death_tests;
@@ -191,8 +281,14 @@ protected:
 	void SetUp() override
 	{
 		reset_coroutine_test_state();
-		recorded_view     = alt::cancellation_ref{};
-		view_was_recorded = false;
+		recorded_view        = alt::cancellation_ref{};
+		view_was_recorded    = false;
+		operation_starts     = 0;
+		completion_resumed   = false;
+		awaited_result       = 0;
+		body_ran_after_await = false;
+		pending_view         = alt::cancellation_ref{};
+		pending_handle       = {};
 	}
 };
 
@@ -362,4 +458,93 @@ TEST(CancellationRefDeathTest, GettingAViewFromAnEmptyHandleAborts)
 	// Typed, with a promise that relays cancellation, so the accessor's own assert is
 	// the one that fires rather than the erased-handle path.
 	EXPECT_DEATH(static_cast<void>(alt::get_cancellation_ref(std::coroutine_handle<unstoppable_root::promise_type>{})), "getting a cancellation_ref from an empty coroutine handle");
+}
+
+TEST_F(CancellationRefTest, ABodyDoesNotRunWhenTheAwaiterAbandons)
+{
+	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon));
+	ASSERT_EQ(operation_starts, 1);
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();
+	complete_pending_operation();
+
+	EXPECT_FALSE(completion_resumed);
+	EXPECT_FALSE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+}
+
+// The mutation of record for the test above: the same awaiter, with only its completion
+// swapped for a plain resume. Without it the test above is consistent with the body never
+// having been reachable at all.
+TEST_F(CancellationRefTest, ABodyDoesRunWhenTheAwaiterResumesInstead)
+{
+	auto handle = alt::start(cancellable_completing(completion::plain_resume));
+	ASSERT_EQ(operation_starts, 1);
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();
+	complete_pending_operation();
+
+	EXPECT_TRUE(completion_resumed);
+	EXPECT_TRUE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, ResumeOrAbandonResumesWhenNoStopWasRequested)
+{
+	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon));
+	ASSERT_EQ(operation_starts, 1);
+
+	complete_pending_operation();
+
+	EXPECT_TRUE(completion_resumed);
+	EXPECT_TRUE(body_ran_after_await);
+	EXPECT_EQ(awaited_result, 42);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, ResumeOrAbandonResumesWhenTheViewIsEmpty)
+{
+	alt::manual_scheduler scheduler;
+
+	alt::sync_wait(plain_completing(&scheduler), scheduler);
+
+	EXPECT_FALSE(static_cast<bool>(pending_view));
+	EXPECT_TRUE(completion_resumed);
+	EXPECT_TRUE(body_ran_after_await);
+	EXPECT_EQ(awaited_result, 42);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, AStopBeforeTheAwaitStopsTheOperationStarting)
+{
+	// A token that is already stopped stops the chain before the body runs, so the
+	// wrapper's entry check fires first and the awaiter is never asked to start.
+	std::stop_source source;
+	source.request_stop();
+
+	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon), {.token = source.get_token()});
+
+	EXPECT_EQ(operation_starts, 0);
+	EXPECT_FALSE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH, not this body; see the first death test in this file, whose suppression carries the measured 39.
+TEST(CancellationRefDeathTest, ResumeOrAbandonWithAnEmptyHandleAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << alt_test::debug_and_asan_presets_run_it;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	EXPECT_DEATH(static_cast<void>(alt::cancellation_ref{}.resume_or_abandon(std::coroutine_handle<>{})), "resuming or abandoning an alt chain with an empty coroutine handle");
 }

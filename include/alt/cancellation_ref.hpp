@@ -85,6 +85,49 @@ namespace alt
 			detail::abandon_chain(*m_context);
 		}
 
+		/**
+		 * @brief Resumes the awaiting coroutine, or tears the chain down if a stop has been
+		 *        requested since it suspended.
+		 *
+		 * This is what an operation calls when it completes, in place of h.resume(): the
+		 * library's own wrapper only checks for cancellation on entry to a suspension
+		 * point, so a stop requested while the operation was in flight would otherwise
+		 * run the body anyway.
+		 *
+		 * DELICATE. Both branches may destroy the frame the calling awaiter lives in:
+		 * resuming can run the coroutine to completion, and abandoning destroys the chain.
+		 * The call must be the awaiter's last statement, and nothing may be read through
+		 * *this, the awaiter, or any other view of the chain afterwards.
+		 *
+		 * Call it at most once per suspension, since both branches end it.
+		 *
+		 * An empty view resumes. That is what lets one awaiter serve both a cancellable
+		 * chain and a plain alt::task with no branch of its own.
+		 *
+		 * @param h The handle the awaiter was suspended with.
+		 * @return true when the coroutine was resumed, false when the chain was abandoned.
+		 *         Reading it is only safe where the awaiter is known to outlive the call.
+		 *
+		 * @pre h is not empty.
+		 */
+		bool resume_or_abandon(std::coroutine_handle<> h) const noexcept
+		{
+			assert(h && "resuming or abandoning an alt chain with an empty coroutine handle");
+
+			// Copied to a local before either branch: both may free the frame *this lives in.
+			detail::cancellation_context* const context = m_context;
+
+			if(context != nullptr && context->stop_requested())
+			{
+				// Both of abandon()'s preconditions were just checked.
+				cancellation_ref{context}.abandon();
+				return false;
+			}
+
+			h.resume();
+			return true;
+		}
+
 	private:
 		template<typename Promise>
 		friend cancellation_ref get_cancellation_ref(std::coroutine_handle<Promise> h) noexcept;
