@@ -415,14 +415,15 @@ namespace
 		}
 	}
 
-	/** A tracked task that parks on @p gate and then completes by throwing. */
-	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
 #ifdef _MSC_VER
 	// C4033 "must return a value" is a false positive for a coroutine: the body ends in
-	// a throw, so control never reaches the end without a co_return.
+	// a throw, so control never reaches the end without a co_return. Kept above the
+	// NOLINTNEXTLINE below, which has to sit on the line directly before the signature.
 #	pragma warning(push)
 #	pragma warning(disable : 4033)
 #endif
+	/** A tracked task that parks on @p gate and then completes by throwing. */
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
 	alt::task<int> wait_then_throw(alt::async_event& gate, int tag)
 	{
 		const frame_tracker tracker{tag};
