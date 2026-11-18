@@ -6,10 +6,16 @@
 #include <alt/scheduler.hpp>
 #include <alt/sync_wait.hpp>
 #include <alt/task.hpp>
+#include <alt/when_all.hpp>
 #include <coroutine>
 #include <exception>
+#include <expected>
+#include <functional>
+#include <optional>
 #include <stop_token>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -269,6 +275,73 @@ namespace
 		body_ran_after_await = true;
 	}
 
+	// Registers a std::stop_callback on the token the view hands it, whose body completes
+	// the operation with resume_or_abandon: the adapter shape, where a stop request drives
+	// the operation to its end synchronously on the requesting thread. A std::stop_callback
+	// has no move constructor, so this awaiter is immovable and is awaited as a named lvalue.
+	struct stop_callback_awaiter
+	{
+		std::optional<std::stop_callback<std::function<void()>>> callback;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return false;
+		}
+
+		template<typename Promise>
+		void await_suspend(std::coroutine_handle<Promise> h)
+		{
+			const alt::cancellation_ref view = alt::get_cancellation_ref(h);
+
+			recorded_view     = view;
+			view_was_recorded = true;
+			parked            = h;
+
+			callback.emplace(view.get_stop_token(), [view, h]() noexcept { static_cast<void>(view.resume_or_abandon(h)); });
+		}
+
+		void await_resume() const noexcept
+		{}
+	};
+
+	static_assert(!std::is_move_constructible_v<stop_callback_awaiter>);
+
+	alt::cancellable_task cancellable_with_a_stop_callback()
+	{
+		const frame_tracker t{1};
+		body_reached_await = true;
+		stop_callback_awaiter awaiter;
+		co_await awaiter;
+		body_ran_after_await = true;
+	}
+
+	// What the when_all in combinator_root reported.
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	bool combinator_reported = false;
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	std::optional<std::error_code> combinator_error{};
+
+	// The opted-in awaiter, inside a user awaitable that when_all runs as its own root.
+	alt::task<int> combinator_child()
+	{
+		const frame_tracker t{1};
+		const int           value = co_await completing_awaiter{completion::resume_or_abandon};
+		co_return value;
+	}
+
+	alt::cancellable_task combinator_root()
+	{
+		const frame_tracker t{1};
+		const auto          result = co_await alt::when_all(combinator_child());
+		combinator_reported        = true;
+		if(!result)
+		{
+			combinator_error = result.error();
+		}
+		co_await alt::cancellation_point{};
+	}
+
 	using alt_test::asserts_are_compiled_in;
 	using alt_test::scoped_death_test_style;
 	using alt_test::thread_sanitizer_forks_death_tests;
@@ -296,6 +369,8 @@ protected:
 		body_ran_after_await = false;
 		pending_view         = alt::cancellation_ref{};
 		pending_handle       = {};
+		combinator_reported  = false;
+		combinator_error.reset();
 	}
 };
 
@@ -558,4 +633,96 @@ TEST(CancellationRefDeathTest, ResumeOrAbandonWithAnEmptyHandleAborts)
 	const scoped_death_test_style style{"threadsafe"};
 
 	EXPECT_DEATH(static_cast<void>(alt::cancellation_ref{}.resume_or_abandon(std::coroutine_handle<>{})), "resuming or abandoning an alt chain with an empty coroutine handle");
+}
+
+TEST_F(CancellationRefTest, ATeardownFromInsideRequestStopIsSafe)
+{
+	// The adapter's primary path: the stop callback's body tears the chain down while
+	// request_stop() is still walking the stop state's callback list, destroying the root
+	// frame and the leaf frame holding the callback that is executing.
+	auto handle = alt::start(cancellable_with_a_stop_callback());
+	ASSERT_TRUE(body_reached_await);
+	ASSERT_TRUE(view_was_recorded);
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();
+
+	EXPECT_FALSE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_TRUE(handle.stop_requested());
+}
+
+TEST_F(CancellationRefTest, ATeardownFromInsideALinkedTokensRequestStopIsSafe)
+{
+	// The stop arrives through start_options::token with the chain's own handle
+	// discarded, so the teardown destroys the external-link callback while it is itself
+	// mid-invocation.
+	std::stop_source source;
+
+	static_cast<void>(alt::start(cancellable_with_a_stop_callback(), {.token = source.get_token()}));
+	ASSERT_TRUE(body_reached_await);
+	ASSERT_TRUE(view_was_recorded);
+	ASSERT_EQ(live_frames, 1);
+
+	EXPECT_TRUE(source.request_stop());
+
+	EXPECT_FALSE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_TRUE(source.stop_requested());
+	EXPECT_TRUE(source.get_token().stop_requested());
+	EXPECT_FALSE(source.request_stop());
+}
+
+TEST_F(CancellationRefTest, AnImmovableAwaiterWorksAsAnLvalue)
+{
+	// Issue #10's third limit. The awaiter is immovable (static_assert above), so a
+	// prvalue co_await would not compile; a named lvalue is stored by reference.
+	auto handle = alt::start(cancellable_with_a_stop_callback());
+	ASSERT_TRUE(view_was_recorded);
+
+	EXPECT_TRUE(static_cast<bool>(recorded_view));
+	EXPECT_FALSE(body_ran_after_await);
+
+	parked.resume();
+
+	EXPECT_TRUE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, ACombinatorChildKeepsItsBlocksVerdict)
+{
+	// A satisfied verdict over an unfilled slot would abort in result_store, so reaching
+	// the assertions below is part of the check.
+	auto handle = alt::start(combinator_root());
+	ASSERT_EQ(operation_starts, 1);
+
+	handle.request_stop();
+	complete_pending_operation();
+
+	EXPECT_FALSE(completion_resumed);
+	ASSERT_TRUE(combinator_reported);
+	ASSERT_TRUE(combinator_error.has_value());
+	EXPECT_EQ(*combinator_error, std::errc::operation_canceled);
+	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, AnOffThreadCompletionResumesSafely)
+{
+	// The resume branch, run off the test thread. The chain is never stopped, and the
+	// join is what orders the thread's writes before the reads below.
+	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon));
+	ASSERT_EQ(operation_starts, 1);
+
+	std::thread::id completing_thread{};
+	std::jthread    worker{[&completing_thread] {
+    completing_thread = std::this_thread::get_id();
+    complete_pending_operation();
+  }};
+	worker.join();
+
+	EXPECT_NE(completing_thread, std::this_thread::get_id());
+	EXPECT_TRUE(completion_resumed);
+	EXPECT_TRUE(body_ran_after_await);
+	EXPECT_EQ(awaited_result, 42);
+	EXPECT_EQ(live_frames, 0);
 }
