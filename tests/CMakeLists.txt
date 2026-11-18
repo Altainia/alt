@@ -80,6 +80,18 @@ target_link_libraries(alt_tests
 )
 
 alt_add_warnings(alt_tests)
+
+# GCC 15 at -O2/-O3 reports -Wmaybe-uninitialized from inside <stop_token> for a
+# cancellable_task that co_awaits when_all: the optional<stop_callback> in
+# wait_awaiter::await_suspend is emplaced into a fresh, empty optional, so the read the
+# warning describes cannot happen. It reproduces on main's headers with a four-line
+# cancellable_task + when_all, so it is not specific to cancellation_ref; this file is
+# the first to put that shape under the optimized build. Scoped to the one file and to
+# GCC so every other translation unit keeps the warning.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(test_cancellation_ref.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-maybe-uninitialized")
+endif()
 alt_add_sanitizers(alt_tests)
 alt_add_coverage(alt_tests)
 alt_add_coverage_target(${CMAKE_BINARY_DIR})
