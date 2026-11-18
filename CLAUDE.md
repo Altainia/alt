@@ -102,6 +102,17 @@ which is what kept a use-after-free in `detail::stop_forwarder` invisible on Lin
 AddressSanitizer included. A cancellation test that hangs only on MSVC is that class of
 bug, not a flaky test.
 
+That early return hides the defect only while the abandoning callback is the sole
+registration on the token. A second one on the same token leaves the walk somewhere to
+go, and then Linux sees it too:
+`CancellationRefTest.ATeardownWithASecondCallbackOnTheChainsTokenIsSafe` is built that
+way on purpose, and with the keepalive removed it fails every Linux preset — an
+AddressSanitizer `heap-use-after-free` under `debug-asan`, and 0 passes in 40 runs of
+plain `debug` (26 segfaults, 14 hangs). So reach for that shape when a defect in this
+area looks MSVC-only; it is usually reproducible here. Both libraries walk the list in
+reverse registration order, which is what makes the arrangement portable — MSVC's STL
+attaches at the head and pops the head in `_Request_stop`.
+
 ### clang-tidy
 
 Warnings are errors — the build fails on any finding.

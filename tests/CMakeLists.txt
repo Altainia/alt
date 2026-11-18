@@ -110,15 +110,30 @@ if(MSVC AND ALT_SANITIZE STREQUAL "address")
     )
 endif()
 
-# GCC 15 at -O2/-O3 reports -Wmaybe-uninitialized from inside libstdc++'s <stop_token>
+# GCC at -O2/-O3 reports -Wmaybe-uninitialized from inside libstdc++'s <stop_token>
 # for a cancellable_task that co_awaits when_all. The read it describes cannot happen:
 # the optional<stop_callback> in wait_awaiter::await_suspend is emplaced into a fresh,
 # empty optional. It reproduces against main's headers with a four-line cancellable_task
 # + when_all translation unit and no cancellation_ref.hpp, while main's own much larger
-# test_when_all.cpp compiles clean at -O2 against the same headers (both measured by the
-# controller's verification), so it tracks the translation unit's inlining context rather
-# than the shape. Scoped to this one file and to GNU so every other translation unit
-# keeps the warning. See issue #44, which also asks whether CI's GCC fires it at all.
+# test_when_all.cpp compiles clean at -O2 against the same headers (both measured during
+# PR #46), so it tracks the translation unit's inlining context rather than the shape. Scoped to this one file and
+# to GNU so every other translation unit keeps the warning.
+#
+# This suppression is load-bearing in CI, not inert -- which is what issue #44 asked, and
+# it is now measured rather than inferred:
+#
+#   - CI's ubuntu-latest is Ubuntu 26.04 with GNU 15.2.0 (read off the configure step of
+#     the "Build & Test (optimized)" job), the same version that fires it locally.
+#   - Deleting these four lines and building `cmake --preset release-tests
+#     -DALT_WARNINGS_AS_ERRORS=ON` -- the optimized job's own invocation, -O3 -DNDEBUG --
+#     fails with "error: ... _M_ptr may be used uninitialized [-Werror=maybe-uninitialized]"
+#     at /usr/include/c++/15/stop_token:449. With the lines present the same build is clean.
+#   - GCC 16 (trunk, 16.0.1 20260322) still fires it, at stop_token:448, so this is not
+#     fixed upstream and the suppression cannot be narrowed to GCC 15. A search of GCC
+#     Bugzilla found no report for this false positive; none has been filed from here.
+#
+# Only the optimized job is affected: every other GNU job in CI (debug, asan, tsan,
+# coverage) is -O0, where the warning does not fire.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set_source_files_properties(test_cancellation_ref.cpp PROPERTIES
         COMPILE_OPTIONS "-Wno-maybe-uninitialized")

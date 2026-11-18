@@ -726,15 +726,48 @@ TEST_F(CancellationRefTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
 	// registered, _M_request_stop's "last callback" early return hides the freed state
 	// and the test above passes either way.
 	//
-	// That makes the arrangement depend on an invocation order the standard does not
-	// specify, so on MSVC this case may pass without discriminating anything. It has
-	// never been compiled there. Issue #47 carries what to check once CI's MSVC jobs
-	// have run.
+	// The arrangement depends on an invocation order the standard does not specify, so
+	// whether it discriminates anything on MSVC was an open question (issue #47) until
+	// both libraries were checked. Both walk in reverse registration order, so it
+	// discriminates on both:
 	//
-	// This is clean ONLY because of that local. Without it the run is an
-	// AddressSanitizer heap-use-after-free: a READ of the freed stop state in
-	// _Stop_state_t::_M_lock(), reached from stop_forwarder::operator() via the outer
-	// request_stop(). So this test belongs to the AddressSanitizer gate above all.
+	//   - libstdc++ registers at the head of _M_callbacks and _M_request_stop takes the
+	//     head, so the abandoning callback -- emplaced second -- runs first.
+	//   - MSVC's STL does the same: _Stop_callback_base::_Do_attach sets _Head = this,
+	//     and _Stop_state::_Request_stop pops the head each iteration of its for(;;)
+	//     (stl/inc/stop_token). Its loop then relocks the list to look for the next
+	//     node, including after the last callback, which is the contact libstdc++'s
+	//     "__last_cb" early return skips.
+	//
+	// This is clean ONLY because of that local, on both libraries, and not only under a
+	// sanitizer. Measured by replacing the local with a direct target.request_stop():
+	//
+	//   - Linux, libstdc++ 15.2, Debug + ASan: heap-use-after-free, a READ of the freed
+	//     stop state in _Stop_state_t::_M_lock() reached from stop_forwarder::operator();
+	//     exactly 1 of the 24 CancellationRef cases fails, this one.
+	//   - Linux, libstdc++ 15.2, plain Debug with no sanitizer: 40 runs of this case
+	//     alone, 0 passed -- 26 segfaulted and 14 hung. A sanitizer makes the diagnosis
+	//     legible; it is not what makes the case fail. An earlier version of this
+	//     comment said the case belonged to the AddressSanitizer gate above all, which
+	//     this measurement falsifies: every Linux gate catches it.
+	//   - MSVC 14.51, debug-asan: the same shape, heap-use-after-free, READ of 8 bytes
+	//     in _Locked_pointer<_Stop_callback_base>::_Lock_and_load() from
+	//     _Stop_state::_Request_stop() (stop_token:94, the relock at the top of the
+	//     loop) reached from stop_forwarder::operator(). 27 of 837 tests fail there, not
+	//     1: the same missing keepalive also takes out ten when_all cases, nine when_any
+	//     cases, ATeardownFromInsideALinkedTokensRequestStopIsSafe and a task_group
+	//     case, because MSVC relocks after every callback and so needs the state alive
+	//     in shapes where libstdc++'s early return does not.
+	//   - MSVC 14.51, plain debug, no sanitizer: 28 of 837 fail, and every one of them
+	//     as a ctest TIMEOUT rather than a crash, this case among them. That is the hang
+	//     CLAUDE.md's MSVC section describes, measured: the walk spins in the callback
+	//     list's lock over freed memory instead of faulting. It is also what the 60s
+	//     TIMEOUT in tests/CMakeLists.txt buys -- 28 named failures in about 70 minutes
+	//     instead of one silent stall.
+	//   - MSVC 14.51, release-tests, no sanitizer: the whole suite passed. A
+	//     use-after-free that reads mapped memory need not fail anything, which is why
+	//     the sanitizer presets are where this case earns its keep even though it does
+	//     not depend on them.
 	//
 	// The local is not this component's: main's f3f0a8b added it while porting to MSVC,
 	// where request_stop() relocks the callback list after the LAST callback too and so
@@ -851,6 +884,30 @@ TEST_F(CancellationRefTest, AnOffThreadCompletionRacesAStopRequest)
 	//
 	// This one matters most under ThreadSanitizer. The jthread's join at scope exit is
 	// what orders the worker's writes before the reads below.
+	//
+	// Both branches tear the chain down on the WORKER thread, and that is load-bearing
+	// for ThreadSanitizer cleanliness rather than incidental: completing_awaiter
+	// registers no std::stop_callback, and alt::start is called with no
+	// start_options::token, so the request_stop() below has no callback to run and only
+	// sets the flag. Whichever branch resume_or_abandon then takes, it takes on the
+	// worker, inside complete_pending_operation() -- so the frame_tracker destructors
+	// that append to alt_test::destruction_order (a plain std::vector, see
+	// tests/coroutine_test_support.hpp) all run on one thread, ordered against the reads
+	// below by the join. An awaiter variant that DID register a stop callback on the
+	// chain's token would tear down on the main thread instead, concurrently with the
+	// worker, and would need that vector guarded before it could be written this way.
+	//
+	// Vacuity: because the assertion is a disjunction, a machine or toolchain whose
+	// timing always lets one side win would still pass, and would do so silently. That
+	// costs no branch coverage -- ABodyDoesNotRunWhenTheAwaiterAbandons and
+	// ABodyDoesRunWhenTheAwaiterResumesInstead pin both branches deterministically, and
+	// are the mutation pair for them. What a one-sided machine would lose is contention
+	// on the abandon path, so the branch actually taken is recorded as a test property
+	// below, making each run say which one it exercised instead of leaving it to be
+	// inferred.
+	//
+	// Census of the COMPILED case, not of a standalone harness: see the figure recorded
+	// at the RecordProperty call below.
 	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon));
 	ASSERT_EQ(operation_starts, 1);
 
@@ -868,6 +925,26 @@ TEST_F(CancellationRefTest, AnOffThreadCompletionRacesAStopRequest)
 
 	EXPECT_TRUE(handle.stop_requested());
 	EXPECT_EQ(live_frames, 0);
+
+	// Which side won, as a GoogleTest property, so the run is self-describing: it reaches
+	// ctest's XML (ctest --output-junit, or the binary's own --gtest_output=xml) without
+	// adding a line to the output of a passing run. It is also the census instrument --
+	// run this case alone N times and count the values:
+	//
+	//   F=CancellationRefTest.AnOffThreadCompletionRacesAStopRequest
+	//   for i in $(seq 1 2000); do
+	//     alt_tests --gtest_filter=$F --gtest_output=xml:c.xml >/dev/null
+	//     grep -o 'value="[a-z]*"' c.xml
+	//   done | sort | uniq -c
+	//
+	// Both branches are reached in the compiled case, not merely in a standalone
+	// harness: 2000 runs of the debug build gave 1988 resumed / 12 abandoned, and 500
+	// runs of the debug-tsan build gave 424 resumed / 76 abandoned, with no failures in
+	// either. The abandon path is rarer in the debug build (0.6%) than under
+	// ThreadSanitizer (15.2%), which is the right way round -- TSan's instrumentation
+	// widens the window this test is trying to hit, and TSan is the gate this case
+	// exists for.
+	RecordProperty("resume_or_abandon_branch", completion_resumed ? "resumed" : "abandoned");
 
 	// The disjunction: resumed means the body ran, abandoned means it did not.
 	EXPECT_EQ(body_ran_after_await, completion_resumed);
