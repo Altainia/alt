@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.12.2`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.12.3`.
 
 ## Directory layout
 
@@ -164,22 +164,22 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.12.2_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.12.3_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.12.2 REQUIRED)
+find_package(Alt 1.12.3 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release: the inline
 sizes of the async primitives (`async_event`, `async_mutex`, `task_group`, ...) can
-change between minors. The package config enforces this: `find_package(Alt 1.12.2)`
-accepts 1.12.2 and later 1.12.x releases, but rejects 1.13.0 and 1.11.x, and a request for
-a higher patch than the installed one (1.12.3 against 1.12.2) also fails. When upgrading
+change between minors. The package config enforces this: `find_package(Alt 1.12.3)`
+accepts 1.12.3 and later 1.12.x releases, but rejects 1.13.0 and 1.11.x, and a request for
+a higher patch than the installed one (1.12.4 against 1.12.3) also fails. When upgrading
 across a minor release, update the version your project requests.
 
 A refused request prints which minor series the installed package accepts and why, so a
@@ -242,7 +242,7 @@ increase. All six of these files change together:
 | `CMakeLists.txt` | `project(Alt VERSION x.y.z ...)` |
 | `include/alt/version.hpp` | `ALT_VERSION_MAJOR/MINOR/PATCH` macros and constexpr variables |
 | `src/version.cpp` | String returned by `version()` |
-| `tests/test_version.cpp` | Expected major/minor/patch values and the version string |
+| `tests/test_version.cpp` | Expected major/minor/patch values and the version string. **Three places, not two:** the `EXPECT_EQ` macros, the `static_assert`s on `alt::version_patch` and friends, and the string. The `static_assert` spells its number bare, so a grep for the old version string misses it and the build — not `ctest` — is what reports it |
 | `README.md` | Project version occurrences. The `find_package` compatibility example's operands illustrate the rule, not this release: adjust them so the prose still agrees with the snippet above it |
 | `CLAUDE.md` | Same as `README.md`: project version occurrences move; keep the compatibility example consistent with the `find_package` snippet above it |
 
