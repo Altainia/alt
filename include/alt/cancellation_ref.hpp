@@ -104,9 +104,19 @@ namespace alt
 		 * An empty view resumes. That is what lets one awaiter serve both a cancellable
 		 * chain and a plain alt::task with no branch of its own.
 		 *
+		 * Marked noexcept, and the resume branch is where that bites. An alt promise
+		 * captures a body's exception rather than letting it escape the resumption, so
+		 * for an alt chain nothing can propagate out of here. An empty view over a
+		 * foreign coroutine is the exception: if that coroutine's unhandled_exception
+		 * rethrows, the exception escapes h.resume() into this noexcept function and the
+		 * program terminates.
+		 *
 		 * @param h The handle the awaiter was suspended with.
 		 * @return true when the coroutine was resumed, false when the chain was abandoned.
-		 *         Reading it is only safe where the awaiter is known to outlive the call.
+		 *         The returned bool is a value in the caller's own frame and is always
+		 *         safe to read; what is unsafe afterwards is anything reached *through*
+		 *         the awaiter, this view, or any other view of the chain, since either
+		 *         branch may have freed the frame they live in.
 		 *
 		 * @pre h is not empty.
 		 */

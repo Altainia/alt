@@ -387,11 +387,6 @@ namespace
 		co_await alt::cancellation_point{};
 	}
 
-	using alt_test::asserts_are_compiled_in;
-	using alt_test::scoped_death_test_style;
-	using alt_test::thread_sanitizer_forks_death_tests;
-	using alt_test::thread_sanitizer_is_active;
-
 	/** Why a death test is skipped in a build whose asserts are gone. */
 	constexpr std::string_view skipped_without_asserts =
 	  "the abandon and accessor preconditions are asserts, and NDEBUG compiles them away, so this "
@@ -770,6 +765,12 @@ TEST_F(CancellationRefTest, ACombinatorChildKeepsItsBlocksVerdict)
 {
 	// A satisfied verdict over an unfilled slot would abort in result_store, so reaching
 	// the assertions below is part of the check.
+	//
+	// The discriminating assertion is EXPECT_FALSE(completion_resumed): the child's
+	// awaiter abandoned rather than resumed. The error check is weaker than it looks,
+	// because when_all reports a stop racing a completion as cancelled even with every
+	// slot filled -- see the await_resume note in include/alt/when_all.hpp -- so
+	// operation_canceled here does not by itself show the child abandoned.
 	auto handle = alt::start(combinator_root());
 	ASSERT_EQ(operation_starts, 1);
 
@@ -778,7 +779,20 @@ TEST_F(CancellationRefTest, ACombinatorChildKeepsItsBlocksVerdict)
 
 	EXPECT_FALSE(completion_resumed);
 	ASSERT_TRUE(combinator_reported);
-	EXPECT_EQ(combinator_error, std::make_optional(std::make_error_code(std::errc::operation_canceled)));
+
+	// The error is compared against the CONDITION rather than against a second
+	// std::error_code built to match it, which include/alt/detail/async_wait.hpp asks
+	// callers to do: equivalence is what the contract promises, and an exact
+	// category-plus-value equality would pin generic_category as well.
+	//
+	// value_or rather than value() or operator*, and measured rather than guessed:
+	// clang-tidy-19 does not accept the ASSERT_TRUE above as establishing the invariant
+	// -- GoogleTest's ASSERT_ expansion is outside what its dataflow model follows -- so
+	// both of those report bugprone-unchecked-optional-access and the pinned gate fails
+	// on them. value_or is checked access, and the ASSERT_TRUE still carries the
+	// empty-optional diagnostic, so nothing here rests on the default this never uses.
+	ASSERT_TRUE(combinator_error.has_value());
+	EXPECT_EQ(combinator_error.value_or(std::error_code{}), std::errc::operation_canceled);
 	EXPECT_EQ(live_frames, 0);
 }
 
