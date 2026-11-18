@@ -157,7 +157,7 @@ TEST_F(CancellationRefTest, AbandonTearsTheChainDown)
 TEST_F(CancellationRefTest, AbandonPostsTheTeardownToHome)
 // the same, started with {.home = alt::scheduler_ref{pump}} over an
 // alt::manual_scheduler: after abandon() EXPECT_GT(live_frames, 0), then
-// pump.run_all() and EXPECT_EQ(live_frames, 0).
+// pump.drain() and EXPECT_EQ(live_frames, 0). NOTE: run_all() is deprecated; drain() is the current name.
 
 TEST(CancellationRefDeathTest, AbandoningAnEmptyViewAborts)
 // matcher "abandoning an empty alt::cancellation_ref"
