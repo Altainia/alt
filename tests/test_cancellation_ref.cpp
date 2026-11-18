@@ -9,10 +9,12 @@
 #include <coroutine>
 #include <exception>
 #include <stop_token>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include "coroutine_test_support.hpp"
+#include "death_test_support.hpp"
 
 using namespace alt_test;
 
@@ -95,6 +97,25 @@ namespace
 		co_await view_recorder{};
 	}
 
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	bool body_ran_after_await = false;
+
+	alt::cancellable_task cancellable_recording_then_marking()
+	{
+		const frame_tracker t{1};
+		co_await view_recorder{};
+		body_ran_after_await = true;
+	}
+
+	// Starts a chain, records its view and abandons it with no stop requested. Never
+	// returns in a build with asserts; lives here so the parent test process builds no
+	// frame of its own, which the death test would otherwise leak.
+	void abandon_a_chain_nobody_stopped()
+	{
+		const auto handle = alt::start(cancellable_recording());
+		recorded_view.abandon();
+	}
+
 	alt::cancellable_task cancellable_recording_through_erased_handle()
 	{
 		const frame_tracker t{1};
@@ -151,6 +172,16 @@ namespace
 		const frame_tracker t{1};
 		co_await view_recorder{};
 	}
+
+	using alt_test::asserts_are_compiled_in;
+	using alt_test::scoped_death_test_style;
+	using alt_test::thread_sanitizer_forks_death_tests;
+	using alt_test::thread_sanitizer_is_active;
+
+	/** Why a death test is skipped in a build whose asserts are gone. */
+	constexpr std::string_view skipped_without_asserts =
+	  "the abandon and accessor preconditions are asserts, and NDEBUG compiles them away, so this "
+	  "build has no guard for a death test to observe.";
 
 } // namespace
 
@@ -240,4 +271,95 @@ TEST_F(CancellationRefTest, AnAwaiterTakingTheErasedHandleGetsAnEmptyView)
 
 	parked.resume();
 	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, AbandonTearsTheChainDown)
+{
+	body_ran_after_await = false;
+
+	auto handle = alt::start(cancellable_recording_then_marking());
+	ASSERT_TRUE(view_was_recorded);
+	ASSERT_EQ(live_frames, 1);
+
+	handle.request_stop();
+	recorded_view.abandon();
+
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_FALSE(body_ran_after_await);
+}
+
+TEST_F(CancellationRefTest, AbandonPostsTheTeardownToHome)
+{
+	body_ran_after_await = false;
+	alt::manual_scheduler pump;
+
+	auto handle = alt::start(cancellable_recording_then_marking(), {.home = alt::scheduler_ref{pump}});
+	ASSERT_TRUE(view_was_recorded);
+
+	handle.request_stop();
+	recorded_view.abandon();
+
+	// Posted, not run: the frames stay suspended until the home scheduler gets to them.
+	EXPECT_GT(live_frames, 0);
+
+	pump.drain();
+
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_FALSE(body_ran_after_await);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body. See tests/test_waiter_list.cpp, whose suppression carries the measurement.
+TEST(CancellationRefDeathTest, AbandoningAnEmptyViewAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << alt_test::debug_and_asan_presets_run_it;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	EXPECT_DEATH(alt::cancellation_ref{}.abandon(), "abandoning an empty alt::cancellation_ref");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): see above.
+TEST(CancellationRefDeathTest, AbandoningAChainWithNoStopRequestedAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << alt_test::debug_and_asan_presets_run_it;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	EXPECT_DEATH(abandon_a_chain_nobody_stopped(), "abandoning an alt chain with no stop requested");
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): see above.
+TEST(CancellationRefDeathTest, GettingAViewFromAnEmptyHandleAborts)
+{
+	if(!asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << skipped_without_asserts;
+	}
+
+	if(thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << thread_sanitizer_forks_death_tests << ' ' << alt_test::debug_and_asan_presets_run_it;
+	}
+
+	const scoped_death_test_style style{"threadsafe"};
+
+	// Typed, with a promise that relays cancellation, so the accessor's own assert is
+	// the one that fires rather than the erased-handle path.
+	EXPECT_DEATH(static_cast<void>(alt::get_cancellation_ref(std::coroutine_handle<unstoppable_root::promise_type>{})), "getting a cancellation_ref from an empty coroutine handle");
 }

@@ -59,6 +59,32 @@ namespace alt
 			return m_context != nullptr && m_context->stop_requested();
 		}
 
+		/**
+		 * @brief Tears the whole chain down: destroys the root frame, and with it every
+		 *        frame below it, or posts that destruction to the chain's home scheduler.
+		 *
+		 * DELICATE. This destroys the frame the calling awaiter lives in. It must be the
+		 * awaiter's last statement, and nothing may be read through *this, the awaiter,
+		 * or any other view of the chain afterwards: all of it may already be gone when
+		 * this returns. Return from await_suspend immediately, in a way that does not
+		 * resume the coroutine (void, or true for a bool-returning one).
+		 *
+		 * This is not a general destroy-this-chain button. It is for an operation that
+		 * stopped because the chain's own token says so. An operation that stopped for a
+		 * reason the token knows nothing about must resume with a released result
+		 * instead, as alt's own six waits do, so the awaiting body can see why.
+		 *
+		 * @pre The view is not empty.
+		 * @pre stop_requested() is true.
+		 */
+		void abandon() const noexcept
+		{
+			assert(m_context != nullptr && "abandoning an empty alt::cancellation_ref");
+			assert(m_context->stop_requested() && "abandoning an alt chain with no stop requested");
+
+			detail::abandon_chain(*m_context);
+		}
+
 	private:
 		template<typename Promise>
 		friend cancellation_ref get_cancellation_ref(std::coroutine_handle<Promise> h) noexcept;
