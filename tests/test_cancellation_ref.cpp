@@ -726,6 +726,11 @@ TEST_F(CancellationRefTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
 	// registered, _M_request_stop's "last callback" early return hides the freed state
 	// and the test above passes either way.
 	//
+	// That makes the arrangement depend on an invocation order the standard does not
+	// specify, so on MSVC this case may pass without discriminating anything. It has
+	// never been compiled there. Issue #47 carries what to check once CI's MSVC jobs
+	// have run.
+	//
 	// This is clean ONLY because of that local. Without it the run is an
 	// AddressSanitizer heap-use-after-free: a READ of the freed stop state in
 	// _Stop_state_t::_M_lock(), reached from stop_forwarder::operator() via the outer

@@ -358,7 +358,8 @@ ThreadSanitizer on GCC 15.2, and
 `docs/superpowers/specs/2026-11-17-cancellation-ref-design.md` records the first
 two clean on `clang++-19` as well. None of the three has been run under MSVC, now a
 supported toolchain (19.50+): CI's `Build & Test (MSVC, <preset>)` jobs are the first
-time this file is compiled with it. A green sanitizer run is weak evidence for this
+time this file is compiled with it, and the third shape depends on an invocation order
+no standard clause fixes, so it may not discriminate anything there — issue #47. A green sanitizer run is weak evidence for this
 hazard class, as `include/alt/detail/waiter_list.hpp` records at length — there, as
 that class shipped and before its liveness sentinel, a freed-heap access had no
 instrumented access anywhere on its path and neither tool reported it. The
