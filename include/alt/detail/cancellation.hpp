@@ -3,6 +3,7 @@
 #include <alt/awaitable.hpp>
 #include <alt/scheduler.hpp>
 #include <cassert>
+#include <concepts>
 #include <coroutine>
 #include <stop_token>
 #include <type_traits>
@@ -43,6 +44,12 @@ namespace alt::detail
 		{
 			return token.stop_requested();
 		}
+	};
+
+	/** A promise that relays an alt cancellation context to its children. */
+	template<typename Promise>
+	concept relays_cancellation = requires(Promise& p) {
+		{ p.cancellation_context_pointer() } -> std::same_as<cancellation_context*>;
 	};
 
 	/**
