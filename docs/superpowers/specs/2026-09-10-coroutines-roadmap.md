@@ -71,6 +71,6 @@ of coroutines a single call.
 |----------|--------|
 | A synchronous generator | `std::generator` covers it. Note that libc++ does not yet ship `<generator>`, so a consumer on Clang with libc++ has no generator at all; this is not a reason for `alt` to add one. |
 | Coroutine allocator support | No requirement here calls for custom frame allocation, and adding it infects every promise type in the family. |
-| Sender and receiver alignment with C++26 `std::execution` | A different concurrency model. Adopting it would dominate the design without serving the UI scenario. Phase 1's awaitable concepts do not preclude a later adapter. |
+| Sender and receiver alignment with C++26 `std::execution` | A different concurrency model. Adopting it would dominate the design without serving the UI scenario. Phase 1's awaitable concepts do not preclude a later adapter. **2026-11-17:** issue #10's dependency-free half — the piece of alt that a downstream adapter cannot build for itself — landed as `alt::cancellation_ref` (`docs/cancellation_ref.md`), which lets a caller-written awaiter read the chain's stop token and tear the chain down. The sender adapter itself, and `alt::task<T>` as a sender, stay excluded for the reasons above. |
 | A cancellable child task type | Cancellation lives in `task<T>` and in the root, so every chain is cancellable without opt-in. |
 | Blocking cancellation | A `request_stop` that waited for the frame to die would deadlock whenever the task needs the calling thread to make progress, which is exactly the UI thread case. |

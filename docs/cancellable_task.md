@@ -44,17 +44,21 @@ awaits one of these six and then touches thread-affine state must check the
 wait's result and `co_await alt::resume_on(...)` before touching it.
 
 Step 5 is the interesting one. Cancellation is checked on entry to every
-suspension point, and also at the resumptions this library owns: a hop through
-`alt::resume_on`, a child `alt::task` completing and handing control back to its
-parent, and the stop callback a wait on one of those six waits
-registers. The first two observe the stop and tear the chain down instead of
-resuming; the third resumes the waiter deliberately, as just described. So the
-resume in step 5 does not happen at all if a stop was requested while the task
-sat there, and step 6's teardown takes its place.
+suspension point, and also at four resumptions. Three of them this library
+owns: a hop through `alt::resume_on`, a child `alt::task` completing and
+handing control back to its parent, and the stop callback a wait on one of
+those six waits registers. The fourth belongs to a caller: an awaiter written
+by hand can join them by opting in with
+[`alt::cancellation_ref`](cancellation_ref.md). The first two observe the stop
+and tear the chain down instead of resuming; the third resumes the waiter
+deliberately, as just described; the fourth does whichever of those its author
+chose. So the resume in step 5 does not happen at all if a stop was requested
+while the task sat there, and step 6's teardown takes its place.
 
-A foreign awaitable that resumes the frame itself is the exception, and it is
-checked on entry only. See [Foreign awaitables are checked on entry
-only](#foreign-awaitables-are-checked-on-entry-only).
+A foreign awaitable that resumes the frame itself and did not opt in is the
+exception, and it is checked on entry only. See [Foreign awaitables are checked
+on entry only unless they opt
+in](#foreign-awaitables-are-checked-on-entry-only-unless-they-opt-in).
 
 ```cpp
 #include <alt/cancellable_task.hpp>
@@ -319,15 +323,18 @@ For a set of tasks, [`alt::task_group`](task_group.md) is the teardown point: it
 owns this hook and the stop token, and gives a point at which every task it
 spawned is known gone.
 
-## Foreign awaitables are checked on entry only
+## Foreign awaitables are checked on entry only unless they opt in
 
 Cancellation is checked in two places. On entry to every suspension point,
-which covers anything you can `co_await`. And at the resumptions this library
-owns, of which there are three: `alt::resume_on` returning from a scheduler, a
+which covers anything you can `co_await`. And at resumptions, of which there
+are four. Three the library owns: `alt::resume_on` returning from a scheduler, a
 child `alt::task` completing and transferring back to its parent, and the stop
 callback that a wait on `alt::async_event`, `alt::async_latch`,
 `alt::async_semaphore`, `alt::async_mutex`, `alt::task_completion_source` or
-`alt::task_group::join()` registers (`detail::waiter_stop_release`).
+`alt::task_group::join()` registers (`detail::waiter_stop_release`). The fourth
+is a caller's: an awaiter written by hand that opted in with
+[`alt::cancellation_ref`](cancellation_ref.md), which is the subject of the end
+of this section.
 
 The first two observe the stop and tear the chain down instead of resuming. The
 third does the opposite: it unlinks the parked waiter and **resumes** it, with a
@@ -338,8 +345,9 @@ over. It runs on the thread that called `request_stop()` whatever
 destroyed. See the narrowing of point 6 at the top of this page, which is what
 that costs the motivating scenario.
 
-What is not covered is a foreign awaitable that resumes the frame directly,
-because intercepting a resumption means knowing how that resumption happens:
+What is not covered automatically is a foreign awaitable that resumes the frame
+directly, because intercepting a resumption means knowing how that resumption
+happens — which the library cannot know for an awaiter it did not write:
 
 ```cpp
 // A hand-written awaiter that hands the frame to a thread of its own.
@@ -363,11 +371,51 @@ chain is destroyed, and `w->show(...)` never runs.
 
 For an awaitable you do not control, put a `co_await alt::cancellation_point{}`
 immediately after the resume. It observes the stop and costs one atomic load
-when there is nothing to observe.
+when there is nothing to observe. The statements between the resume and that
+`co_await` still run, which is the whole of what this mitigation costs.
 
-Note that this applies per frame. In a chain where a child is parked on a
-foreign awaitable, that child's own body resumes and runs; the transfer back to
-its parent is then intercepted, so the parent's body does not.
+**An awaiter you do control can take the fourth resumption instead.** Give its
+`await_suspend` a template parameter for the promise type, ask
+[`alt::get_cancellation_ref`](cancellation_ref.md) for a view of the chain, and
+resume through that view rather than through the handle:
+
+```cpp
+struct my_opted_in_awaiter
+{
+    bool await_ready() const noexcept { return false; }
+
+    // The typed handle, not std::coroutine_handle<>: the erased one has no promise.
+    template<typename Promise>
+    void await_suspend(std::coroutine_handle<Promise> h)
+    {
+        m_chain = alt::get_cancellation_ref(h);
+        start_thread_that_completes(this, h);
+    }
+
+    void await_resume() const noexcept {}
+
+    // What that thread calls, in place of h.resume().
+    void on_complete(std::coroutine_handle<> h)
+    {
+        m_chain.resume_or_abandon(h);   // last statement: either branch may free the frame
+    }
+
+    alt::cancellation_ref m_chain;
+};
+```
+
+Awaiting that in place of `my_awaiter{}` above gets `alt::resume_on`'s outcome:
+a stop arriving while the operation is in flight is observed on the way back,
+the chain is destroyed, and `w->show(...)` never runs. See
+[`alt::cancellation_ref`](cancellation_ref.md) for the delicate parts — the
+lifetime of the view, the one-call-per-suspension rule, why `abandon()` requires
+a stop to have been requested, and what to do when the operation stops for a
+reason this chain's token never saw.
+
+Note that the entry-only gap applies per frame. In a chain where a child is
+parked on a foreign awaitable that did not opt in, that child's own body resumes
+and runs; the transfer back to its parent is then intercepted, so the parent's
+body does not.
 
 ## A body with no further suspension point runs to completion
 
