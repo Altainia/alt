@@ -308,7 +308,7 @@ TEST_F(CancellationRefTest, AbandonPostsTheTeardownToHome)
 	EXPECT_FALSE(body_ran_after_await);
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body. See tests/test_waiter_list.cpp, whose suppression carries the measurement.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body. Measured with the pinned clang-tidy-19 at threshold 0 with the suppression removed: each of the three death-test bodies in this file reports a cognitive complexity of 39. What a body actually contains is two skip guards and one expectation.
 TEST(CancellationRefDeathTest, AbandoningAnEmptyViewAborts)
 {
 	if(!asserts_are_compiled_in)
@@ -326,7 +326,7 @@ TEST(CancellationRefDeathTest, AbandoningAnEmptyViewAborts)
 	EXPECT_DEATH(alt::cancellation_ref{}.abandon(), "abandoning an empty alt::cancellation_ref");
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): see above.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH, not this body; see the first death test in this file, whose suppression carries the measured 39.
 TEST(CancellationRefDeathTest, AbandoningAChainWithNoStopRequestedAborts)
 {
 	if(!asserts_are_compiled_in)
@@ -344,7 +344,7 @@ TEST(CancellationRefDeathTest, AbandoningAChainWithNoStopRequestedAborts)
 	EXPECT_DEATH(abandon_a_chain_nobody_stopped(), "abandoning an alt chain with no stop requested");
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): see above.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH, not this body; see the first death test in this file, whose suppression carries the measured 39.
 TEST(CancellationRefDeathTest, GettingAViewFromAnEmptyHandleAborts)
 {
 	if(!asserts_are_compiled_in)
