@@ -270,7 +270,7 @@ increase. All six of these files change together:
 | `CMakeLists.txt` | `project(Alt VERSION x.y.z ...)` |
 | `include/alt/version.hpp` | `ALT_VERSION_MAJOR/MINOR/PATCH` macros and constexpr variables |
 | `src/version.cpp` | String returned by `version()` |
-| `tests/test_version.cpp` | Expected major/minor/patch values and the version string |
+| `tests/test_version.cpp` | Expected major/minor/patch values and the version string. **Three places, not two:** the `EXPECT_EQ` macros, the `static_assert`s on `alt::version_patch` and friends, and the string. The `static_assert` spells its number bare, so a grep for the old version string misses it and the build — not `ctest` — is what reports it |
 | `README.md` | Project version occurrences. The `find_package` compatibility example's operands illustrate the rule, not this release: adjust them so the prose still agrees with the snippet above it |
 | `CLAUDE.md` | Same as `README.md`: project version occurrences move; keep the compatibility example consistent with the `find_package` snippet above it |
 

@@ -1429,6 +1429,21 @@ namespace
 	 * resumption count are claims about an unordered pair of claimers rather than about a
 	 * sequence. That is its justification; the released joiner is not, and neither is the
 	 * stop's side of the election any more.
+	 *
+	 * WHAT THAT JUSTIFICATION IS NOT, and the distinction decides what issue #28 was
+	 * actually about. A broken ELECTION -- two parties both winning one node -- is not
+	 * this phase's to catch, and nothing rests on how often its claims collide, because
+	 * two other tests arrange that collision instead of sampling it:
+	 * TaskCompletionSourceTest.AStopRacingSetValueResumesTheWaiterExactlyOnce, which
+	 * races the same two parties over the same kind of node -- a
+	 * task_completion_source's publish() through detach_one against a cancelled waiter's
+	 * waiter_stop_release through claim(), which is this child's own pairing -- and
+	 * WaiterList.AConcurrentSatisfierAndStopDoNotBothResume, whose rendezvous sits
+	 * either side of the claim itself and which detects a try_claim split into a load
+	 * and a store 200 of 200. Both guard with a resumption count rather than a rate.
+	 * What is left to this phase is the composition: the same election reached through
+	 * a combinator's relay, where the parties are a child of a block and a stop that
+	 * traveled a chain.
 	 */
 	struct satisfier_handshake
 	{
@@ -2366,6 +2381,15 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// Neither does this phase say anything about the stop under CONTENTION, having none:
 	// a stop that only lost a contended claim it used to win would show up, if anywhere,
 	// in the raced phase's recorded mix.
+	//
+	// AND NOWHERE ELSE, which is worth stating exactly because the two tests
+	// satisfier_handshake's note credits do NOT cover it. A stop that merely stops winning
+	// a claim it used to win is asserted by nothing in the suite: both of those tests guard
+	// with an exactly-once resumption count, and a stop that loses every contended claim
+	// leaves the count at one and runs them green -- the satisfier simply wins instead.
+	// What they catch is a broken ELECTION, two parties winning one node, which is a
+	// different mutation. So the stop's contended effectiveness lives only in recorded
+	// mixes: this file's raced phase, and the two win counts that test records in prose.
 	EXPECT_EQ(stop_pinned.satisfier_wins, 0) << "a stop-pinned repeat's child was resumed by its satisfier, so on that repeat the stop did not claim the child's node";
 
 	// What no phase checks, recorded here because it is where the next reader will look.
@@ -2412,12 +2436,50 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// this file observes it. The handful of satisfied verdicts per thousand runs is not
 	// that witness either: it says the two are close enough in time for their order to
 	// vary, which overlap needs but does not follow from, a child that ran to completion
-	// before the stop was entered producing the same verdict. Witnessing it means
-	// instrumenting the library side -- ~when_all_awaiter observing the block's count
-	// above one, or a counter of the two threads' contact with it -- which is out of this
-	// test's scope. An honest "arranged but unwitnessed" is worth more here than an
-	// assertion watching the wrong variable, which is what the bound above was first
-	// written as.
+	// before the stop was entered producing the same verdict. An honest "arranged but
+	// unwitnessed" is worth more here than an assertion watching the wrong variable,
+	// which is what the bound above was first written as.
+	//
+	// WHAT COVERS THAT OVERLAP IS NOW A TEST, and it is not in this file:
+	// CombinatorStateTest.ACancelRacingAChildsDrainIntoTheBlockIsClean, which arranges
+	// the same overlap one layer down and so does not need the chain. A block with one
+	// child outstanding and a joiner parked on its counter; one thread running the
+	// shipped detail::on_combinator_child_complete, the other requesting a stop on a
+	// linked token that carries the joiner's release and cancel() in that order. Its
+	// guards are a resumption count, a deleter count and live_frames, so none of them is
+	// a rate. It carries two mutations of record, measured there rather than here: the
+	// hook's own statement order, 20 of 20 under AddressSanitizer, and
+	// detail::combinator_state's member declaration order, where it is the ONLY guard
+	// under AddressSanitizer -- the whole suite passes 810 of 810 with that mutation and
+	// that one test filtered out. Its own note carries the figures and the splits.
+	//
+	// Read what that does NOT buy, because the obvious reading is wrong and was measured
+	// rather than argued. It does not sharpen the CLAIM-LEVEL contention: a try_claim
+	// split into a load and a store is detected 0 of 20 there in debug, the two claims
+	// still being offset by the stop's relay -- a shorter relay than this file's, but a
+	// relay, and a different one: that test's stop enters through a promise forwarder it
+	// installs deliberately, where run_one_stop_race below starts its root with no
+	// external token and the claims that collide are on the CHILD's node, reached through
+	// m_link, cancel(), the children's source and the child's own forwarder. The tests
+	// that arrange a claim-level collision are the two named on satisfier_handshake, at
+	// primitive level. And it does not cover combinator_state::cancel()'s own statement
+	// order either: 0 of 20 in debug and 0 of 20 under AddressSanitizer, because -- probed
+	// with a temporary counter in cancel() -- cancel() runs on about half of that test's
+	// repeats and never on a freed block, by two different mechanisms depending on which
+	// party resumed the joiner. That test's note separates them; the short version is that
+	// ~m_link removing itself from the walk is the minority case, and
+	// ~std::stop_callback's cross-thread wait is the common one.
+	//
+	// So the overlap is arranged and kept clean at two levels now, and what remains
+	// unwitnessed is narrower than this note once recorded: not the overlap, and not the
+	// election, but the two happening AT ONCE through this combinator's relay -- the
+	// claims colliding on a node whose stop traveled a whole chain. Nothing arranges
+	// that, and the raced phase's recorded mix is still the only thing that samples it.
+	// Instrumenting the library for it -- ~when_all_awaiter observing the block's count
+	// above one, or a counter of the two threads' contact with it -- is out of this
+	// test's scope and was weighed and declined: the passive form could only be recorded,
+	// not asserted, and the assertable form needs a rendezvous seam inside
+	// waiter_list::claim.
 	//
 	// Recorded rather than asserted, so that a reader of a failure in any of the three
 	// loops knows which mix of outcomes the failing run actually saw. The phases are kept
@@ -2427,8 +2489,11 @@ TEST_F(WhenAllTest, ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock)
 	// of the four below them, two are the asserted equalities, one is the degenerate
 	// bound, and the last is the verdict the paragraph above says why nothing asserts.
 	//
-	// The contended case this paragraph leaves unwitnessed is tracked as issue #28, which
-	// carries the measured flakiness that retired the bound it replaced.
+	// The contended case this paragraph leaves unwitnessed was tracked as issue #28,
+	// closed by CombinatorStateTest.ACancelRacingAChildsDrainIntoTheBlockIsClean and by
+	// the note above, which records what that test covers, what it measurably does not,
+	// and the one thing still unarranged. #28 is also where the measured flakiness that
+	// retired the bound this phase replaced is written down.
 	// All four are recorded so that a reader of a failure sees what the run actually
 	// reported rather than only which equality it missed.
 	//

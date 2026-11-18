@@ -320,6 +320,27 @@ namespace alt::detail
 		// for it: it is the only thing standing between a cancel() in flight on another
 		// thread and the members it reads.
 		//
+		// THAT HAS A MEASURED GUARD AS OF 2026-11-17, where this note previously asserted
+		// the order's importance without one. Declaring m_link first instead of last, so
+		// it is destroyed last, is detected by
+		// CombinatorStateTest.ACancelRacingAChildsDrainIntoTheBlockIsClean: 15 of 20 runs
+		// of that test alone in debug (10 aborting on glibc's "unaligned tcache chunk
+		// detected", 5 hanging), 14 of 20 under AddressSanitizer as a double-free or a
+		// heap-use-after-free, and 6 of 20 under ThreadSanitizer as a hang -- which is the
+		// deadlock ~std::stop_callback's cross-thread wait exists to prevent, arriving as
+		// a timeout because that wait is what the mutation strands.
+		//
+		// Under AddressSanitizer that test is the ONLY guard: with the mutation applied and
+		// it alone filtered out, the suite passes 810 of 810. The other two builds do catch
+		// it elsewhere -- debug in
+		// CombinatorStateTest.ARaceBetweenAStopAndTheLastReleaseIsClean and ThreadSanitizer
+		// in WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock -- so what
+		// is unique to it is the build that NAMES the fault instead of reporting heap
+		// corruption or a timeout. The repeat that does the catching is the one where the
+		// child's drain thread drops the block's last reference while the stop's walk still
+		// has this callback pending, which is the other-thread case above, reached
+		// deliberately rather than by luck.
+		//
 		// m_references starts at 1, the awaiter's.
 		std::atomic<std::size_t> m_references{1};
 		completion_counter       m_counter;

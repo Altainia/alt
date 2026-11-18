@@ -178,6 +178,23 @@ namespace alt::detail
 		// pre-existing suite, and
 		// WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock, which
 		// reports it among the combinator tests added for this.
+		//
+		// A third joined that list on 2026-11-17, and it is the only one that calls this
+		// function directly rather than reaching it through a child's frame destruction:
+		// CombinatorStateTest.ACancelRacingAChildsDrainIntoTheBlockIsClean, which detects
+		// the swap 20 of 20 runs of itself under AddressSanitizer and 0 of 20 in debug.
+		// Not all 20 by the same instrument: 18 are an ASan heap-use-after-free and 2 are
+		// waiter_list's own liveness ASSERT aborting on "detaching every alt waiter on a
+		// destroyed list". The split is worth recording for the reason this note's debug
+		// figure above is -- that assert is present in the debug build too, so the 0 of 20
+		// beside it is a sampling result rather than a structural absence.
+		//
+		// Its ASan report lands one frame deeper than the figures above -- at
+		// waiter_list::alive() inside detach_all() inside complete(), not at the
+		// counter's own atomic word -- because the block it builds has a joiner PARKED on
+		// the counter, so the zero transition reaches the list at all. Nothing about this
+		// function changed to earn that citation; a sharper instrument did, which is this
+		// note's own lesson one paragraph above.
 		shared->counter().complete();
 		shared->release();
 	}
