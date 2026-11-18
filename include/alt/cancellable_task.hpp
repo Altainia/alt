@@ -166,11 +166,27 @@ namespace alt
 		 * Holds a copy of the source, not a pointer to the promise's member. The
 		 * copy shares the same reference-counted stop state, so requesting a stop
 		 * on it is equivalent, and it lives inside the std::stop_callback that
-		 * invokes it. Since that callback's destructor blocks until a concurrently
-		 * running invocation returns, the object this touches is alive for the whole
-		 * call by construction, whatever order the promise declares its members in.
-		 * A pointer here would instead make correctness depend on the promise's
-		 * member declaration order, which nothing in the language checks.
+		 * invokes it. Since that callback's destructor blocks until an invocation
+		 * running on ANOTHER thread returns, a pointer here would instead make
+		 * correctness depend on the promise's member declaration order, which nothing
+		 * in the language checks.
+		 *
+		 * DELICATE. The stop is requested on a local copy, not on the member. A
+		 * destructor on the invoking thread itself does not block, and this call
+		 * reaches one: the stop cancels the task's wait, which tears the frame down on
+		 * this thread, inside this call, destroying the std::stop_callback that holds
+		 * this forwarder, its member source with it. When that member was the last
+		 * reference to the task's stop state, the state is freed while request_stop()
+		 * is still walking its callback list. The local keeps a counted reference on
+		 * this stack frame, so the state outlives the walk. This is the same trick as
+		 * detail::combinator_state::cancel()'s, for the same reason.
+		 *
+		 * Measured: without the copy, every cancellation test that destroys a parked
+		 * frame hangs on MSVC, spinning in the stop state's callback-list lock over
+		 * memory the debug heap has already filled with 0xDD. MSVC's request_stop()
+		 * relocks the list after every callback, including the last; libstdc++ skips
+		 * that relock after the last one, which is why the defect never showed there,
+		 * AddressSanitizer included.
 		 */
 		struct stop_forwarder
 		{
@@ -178,7 +194,10 @@ namespace alt
 
 			void operator()() const noexcept
 			{
-				target.request_stop();
+				// Not const: the standard declares request_stop() non-const, as MSVC's
+				// library does; libstdc++ alone marks it const.
+				std::stop_source keep_alive = target;
+				keep_alive.request_stop();
 			}
 		};
 

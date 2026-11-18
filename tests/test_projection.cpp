@@ -184,6 +184,19 @@ TEST(ProjectionConstraints, ElementRejectsAnOutOfRangeIndex)
 {
 	static_assert(std::invocable<decltype(alt::element<1>), std::pair<int, int>&>);
 	static_assert(!std::invocable<decltype(alt::element<2>), std::pair<int, int>&>);
+
+	// The index is checked against std::tuple_size by the projection itself, because the
+	// standard library need not make an out-of-range get<N> a substitution failure: MSVC's
+	// static_asserts inside it, which is a hard error. Each standard tuple-like family has
+	// its own get overloads, and each value category picks a different one, so each is
+	// pinned rather than inferred from the pair case above.
+	static_assert(!std::invocable<decltype(alt::element<2>), const std::pair<int, int>&&>);
+	static_assert(std::invocable<decltype(alt::element<2>), std::tuple<int, int, int>&>);
+	static_assert(!std::invocable<decltype(alt::element<3>), std::tuple<int, int, int>&>);
+	static_assert(!std::invocable<decltype(alt::element<3>), const std::tuple<int, int, int>&>);
+	static_assert(std::invocable<decltype(alt::element<1>), std::array<int, 2>&>);
+	static_assert(!std::invocable<decltype(alt::element<2>), std::array<int, 2>&>);
+	static_assert(!std::invocable<decltype(alt::element<0>), std::array<int, 0>&>);
 }
 
 // ---------------------------------------------------------------------------
