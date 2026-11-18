@@ -309,39 +309,64 @@ whether anything outside the destroyed frames still holds one.
 An earlier version of this page said the proviso was satisfied automatically,
 "which the caller of `request_stop()` always is". That was wrong for exactly the
 second shape above, and the shape is the one this page recommends. It is measured:
-without a keepalive, requesting the stop produces an AddressSanitizer
-heap-use-after-free, a `READ` of the freed stop state in
-`_Stop_state_t::_M_lock()` reached from `detail::stop_forwarder::operator()`.
+with no counted local in `detail::stop_forwarder::operator()`, requesting the stop
+produces an AddressSanitizer heap-use-after-free, a `READ` of the freed stop state
+in `_Stop_state_t::_M_lock()` reached from that function.
 
 That shape is nonetheless safe today, because `detail::stop_forwarder::operator()`
 in `include/alt/cancellable_task.hpp` takes a counted copy of the source on its
 own stack — outside the destroyed frames — before requesting the stop, so the
 state survives the nested walk whatever the chain's own owners do. Its DELICATE
-note carries the full reasoning and the two in-repo precedents for the same
-keepalive. Adapter authors do not have to do anything for this; it is named here
-only so the guarantee is not read as a property of the standard clause alone.
+note carries the full reasoning and the in-repo precedent,
+`detail::combinator_state::cancel()`. Adapter authors do not have to do anything
+for this; it is named here only so the guarantee is not read as a property of the
+standard clause alone.
+
+**That copy is not this component's.** Commit `f3f0a8b` on `main` added it while
+porting the library to MSVC, before this page existed, and the work behind this
+page rediscovered the same defect independently and arrived at the same fix. Main's
+is the one that shipped, and it is the better account: MSVC's `request_stop()`
+relocks the callback list after *every* callback, including the last, so without the
+copy every cancellation test that destroys a parked frame hangs there — which makes
+the defect a plain defect of the library on every platform, not a property of this
+extension point. libstdc++ skips that relock after the last callback, and that is
+why this library's pre-MSVC measurements, on this work and on `main` alike,
+AddressSanitizer included, all came back clean.
+
+What this page and `tests/test_cancellation_ref.cpp` do contribute are the two
+things `f3f0a8b` left out: a regression test — that commit touches
+`cancellable_task.hpp`, `combinator_state.hpp`, `projection.hpp` and
+`test_projection.cpp`, and pins the stop-state fix nowhere — and the corrected
+proviso above, which is this work's own and replaces a guarantee this page
+previously stated unconditionally.
 
 `tests/test_cancellation_ref.cpp` exercises three shapes — a stop through the
 chain's own `cancellation_handle`, a stop through a linked `start_options::token`,
 and `ATeardownWithASecondCallbackOnTheChainsTokenIsSafe`, the linked-token shape
 with a second `std::stop_callback` on the chain's token so that libstdc++'s
 callback walk has somewhere left to go after the abandoning one has freed the
-chain. That third one is the instrument for the keepalive: with only the
-abandoning callback registered, `_M_request_stop`'s "last callback" early return
-hides the freed state and the first two shapes pass with or without it. So do not
-read either of the first two as evidence that the proviso holds by itself — they
-are consistent with it being false, which is how the earlier wording survived.
+chain. That third one is the instrument for the counted copy, and the only shape in
+which libstdc++ reports the defect at all: with only the abandoning callback
+registered, `_M_request_stop`'s "last callback" early return hides the freed state
+and the first two shapes pass with or without it. So do not read either of the first
+two as evidence that the proviso holds by itself — they are consistent with it being
+false, which is how the earlier wording survived. On MSVC the shape is not needed to
+see the defect; this test is what makes it visible on the Linux gates.
 
 All three were run and passed under AddressSanitizer with UBSan and under
 ThreadSanitizer on GCC 15.2, and
 `docs/superpowers/specs/2026-11-17-cancellation-ref-design.md` records the first
-two clean on `clang++-19` as well. A green sanitizer run is weak evidence for this
+two clean on `clang++-19` as well. None of the three has been run under MSVC, now a
+supported toolchain (19.50+): CI's `Build & Test (MSVC, <preset>)` jobs are the first
+time this file is compiled with it. A green sanitizer run is weak evidence for this
 hazard class, as `include/alt/detail/waiter_list.hpp` records at length — there, as
 that class shipped and before its liveness sentinel, a freed-heap access had no
 instrumented access anywhere on its path and neither tool reported it. The
 instrumented access here is `_M_lock()`'s read of the stop state's own word,
 inlined from `<stop_token>`, which is why this one *is* visible once the shape
-reaches it at all — and why the shape, not the tool, was the thing missing.
+reaches it at all — and why the shape, not the tool, was the thing missing. The
+`f3f0a8b` history is the standing reminder that an implementation detail of one
+standard library can hide a defect from every gate that runs against it.
 
 ## Lifetime
 

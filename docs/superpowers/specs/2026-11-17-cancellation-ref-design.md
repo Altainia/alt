@@ -52,16 +52,18 @@ without reaching into `alt::detail`.
   caller and got wrong once per adapter.
 - An awaiter written against this works unchanged in a chain with no cancellation at all
   (a plain `alt::task` under `alt::sync_wait`), where it resumes normally.
-- The library stays dependency-free and every one of the eight CI gates covers the new
-  code, `Coverage` included.
+- The library stays dependency-free and every one of CI's eleven jobs covers the new
+  code, `Coverage` included. (Eight when this spec was written; `main` has since added
+  MSVC support, whose `Build & Test (MSVC, <preset>)` job runs as a three-preset matrix.
+  The three MSVC jobs cannot be run on the Linux development machine — see Constraints.)
 - The three places that currently state the "foreign awaitables are checked on entry
   only" claim are corrected, because this change falsifies the unconditional form of it.
 
 ## Non-goals
 
 - **Any `std::execution` or stdexec code in alt.** Route A of issue #10 is declined:
-  no toolchain in the support matrix (GCC 13+, Clang 19+) ships `std::execution`, so a
-  sender path would be compiled by none of the eight gates, and stdexec would be alt's
+  no toolchain in the support matrix (GCC 13+, Clang 19+, MSVC 19.50+) ships
+  `std::execution`, so a sender path would be compiled by none of CI's jobs, and stdexec would be alt's
   first third-party dependency where the target links only `Threads::Threads` today. The
   roadmap's exclusion of sender/receiver alignment stands.
 - **`alt::task<T>` as a sender.** The same exclusion; issue #10 raises it as an open
@@ -118,10 +120,15 @@ What would make this a failure even with every gate green:
 
 ## Constraints
 
-- C++23, GCC 13+ / Clang 19+. `std::stop_token` and `std::coroutine_handle` only; no new
-  standard library dependency and no third-party one.
+- C++23, GCC 13+ / Clang 19+ / MSVC 19.50+ (Visual Studio 2026). `std::stop_token` and
+  `std::coroutine_handle` only; no new standard library dependency and no third-party one.
+- **MSVC is unverified for this component.** The development machine is Linux, so nothing
+  in `include/alt/cancellation_ref.hpp` or `tests/test_cancellation_ref.cpp` has ever been
+  compiled by MSVC; CI's three `Build & Test (MSVC, <preset>)` jobs are the first time it
+  will be. `main`'s `f3f0a8b` is proof that this family of code can carry a defect no
+  libstdc++ gate reports, so treat a green Linux sweep here as partial.
 - Header-only. `cppcheck` analyzes `src/*.cpp` only, so it will not cover this file; the
-  statement that all eight gates cover the change means they all *compile and run* it,
+  statement that all of CI's jobs cover the change means they all *compile and run* it,
   with cppcheck's contribution being nil here, as for every other header-only component.
 - `clang-tidy-19` and `clang++-19` pinned per `CLAUDE.md`. The whole-project gate aborts
   at the first finding, so each changed file is also checked directly, with the
@@ -380,9 +387,21 @@ than on either alone:
   frames the teardown destroys.** A retained `cancellation_handle` from `alt::start`
   provides that. The linked-token-with-discarded-handle shape does not, and is safe only
   because `detail::stop_forwarder::operator()` takes a counted copy of the source on its
-  own stack before requesting the stop — a keepalive added for this, precedented by
+  own stack before requesting the stop, precedented by
   `detail::combinator_state::cancel`/`request_children_stop` and by `when_all`'s
   DELICATE note on the children's stop source.
+
+  **That copy was not added for this component**, which an earlier version of this clause
+  claimed. `main`'s commit `f3f0a8b` added it first, independently, while porting the
+  library to MSVC: MSVC's `request_stop()` relocks the callback list after every callback
+  including the last, so without the copy every cancellation test that destroys a parked
+  frame hangs. The defect is therefore a plain defect of `cancellable_task` on every
+  platform, not something this extension point introduced. This work rediscovered it and
+  reached the same fix; the merge of `main` took `f3f0a8b`'s version wholesale, including
+  its non-const `std::stop_source keep_alive` — the standard declares `request_stop()`
+  non-const, as MSVC's library does, and the `const` local this work had written compiles
+  only against libstdc++. What this work contributes is the regression test `f3f0a8b`
+  lacks and the corrected proviso above.
 - **What the design-time measurement actually showed.** It was run on GCC 15.2 and
   `clang++-19`, under AddressSanitizer + UBSan and under ThreadSanitizer, in both
   realistic shapes: a stop through the chain's own `cancellation_handle`, and a stop
@@ -400,7 +419,11 @@ than on either alone:
   `_Stop_state_t::_M_lock()` reached from `stop_forwarder::operator()`. That second
   registration only became constructible with this component — before `cancellation_ref`
   there was no public way for a body to obtain its own chain's token — which is why the
-  gap was both introduced and missed here.
+  *libstdc++-visible shape* arrived with this work. The defect itself did not: it predates
+  this branch, and MSVC reaches it without `cancellation_ref` at all, which is how
+  `f3f0a8b` found it first. The missing thing on Linux was never the tool and never this
+  component; it was a second registration on the chain's token, and libstdc++'s skipped
+  relock after the last callback is why nothing before that saw anything.
 
 The guarantee on the reference page is stated in the corrected narrow form: safe provided
 the chain's stop state retains an owner outside the frames the teardown destroys. It is

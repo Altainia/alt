@@ -12,13 +12,13 @@
 
 ## Global Constraints
 
-- C++23. GCC 13+ or Clang 19+. No new standard-library dependency and no third-party one.
+- C++23. GCC 13+, Clang 19+ or MSVC 19.50+ (the last added to the support matrix by `main` after this plan was written). No new standard-library dependency and no third-party one. MSVC cannot be run on this Linux machine: CI's three `Build & Test (MSVC, <preset>)` jobs are the only coverage this component gets there.
 - `snake_case` everything except template typenames, which are `PascalCase`. Private members prefixed `m_`.
 - `const` by default. Doxygen `/** */` on every public function, class and struct.
 - `include/alt/cancellation_ref.hpp` is a standalone public header. It must **not** be included from `task.hpp` or `cancellable_task.hpp`; the dependency arrow runs one way, `cancellation_ref.hpp` → `detail/cancellation.hpp`.
 - `cancellation_ref` must stay trivially copyable and the size of one pointer. A `static_assert` in the test file pins both.
 - Preconditions are `assert` with a message naming the type, in the shape `scheduler_ref::post` and `detail::abandon_chain` use.
-- Per task: `cmake --build --preset debug && ctest --preset debug --output-on-failure`. The full eight-gate sweep is Task 7 and is not repeated per task.
+- Per task: `cmake --build --preset debug && ctest --preset debug --output-on-failure`. The full gate sweep is Task 7 and is not repeated per task. It was an eight-gate sweep when this plan was written; `main`'s MSVC support took CI to eleven jobs, three of which are not runnable locally.
 - `tests/.clang-tidy` is **append-only**. Never rewritten.
 - Any `NOLINT` suppression carrying a number must have that number measured with pinned `clang-tidy-19`, not copied from another site.
 - Branch `feature/cancellation-ref`. Commit per task. Do not merge to `main`.
@@ -425,9 +425,11 @@ A local sweep that skips one gate is not a green branch, however it reports itse
 clang-format -i include/alt/cancellation_ref.hpp include/alt/detail/cancellation.hpp include/alt/detail/async_wait.hpp tests/test_cancellation_ref.cpp
 ```
 
-- [ ] **Step 2: Run all eight gates**
+- [ ] **Step 2: Run all eight Linux gates**
 
 GCC debug + tests; Clang debug + tests; `release-tests`; `debug-asan`; `debug-tsan`; the pinned `clang-tidy` invocation from `CLAUDE.md` (`clang-19`/`clang++-19`/`/usr/bin/clang-tidy-19`, `CMAKE_BUILD_TYPE=Debug`); `cppcheck`; and `debug-coverage` with its `coverage` target — **no separate `ctest` ahead of it**, the target runs the suite itself. The `libgcov profiling error ... overwriting an existing profile data` lines against a reused build directory are harmless; see issue #32.
+
+These eight are the whole sweep this machine can run. CI has eleven jobs since `main`'s MSVC support: the other three are `Build & Test (MSVC, debug)`, `(MSVC, release-tests)` and `(MSVC, debug-asan)`, which need Windows. A green eight-gate sweep is therefore **not** a green branch here — say so rather than reporting the sweep as complete.
 
 Expected: all green. `cppcheck` covers `src/*.cpp` only, so it contributes nothing here — that is expected, not a failure.
 

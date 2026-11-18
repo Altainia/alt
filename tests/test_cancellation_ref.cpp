@@ -715,7 +715,7 @@ TEST_F(CancellationRefTest, ATeardownFromInsideALinkedTokensRequestStopIsSafe)
 
 TEST_F(CancellationRefTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
 {
-	// The instrument for the keepalive in detail::stop_forwarder::operator()
+	// The regression test for the counted local in detail::stop_forwarder::operator()
 	// (include/alt/cancellable_task.hpp). It pins the one shape where every owner of the
 	// chain's stop state lives inside the frames the teardown destroys: the stop arrives
 	// through start_options::token, the chain's own cancellation_handle is discarded, so
@@ -726,10 +726,23 @@ TEST_F(CancellationRefTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
 	// registered, _M_request_stop's "last callback" early return hides the freed state
 	// and the test above passes either way.
 	//
-	// This is clean ONLY because of that keepalive. Without it the run is an
+	// This is clean ONLY because of that local. Without it the run is an
 	// AddressSanitizer heap-use-after-free: a READ of the freed stop state in
 	// _Stop_state_t::_M_lock(), reached from stop_forwarder::operator() via the outer
 	// request_stop(). So this test belongs to the AddressSanitizer gate above all.
+	//
+	// The local is not this component's: main's f3f0a8b added it while porting to MSVC,
+	// where request_stop() relocks the callback list after the LAST callback too and so
+	// hangs without it, and this work rediscovered the same defect independently. That
+	// commit pins the fix nowhere -- it touches cancellable_task.hpp,
+	// combinator_state.hpp, projection.hpp and test_projection.cpp -- so this case is the
+	// regression test for a fix that shipped without one, and the only one of the three
+	// teardown shapes here that can fail on libstdc++ if the local is removed again.
+	//
+	// Re-measured against the merged tree, by replacing the local with a direct
+	// target.request_stop(): exactly 1 of the 24 CancellationRef cases fails under
+	// debug-asan, this one, with the report above at cancellable_task.hpp's
+	// stop_forwarder::operator(). The other two teardown shapes pass either way.
 	std::stop_source source;
 
 	static_cast<void>(alt::start(cancellable_with_two_stop_callbacks(), {.token = source.get_token()}));
