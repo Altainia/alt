@@ -264,14 +264,14 @@ namespace
 	{
 		const frame_tracker t{1};
 		body_reached_await   = true;
-		awaited_result       = co_await completing_awaiter{on_completion};
+		awaited_result       = co_await completing_awaiter{.on_completion = on_completion};
 		body_ran_after_await = true;
 	}
 
 	alt::task<void> plain_completing(alt::manual_scheduler* scheduler)
 	{
 		const frame_tracker t{1};
-		awaited_result       = co_await completing_awaiter{completion::resume_or_abandon, scheduler};
+		awaited_result       = co_await completing_awaiter{.on_completion = completion::resume_or_abandon, .scheduler = scheduler};
 		body_ran_after_await = true;
 	}
 
@@ -326,7 +326,7 @@ namespace
 	alt::task<int> combinator_child()
 	{
 		const frame_tracker t{1};
-		const int           value = co_await completing_awaiter{completion::resume_or_abandon};
+		const int           value = co_await completing_awaiter{.on_completion = completion::resume_or_abandon};
 		co_return value;
 	}
 
@@ -701,8 +701,7 @@ TEST_F(CancellationRefTest, ACombinatorChildKeepsItsBlocksVerdict)
 
 	EXPECT_FALSE(completion_resumed);
 	ASSERT_TRUE(combinator_reported);
-	ASSERT_TRUE(combinator_error.has_value());
-	EXPECT_EQ(*combinator_error, std::errc::operation_canceled);
+	EXPECT_EQ(combinator_error, std::make_optional(std::make_error_code(std::errc::operation_canceled)));
 	EXPECT_EQ(live_frames, 0);
 }
 
