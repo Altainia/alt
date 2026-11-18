@@ -26,7 +26,7 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
 
-Requires GCC 13+, Clang 19+, or MSVC 19.40+ (Visual Studio 2022 17.10 or later). The
+Requires GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026). The
 same presets work on Windows — see "MSVC" under Quality checks.
 
 ## Tests

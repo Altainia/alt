@@ -5,7 +5,7 @@ A generic C++23 utility library. Namespace: `alt`.
 ## Requirements
 
 - CMake 3.25 or later
-- GCC 13+, Clang 19+, or MSVC 19.40+ (Visual Studio 2022 17.10 or later)
+- GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026)
 
 ## Build
 
