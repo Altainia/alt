@@ -33,7 +33,10 @@ namespace
 	static_assert(std::is_same_v<alt::underlying_int_t<scoped_i8>, int8_t>);
 	static_assert(std::is_same_v<alt::underlying_int_t<scoped_u32>, uint32_t>);
 	static_assert(std::is_same_v<alt::underlying_int_t<scoped_i64>, int64_t>);
-	static_assert(std::is_same_v<alt::underlying_int_t<unscoped_uint>, unsigned int>);
+	// An unscoped enum without a fixed type has an implementation-defined underlying
+	// type: GCC and Clang pick unsigned int for these enumerators, MSVC picks int. What
+	// is portable is agreeing with the standard trait.
+	static_assert(std::is_same_v<alt::underlying_int_t<unscoped_uint>, std::underlying_type_t<unscoped_uint>>);
 
 	// --- underlying_int_t for integral types (identity) ---
 

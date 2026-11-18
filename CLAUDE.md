@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.12.3`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.13.0`.
 
 ## Directory layout
 
@@ -26,7 +26,8 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
 
-Requires GCC 13+ or Clang 19+.
+Requires GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026). The
+same presets work on Windows — see "MSVC" under Quality checks.
 
 ## Tests
 
@@ -38,10 +39,11 @@ ctest --preset debug --output-on-failure
 
 Run these before committing. All must pass with zero errors.
 
-CI runs **eight** jobs on every pull request and on every push to `main`, and every
+CI runs **eleven** jobs on every pull request and on every push to `main`, and every
 one of them corresponds to a check below: `Build & Test (GCC)`, `Build & Test (Clang)`,
 `Build & Test (optimized)`, `AddressSanitizer + UBSan`, `ThreadSanitizer`,
-`clang-tidy`, `cppcheck` and `Coverage`. A local sweep that skips one is not a
+`clang-tidy`, `cppcheck`, `Coverage`, and the three `Build & Test (MSVC, <preset>)`
+jobs for `debug`, `release-tests` and `debug-asan`. A local sweep that skips one is not a
 green branch, however it reports itself — a sweep that omitted `Coverage` and a
 sweep that ran a newer `clang-tidy` than CI's have each produced a red build after
 reporting clean.
@@ -73,6 +75,32 @@ for it skips in every `Debug` preset. This preset is where it actually runs.
 cmake --preset release-tests && cmake --build --preset release-tests
 ctest --preset release-tests --output-on-failure
 ```
+
+### MSVC
+
+Windows only. CMake's default generator there is the newest installed Visual Studio,
+which is multi-config and needs no Developer Command Prompt, so the presets run
+unchanged; the build and test presets carry a `configuration` for that reason. CI runs
+these three, with `-DALT_WARNINGS_AS_ERRORS=ON`:
+
+```powershell
+foreach ($p in "debug", "release-tests", "debug-asan") {
+    cmake --preset $p -DALT_WARNINGS_AS_ERRORS=ON; cmake --build --preset $p --parallel
+    ctest --preset $p --output-on-failure
+}
+```
+
+All three are needed, because each caught something the others did not. With MSVC,
+`debug-asan` is AddressSanitizer alone — MSVC has no UBSan — applied build-wide rather
+than per target, because MSVC's STL refuses to link instrumented and uninstrumented
+translation units together. `debug-tsan` is refused at configure.
+
+Libraries differ in what they leave unspecified, and libstdc++ has hidden real defects
+here. Its `std::stop_source::request_stop()` is `const` where the standard's is not, and
+it skips relocking the callback list after the last callback where MSVC's does not —
+which is what kept a use-after-free in `detail::stop_forwarder` invisible on Linux,
+AddressSanitizer included. A cancellation test that hangs only on MSVC is that class of
+bug, not a flaky test.
 
 ### clang-tidy
 
@@ -164,22 +192,22 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.12.3_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.13.0_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.12.3 REQUIRED)
+find_package(Alt 1.13.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release: the inline
 sizes of the async primitives (`async_event`, `async_mutex`, `task_group`, ...) can
-change between minors. The package config enforces this: `find_package(Alt 1.12.3)`
-accepts 1.12.3 and later 1.12.x releases, but rejects 1.13.0 and 1.11.x, and a request for
-a higher patch than the installed one (1.12.4 against 1.12.3) also fails. When upgrading
+change between minors. The package config enforces this: `find_package(Alt 1.13.0)`
+accepts 1.13.0 and later 1.13.x releases, but rejects 1.14.0 and 1.12.x, and a request for
+a higher patch than the installed one (1.13.1 against 1.13.0) also fails. When upgrading
 across a minor release, update the version your project requests.
 
 A refused request prints which minor series the installed package accepts and why, so a
@@ -211,7 +239,7 @@ All work reaches `main` through a pull request. `main` is never pushed to direct
 1. Branch: `feature/<name>` for new work, `bug/<name>` for fixes.
 2. Commit once tests pass. No need to ask for permission to commit. A bare branch push does not
    run CI — only pull requests and `main` do. To see a branch go green before the pull request
-   is ready, open it as a draft (a draft PR fires the full eight jobs) or run the suite on
+   is ready, open it as a draft (a draft PR fires the full eleven jobs) or run the suite on
    demand with `gh workflow run CI --ref <branch>`.
 3. Open a pull request against `main` once the work is ready.
 4. Add the version bump as its own commit on the branch. See below.

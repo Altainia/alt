@@ -79,6 +79,35 @@ target_link_libraries(alt_tests
 )
 
 alt_add_warnings(alt_tests)
+
+# MSVC's optimizer reports C4702 "unreachable code" after inlining, and test_scope.cpp
+# is built to provoke exactly that: it instantiates the scope guards and
+# unique_resource with types whose copy constructor always throws, to exercise
+# P0052r10's exception-safety paths, so the member initializers after those copies
+# really are unreachable in those instantiations. That is a property of the test types,
+# not of scope.hpp, so the suppression is scoped to this one file and only appears
+# from /O2 upward, where the backend analysis runs.
+if(MSVC)
+    set_source_files_properties(test_scope.cpp PROPERTIES COMPILE_OPTIONS /wd4702)
+endif()
+
+# MSVC's AddressSanitizer runtime is a DLL beside cl.exe, which is on PATH only inside
+# a Developer Command Prompt. Copied next to the test executable instead, because
+# gtest_discover_tests runs that executable to list the tests before any ctest
+# environment applies, and a missing runtime fails discovery with 0xc0000135. Newer
+# toolsets use one runtime for every configuration and older ones a _dbg_ variant for
+# Debug, so whichever ones the toolset ships are copied.
+if(MSVC AND ALT_SANITIZE STREQUAL "address")
+    get_filename_component(_alt_msvc_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    file(GLOB _alt_asan_runtimes "${_alt_msvc_bin}/clang_rt.asan*dynamic-x86_64.dll")
+    if(NOT _alt_asan_runtimes)
+        message(FATAL_ERROR "ALT_SANITIZE=address: no AddressSanitizer runtime DLL beside ${CMAKE_CXX_COMPILER}")
+    endif()
+    add_custom_command(TARGET alt_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_alt_asan_runtimes} $<TARGET_FILE_DIR:alt_tests>
+        VERBATIM
+    )
+endif()
 alt_add_sanitizers(alt_tests)
 alt_add_coverage(alt_tests)
 alt_add_coverage_target(${CMAKE_BINARY_DIR})
@@ -128,6 +157,7 @@ gtest_discover_tests(alt_tests
 add_test(NAME package_version_gate
     COMMAND ${CMAKE_COMMAND}
         -DALT_BUILD_DIR=${CMAKE_BINARY_DIR}
+        -DALT_BUILD_CONFIG=$<CONFIG>
         -DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/package/consumer
         -DSCRATCH=${CMAKE_CURRENT_BINARY_DIR}/package-version-gate
         -DALT_VERSION=${PROJECT_VERSION}

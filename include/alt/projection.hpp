@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <type_traits>
 #include <utility>
 
 namespace alt
@@ -63,6 +64,26 @@ namespace alt
 		template<std::size_t>
 		void get() = delete;
 
+		/** Whether @p T declares a size through std::tuple_size, as the standard tuple-like types do. */
+		template<typename T>
+		concept has_tuple_size = requires { std::tuple_size<T>::value; };
+
+		/**
+		 * @brief Whether @p N is a valid index into @p TupleLike, as far as its declared size says.
+		 *
+		 * Checked ahead of the get<N> call rather than left to it, because the standard
+		 * library is not required to make an out-of-range get<N> a substitution failure.
+		 * std::tuple_element<I, std::pair> mandates I < 2, so MSVC's library rejects
+		 * get<2> on a pair with a static_assert, a hard error even inside a requires
+		 * expression; libstdc++ happens to leave the specialization incomplete instead.
+		 *
+		 * A type with no std::tuple_size, which can still opt in through an ADL get(),
+		 * passes: its own get decides.
+		 */
+		template<std::size_t N, typename TupleLike>
+		concept index_within_tuple_size =
+		  !has_tuple_size<std::remove_cvref_t<TupleLike>> || (N < std::tuple_size<std::remove_cvref_t<TupleLike>>::value);
+
 		/**
 		 * @brief Implementation of the alt::element projection object.
 		 *
@@ -81,7 +102,7 @@ namespace alt
 			 * Preserves constness and value category, as described for key_fn.
 			 */
 			template<typename TupleLike>
-			  requires requires(TupleLike&& t) { get<N>(std::forward<TupleLike>(t)); }
+			  requires index_within_tuple_size<N, TupleLike> && requires(TupleLike&& t) { get<N>(std::forward<TupleLike>(t)); }
 			[[nodiscard]] constexpr decltype(auto) operator()(TupleLike&& tuple_like) const
 			  noexcept(noexcept(get<N>(std::forward<TupleLike>(tuple_like))))
 			{

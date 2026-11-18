@@ -5,7 +5,7 @@ A generic C++23 utility library. Namespace: `alt`.
 ## Requirements
 
 - CMake 3.25 or later
-- GCC 13+ or Clang 19+
+- GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026)
 
 ## Build
 
@@ -33,6 +33,23 @@ Available presets:
 > **MSan note:** MemorySanitizer requires a fully instrumented C++ standard library.
 > The `debug-msan` preset is provided for use with a custom MSan-instrumented
 > libc++ build. It will not work correctly with the system libstdc++.
+
+### Windows (MSVC)
+
+The same presets work on Windows. CMake's default generator there is the newest
+installed Visual Studio, and no Developer Command Prompt is needed:
+
+```powershell
+cmake --preset debug; cmake --build --preset debug
+ctest --preset debug --output-on-failure
+```
+
+`debug`, `release`, `release-tests` and `debug-asan` are supported with MSVC. MSVC has
+AddressSanitizer but no UndefinedBehaviorSanitizer, so `debug-asan` runs ASan alone
+there. `debug-tsan` stops at configure with an error naming the reason, and
+`debug-msan` and `debug-coverage` are not MSVC presets: they select Clang and GCC
+themselves. The build copies the ASan runtime DLL next to the test
+executable, so the tests run from any shell.
 
 ### Manual build
 
@@ -64,7 +81,8 @@ ctest --test-dir build --output-on-failure
 
 ### Sanitizers
 
-Run the test suite under AddressSanitizer and UndefinedBehaviorSanitizer:
+Run the test suite under AddressSanitizer and UndefinedBehaviorSanitizer (AddressSanitizer
+alone with MSVC):
 
 ```bash
 cmake --preset debug-asan && cmake --build --preset debug-asan
@@ -120,11 +138,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.12.3_amd64.deb` in the project root:
+Produces `altlib_1.13.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.12.3_amd64.deb
+sudo dpkg -i altlib_1.13.0_amd64.deb
 ```
 
 ## Using in your project
@@ -132,15 +150,15 @@ sudo dpkg -i altlib_1.12.3_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.12.3 REQUIRED)
+find_package(Alt 1.13.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release, because the
 inline sizes of the async primitives can change between minors. The package config
-enforces this: requesting `1.12.3` accepts 1.12.3 and later 1.12.x releases, but rejects
-1.13.0 and 1.11.x, and a request for a higher patch than the installed one (1.12.4
-against 1.12.3) also fails. Update the requested version when you upgrade across a minor
+enforces this: requesting `1.13.0` accepts 1.13.0 and later 1.13.x releases, but rejects
+1.14.0 and 1.12.x, and a request for a higher patch than the installed one (1.13.1
+against 1.13.0) also fails. Update the requested version when you upgrade across a minor
 release.
 
 A refused request prints which minor series the installed package accepts and why, so a

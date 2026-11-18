@@ -30,7 +30,9 @@ namespace
 
 	static_assert(std::is_same_v<decltype(alt::to_underlying(color::red)), uint8_t>);
 	static_assert(std::is_same_v<decltype(alt::to_underlying(signed_tag::neg)), int16_t>);
-	static_assert(std::is_same_v<decltype(alt::to_underlying(zero)), unsigned int>);
+	// Implementation-defined for an unscoped enum without a fixed type: unsigned int on
+	// GCC and Clang, int on MSVC. Agreeing with the standard trait is the portable check.
+	static_assert(std::is_same_v<decltype(alt::to_underlying(zero)), std::underlying_type_t<unscoped_val>>);
 	static_assert(std::is_same_v<decltype(alt::to_underlying(42)), int>);
 	static_assert(std::is_same_v<decltype(alt::to_underlying(true)), bool>);
 

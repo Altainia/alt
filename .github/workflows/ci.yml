@@ -95,6 +95,28 @@ jobs:
       - name: Test
         run: ctest --preset release-tests
 
+  # One job per preset rather than one preset per job, because each found something
+  # the others did not when MSVC support was added: debug the use-after-free in
+  # detail::stop_forwarder that MSVC's stop_token exposes as a hang, release-tests the
+  # optimizer-only C4702, and debug-asan MSVC's std::optional poisoning. CMake's
+  # default generator on Windows is the newest Visual Studio, which needs no
+  # Developer Command Prompt, so the presets run unchanged.
+  msvc:
+    name: Build & Test (MSVC, ${{ matrix.preset }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release-tests, debug-asan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DALT_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
   clang-tidy:
     name: clang-tidy
     runs-on: ubuntu-latest
