@@ -1,0 +1,186 @@
+#pragma once
+
+#include <alt/detail/cancellation.hpp>
+#include <cassert>
+#include <coroutine>
+#include <stop_token>
+
+namespace alt
+{
+
+	class cancellation_ref;
+
+	template<typename Promise>
+	[[nodiscard]] cancellation_ref get_cancellation_ref(std::coroutine_handle<Promise> h) noexcept;
+
+	/**
+	 * @brief A pointer-sized, non-owning view of the cancellation state of an await chain.
+	 *
+	 * Lets a hand-written awaiter read the chain's stop token. The library's own
+	 * wrapper only checks for cancellation on entry to a suspension point, so an
+	 * awaiter that is resumed later has no other way to observe a stop requested in
+	 * between.
+	 *
+	 * A view is empty when there is no chain to observe: it was default constructed,
+	 * the awaiting coroutine's promise does not relay cancellation, or it is an
+	 * alt::task that was not awaited from a chain rooted at an alt::cancellable_task.
+	 * An empty view reports no stop requested and returns a token that can never be
+	 * stopped. A non-empty view over a token that cannot be stopped is a different
+	 * thing: it is not empty, but stop_possible() on its token is false.
+	 *
+	 * The view does not extend the life of the chain. It is valid for as long as the
+	 * coroutine that obtained it stays suspended, and must not be used once that
+	 * coroutine has been resumed or destroyed. Obtain one with alt::get_cancellation_ref.
+	 */
+	class cancellation_ref
+	{
+	public:
+		/** Constructs an empty view. */
+		cancellation_ref() noexcept = default;
+
+		/** True when the view observes a chain, false when it is empty. */
+		[[nodiscard]] explicit operator bool() const noexcept
+		{
+			return m_context != nullptr;
+		}
+
+		/**
+		 * The chain's stop token. An empty view, and a chain started without a
+		 * stoppable token, both yield a token for which stop_possible() is false.
+		 */
+		[[nodiscard]] std::stop_token get_stop_token() const noexcept
+		{
+			return m_context != nullptr ? m_context->token : std::stop_token{};
+		}
+
+		/** True once a stop has been requested on the chain. Always false for an empty view. */
+		[[nodiscard]] bool stop_requested() const noexcept
+		{
+			return m_context != nullptr && m_context->stop_requested();
+		}
+
+		/**
+		 * @brief Tears the whole chain down: destroys the root frame, and with it every
+		 *        frame below it, or posts that destruction to the chain's home scheduler.
+		 *
+		 * DELICATE. This destroys the frame the calling awaiter lives in. It must be the
+		 * awaiter's last statement, and nothing may be read through *this, the awaiter,
+		 * or any other view of the chain afterwards: all of it may already be gone when
+		 * this returns. Return from await_suspend immediately, in a way that does not
+		 * resume the coroutine (void, or true for a bool-returning one).
+		 *
+		 * This is not a general destroy-this-chain button. It is for an operation that
+		 * stopped because the chain's own token says so. An operation that stopped for a
+		 * reason the token knows nothing about must resume with a released result
+		 * instead, as alt's own six waits do, so the awaiting body can see why.
+		 *
+		 * @pre The view is not empty.
+		 * @pre stop_requested() is true.
+		 */
+		void abandon() const noexcept
+		{
+			assert(m_context != nullptr && "abandoning an empty alt::cancellation_ref");
+			assert(m_context->stop_requested() && "abandoning an alt chain with no stop requested");
+
+			detail::abandon_chain(*m_context);
+		}
+
+		/**
+		 * @brief Resumes the awaiting coroutine, or tears the chain down if a stop has been
+		 *        requested since it suspended.
+		 *
+		 * This is what an operation calls when it completes, in place of h.resume(): the
+		 * library's own wrapper only checks for cancellation on entry to a suspension
+		 * point, so a stop requested while the operation was in flight would otherwise
+		 * run the body anyway.
+		 *
+		 * DELICATE. Both branches may destroy the frame the calling awaiter lives in:
+		 * resuming can run the coroutine to completion, and abandoning destroys the chain.
+		 * The call must be the awaiter's last statement, and nothing may be read through
+		 * *this, the awaiter, or any other view of the chain afterwards.
+		 *
+		 * Call it at most once per suspension, since both branches end it.
+		 *
+		 * An empty view resumes. That is what lets one awaiter serve both a cancellable
+		 * chain and a plain alt::task with no branch of its own.
+		 *
+		 * Marked noexcept, and the resume branch is where that bites. An alt promise
+		 * captures a body's exception rather than letting it escape the resumption, so
+		 * for an alt chain nothing can propagate out of here. An empty view over a
+		 * foreign coroutine is the exception: if that coroutine's unhandled_exception
+		 * rethrows, the exception escapes h.resume() into this noexcept function and the
+		 * program terminates.
+		 *
+		 * @param h The handle the awaiter was suspended with.
+		 * @return true when the coroutine was resumed, false when the chain was abandoned.
+		 *         The returned bool is a value in the caller's own frame and is always
+		 *         safe to read; what is unsafe afterwards is anything reached *through*
+		 *         the awaiter, this view, or any other view of the chain, since either
+		 *         branch may have freed the frame they live in.
+		 *
+		 * @pre h is not empty.
+		 */
+		bool resume_or_abandon(std::coroutine_handle<> h) const noexcept
+		{
+			assert(h && "resuming or abandoning an alt chain with an empty coroutine handle");
+
+			// Copied to a local before either branch: both may free the frame *this lives in.
+			detail::cancellation_context* const context = m_context;
+
+			if(context != nullptr && context->stop_requested())
+			{
+				// Both of abandon()'s preconditions were just checked.
+				cancellation_ref{context}.abandon();
+				return false;
+			}
+
+			h.resume();
+			return true;
+		}
+
+	private:
+		template<typename Promise>
+		friend cancellation_ref get_cancellation_ref(std::coroutine_handle<Promise> h) noexcept;
+
+		explicit cancellation_ref(detail::cancellation_context* context) noexcept:
+		  m_context(context)
+		{}
+
+		detail::cancellation_context* m_context = nullptr;
+	};
+
+	/**
+	 * @brief Builds a cancellation_ref from the handle an await_suspend receives.
+	 *
+	 * The view is non-empty when Promise relays cancellation and its context pointer
+	 * is non-null. Inside an alt::cancellable_task that is always so; inside an
+	 * alt::task it is so only when the task was awaited from a chain rooted at an
+	 * alt::cancellable_task.
+	 *
+	 * An erased std::coroutine_handle<> always yields an empty view, because it has
+	 * no promise() to ask. An awaiter must therefore declare its await_suspend as a
+	 * template over the promise type to receive a non-empty view:
+	 *
+	 * @code
+	 * template<typename Promise>
+	 * void await_suspend(std::coroutine_handle<Promise> h);
+	 * @endcode
+	 *
+	 * @pre h is not empty.
+	 */
+	template<typename Promise>
+	[[nodiscard]] cancellation_ref get_cancellation_ref(std::coroutine_handle<Promise> h) noexcept
+	{
+		assert(h && "getting a cancellation_ref from an empty coroutine handle");
+
+		if constexpr(detail::relays_cancellation<Promise>)
+		{
+			return cancellation_ref{h.promise().cancellation_context_pointer()};
+		}
+		else
+		{
+			return cancellation_ref{};
+		}
+	}
+
+}

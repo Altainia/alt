@@ -61,6 +61,7 @@ add_executable(alt_tests
     test_run_loop.cpp
     test_thread_pool.cpp
     test_cancellation.cpp
+    test_cancellation_ref.cpp
     test_task.cpp
     test_sync_wait.cpp
     test_cancellable_task.cpp
@@ -107,6 +108,20 @@ if(MSVC AND ALT_SANITIZE STREQUAL "address")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_alt_asan_runtimes} $<TARGET_FILE_DIR:alt_tests>
         VERBATIM
     )
+endif()
+
+# GCC 15 at -O2/-O3 reports -Wmaybe-uninitialized from inside libstdc++'s <stop_token>
+# for a cancellable_task that co_awaits when_all. The read it describes cannot happen:
+# the optional<stop_callback> in wait_awaiter::await_suspend is emplaced into a fresh,
+# empty optional. It reproduces against main's headers with a four-line cancellable_task
+# + when_all translation unit and no cancellation_ref.hpp, while main's own much larger
+# test_when_all.cpp compiles clean at -O2 against the same headers (both measured by the
+# controller's verification), so it tracks the translation unit's inlining context rather
+# than the shape. Scoped to this one file and to GNU so every other translation unit
+# keeps the warning. See issue #44, which also asks whether CI's GCC fires it at all.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(test_cancellation_ref.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-maybe-uninitialized")
 endif()
 alt_add_sanitizers(alt_tests)
 alt_add_coverage(alt_tests)

@@ -3,6 +3,7 @@
 #include <alt/awaitable.hpp>
 #include <alt/scheduler.hpp>
 #include <cassert>
+#include <concepts>
 #include <coroutine>
 #include <stop_token>
 #include <type_traits>
@@ -43,6 +44,12 @@ namespace alt::detail
 		{
 			return token.stop_requested();
 		}
+	};
+
+	/** A promise that relays an alt cancellation context to its children. */
+	template<typename Promise>
+	concept relays_cancellation = requires(Promise& p) {
+		{ p.cancellation_context_pointer() } -> std::same_as<cancellation_context*>;
 	};
 
 	/**
@@ -264,7 +271,10 @@ namespace alt::detail
 	 *
 	 * Intercepting a resumption requires knowing how the resumption happens, so this
 	 * cannot be done generically. It is done for the resumptions alt owns, of which
-	 * this is one, and foreign awaitables remain checked on entry only.
+	 * this is one. A foreign awaitable is otherwise checked on entry only -- unless its
+	 * author opts in, which alt::cancellation_ref exists for: an awaiter that asks
+	 * alt::get_cancellation_ref for a view of the chain can observe the stop state at
+	 * its own resumption and abandon the chain there. See docs/cancellation_ref.md.
 	 *
 	 * The posted work item carries this awaiter rather than the frame handle, because
 	 * it needs both the handle and the context at resumption time. The awaiter lives

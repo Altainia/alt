@@ -53,12 +53,6 @@ namespace alt
 namespace alt::detail
 {
 
-	/** A promise that relays an alt cancellation context to its children. */
-	template<typename Promise>
-	concept relays_cancellation = requires(Promise& p) {
-		{ p.cancellation_context_pointer() } -> std::same_as<cancellation_context*>;
-	};
-
 	/**
 	 * The error a released wait reports. One function, so every primitive in the
 	 * library releases its waiters with the same code.

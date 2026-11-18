@@ -138,11 +138,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.13.0_amd64.deb` in the project root:
+Produces `altlib_1.14.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.13.0_amd64.deb
+sudo dpkg -i altlib_1.14.0_amd64.deb
 ```
 
 ## Using in your project
@@ -150,15 +150,15 @@ sudo dpkg -i altlib_1.13.0_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.13.0 REQUIRED)
+find_package(Alt 1.14.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release, because the
 inline sizes of the async primitives can change between minors. The package config
-enforces this: requesting `1.13.0` accepts 1.13.0 and later 1.13.x releases, but rejects
-1.14.0 and 1.12.x, and a request for a higher patch than the installed one (1.13.1
-against 1.13.0) also fails. Update the requested version when you upgrade across a minor
+enforces this: requesting `1.14.0` accepts 1.14.0 and later 1.14.x releases, but rejects
+1.15.0 and 1.13.x, and a request for a higher patch than the installed one (1.14.1
+against 1.14.0) also fails. Update the requested version when you upgrade across a minor
 release.
 
 A refused request prints which minor series the installed package accepts and why, so a
@@ -199,6 +199,7 @@ Then include headers as needed:
 | `<alt/thread_pool.hpp>` | Fixed-size thread pool built by a factory returning `std::expected`: `thread_pool` | [docs/thread_pool.md](docs/thread_pool.md) |
 | `<alt/sync_wait.hpp>` | Blocking and driving entry points for running an awaitable to completion: `sync_wait` | [docs/sync_wait.md](docs/sync_wait.md) |
 | `<alt/cancellable_task.hpp>` | Self-owning, cancellable root coroutine: `cancellable_task`, `cancellation_handle`, `completion_handler`, `start`, `cancellation_point` | [docs/cancellable_task.md](docs/cancellable_task.md) |
+| `<alt/cancellation_ref.hpp>` | Non-owning view of an await chain's cancellation state, for a hand-written awaiter: `cancellation_ref`, `get_cancellation_ref` | [docs/cancellation_ref.md](docs/cancellation_ref.md) |
 | `<alt/async_event.hpp>` | Manual-reset signal coroutines await: `async_event`, `wait_result` | [docs/async_event.md](docs/async_event.md) |
 | `<alt/async_latch.hpp>` | Single-use countdown coroutines await: `async_latch`, `wait_result` | [docs/async_latch.md](docs/async_latch.md) |
 | `<alt/async_semaphore.hpp>` | Counting semaphore coroutines await: `async_semaphore`, `wait_result` | [docs/async_semaphore.md](docs/async_semaphore.md) |

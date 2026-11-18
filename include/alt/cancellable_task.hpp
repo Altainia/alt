@@ -187,6 +187,35 @@ namespace alt
 		 * relocks the list after every callback, including the last; libstdc++ skips
 		 * that relock after the last one, which is why the defect never showed there,
 		 * AddressSanitizer included.
+		 *
+		 * One shape does reach the defect on libstdc++, and tests/test_cancellation_ref.cpp
+		 * pins it: an awaiter holding an alt::cancellation_ref may register its own
+		 * std::stop_callback on the chain's token and abandon the chain from it, which
+		 * destroys the root frame -- and with it the promise's m_source, m_context.token and
+		 * the m_external link holding *this -- while the request_stop() below is still
+		 * walking the chain's callback list. When the chain is linked to an external token,
+		 * its own cancellation_handle is discarded, and a SECOND std::stop_callback is
+		 * registered on the chain's token, libstdc++'s walk still has somewhere to go after
+		 * the abandoning callback returns, so the relock it skips after the LAST callback is
+		 * not the one that matters here. Measured: without the local, that shape reports an
+		 * AddressSanitizer heap-use-after-free in _Stop_state_t::_M_lock() reached from this
+		 * function. It is the one shape in which Linux sees this defect at all, which is why
+		 * the paragraph above and this one are not in conflict.
+		 *
+		 * when_all's DELICATE note on the children's stop source is a near neighbor rather
+		 * than the same thing, and the difference is worth keeping straight. The
+		 * AddressSanitizer signature it records is the same -- a freed stop state read in
+		 * _M_lock(), reached from stop_forwarder::operator() -- but there the freed state is
+		 * the one an OUTER walk is traversing, dropped by a ~stop_callback releasing the last
+		 * reference mid-walk, and that note says in terms that a counted copy of m_children
+		 * does not save it. A local here protects the state this call requests a stop on; it
+		 * does not protect a state some enclosing walk is reading.
+		 *
+		 * [stopcallback.cons] is where the non-blocking destructor above is specified: a
+		 * std::stop_callback destructor called from within its own callback's invocation on
+		 * the current thread returns without waiting, so destroying the executing m_external
+		 * link is allowed. That clause says the destructor may run; it says nothing about the
+		 * state the walk is still reading, which is what the local is for.
 		 */
 		struct stop_forwarder
 		{

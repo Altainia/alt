@@ -105,3 +105,13 @@ differently, or fail to compile, when awaited inside an `alt::task` versus
 inside a plain coroutine with no `await_transform` — and something that is
 *not* `alt::awaitable` on its own can still be perfectly awaitable inside a
 coroutine whose promise transforms it into something that is.
+
+That same injected check is also the limit of what an awaiter of your own gets
+for free: it fires on entry to the suspension point, not when the awaiter
+resumes the frame. An awaiter that wants to observe a stop requested while its
+operation was in flight can opt in, by declaring `await_suspend` as a template
+over the promise type and asking
+[`alt::cancellation_ref`](cancellation_ref.md) for a view of the chain it is
+suspending in. Awaiting it as a named lvalue rather than a prvalue is also what
+lifts the move-constructibility requirement the by-value capture otherwise
+imposes; that page carries both forms.
