@@ -532,48 +532,93 @@ namespace
 //
 // That is the same dependency WhenAllTest.AHomeSchedulerDefersTheParentsDestruction-
 // PastItsChildrens and TheChildrensStopOutlivesABlockTheLastChildFreed already ship
-// with. On a standard library that walks callbacks forward this test arranges the other
-// order -- cancel() first, then the joiner's release -- and the design is still sound;
-// what it would stop being is a model of when_all's order.
+// with -- but they do not carry it the same way, and which is which is the useful half.
+// That first test FAILS on a forward walk and names the cause: its own note says
+// destruction_order would read {2, 1, 0}. The second one, and this one, pass silently and
+// go on claiming an order they no longer arrange. So the suite does have a loud canary
+// for the walk order; it is just not this test. On a forward-walking standard library the
+// design here is still sound -- what this test would stop being is a model of when_all's
+// order.
 //
 // The heap_owner rather than the fixture's deleter_probe, for the reason
 // ARaceBetweenAStopAndTheLastReleaseIsClean uses it: the block must really be freed for a
 // race over freed memory to be instrumented at all.
 //
-// WHAT IT GUARDS, measured 2026-11-17 against this branch, and the hook's order is the
-// one mutation of record found for it. Swapping the two statements of
-// detail::on_combinator_child_complete -- release() before complete() -- is detected
-// 20 of 20 runs of this test alone under AddressSanitizer, as a heap-use-after-free, and
-// 0 of 20 in debug. ASan reports it at waiter_list::alive() inside detach_all() inside
-// completion_counter::complete(), with the hook one frame above: a SHARPER citation than
-// the hook's own note carries, which reports the same swap at the counter's atomic word,
-// because this block has a parked joiner and so its complete() reaches the list at all.
-// That is also why the drain thread calls the shipped hook instead of writing its two
-// statements out here.
+// WHAT IT GUARDS, every figure measured 2026-11-17 against this branch, 20 runs of this
+// test alone per preset. Two mutations of record, and the second of them is the one worth
+// having.
 //
-// WHAT IT DOES NOT GUARD, and this is a measured zero rather than an untested
-// possibility. Swapping cancel()'s own two statements -- the cancelled flag and the stop
-// on the counted copy -- is detected 0 of 20 in debug and 0 of 20 under AddressSanitizer.
-// The reason is structural and was probed, not reasoned: with a temporary counter in
-// cancel(), it runs on 105 of these 200 repeats in debug and NEVER on a freed block. On
-// the other 95 the joiner's release during the same walk drops the block's last
-// reference, and ~m_link -- destroyed first, this class declaring it last -- deregisters
-// itself from the walk before it is reached, so cancel() is skipped rather than reaching
-// freed storage. Which is the member order's own argument, holding. The guard of record
-// for that swap stays where it was: CancelMarksTheWaitReleasedBeforeStoppingTheChildren
-// above, and WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner.
+// THE HOOK'S STATEMENT ORDER. Swapping the two statements of
+// detail::on_combinator_child_complete -- release() before complete() -- is detected 20
+// of 20 under AddressSanitizer and 0 of 20 in debug. Not all 20 the same way: 18 are an
+// ASan heap-use-after-free, reported at waiter_list::alive() inside detach_all() inside
+// completion_counter::complete() with the hook one frame above, and 2 are waiter_list's
+// own liveness ASSERT aborting on "detaching every alt waiter on a destroyed list". That
+// split matters, because the assert exists in the debug build too: the adjacent 0 of 20
+// is therefore a sampling result and not a structural absence, which is the same
+// distinction the hook's own note is built on. The ASan citation is sharper than the one
+// that note carries -- it reports the same swap at the counter's atomic word -- because
+// this block has a parked joiner, so its complete() reaches the list at all. That is why
+// the drain thread calls the shipped hook instead of copying its two statements.
 //
-// Nor does it sharpen the contended ELECTION. A try_claim split into a load and a store
-// is detected 0 of 20 in debug here, because the stop's relay path still offsets the two
-// claims: the verdict mix below is one-sided per build. The tests that do catch that are
-// WaiterList.AConcurrentSatisfierAndStopDoNotBothResume, whose rendezvous sits either
-// side of the claim itself, and
+// THIS CLASS'S MEMBER DECLARATION ORDER, which m_link's own DELICATE note calls "the only
+// thing standing between a cancel() in flight on another thread and the members it reads"
+// and for which it cited no measured guard. Declaring m_link FIRST, so it is destroyed
+// last, is detected 15 of 20 in debug (10 aborting on glibc's "unaligned tcache chunk
+// detected", 5 hanging), 14 of 20 under AddressSanitizer (double-free and
+// heap-use-after-free) and 6 of 20 under ThreadSanitizer (hangs -- the deadlock
+// ~std::stop_callback's cross-thread wait is there to prevent).
+//
+// UNDER ADDRESSSANITIZER THIS TEST IS THE ONLY GUARD FOR THAT ORDER, measured by running
+// the whole suite with the mutation and this test filtered out: it passes 810 of 810. In
+// the other two builds it is not alone -- debug dies in
+// ARaceBetweenAStopAndTheLastReleaseIsClean below, and ThreadSanitizer hangs in
+// WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock -- so what this
+// adds there is the build that NAMES the fault rather than reporting heap corruption or a
+// hang.
+//
+// WHAT IT DOES NOT GUARD, and these are measured zeros rather than untested
+// possibilities. Swapping cancel()'s own two statements -- the cancelled flag and the
+// stop on the counted copy -- is detected 0 of 20 in debug and 0 of 20 under
+// AddressSanitizer. Probed rather than reasoned: with a temporary counter in cancel(), it
+// runs on 105 of these 200 repeats in debug and NEVER on a freed block. Both ways that
+// holds are worth separating, because an earlier draft of this note credited only the
+// first and the mix says it cannot be the common one:
+//
+// - On a RELEASED repeat the joiner's release during the same walk drops the block's last
+//   reference, and ~m_link -- destroyed first, this class declaring it last -- deregisters
+//   itself from the walk before it is reached, so cancel() is skipped.
+// - On a SATISFIED repeat the joiner is resumed inside complete() on the drain thread, so
+//   the HOOK's release is last and the block is freed on that thread while the walk may
+//   still have m_link pending. Nothing deregisters itself there; what orders the two is
+//   ~std::stop_callback deregistering, and blocking for an invocation already running on
+//   another thread. That is the other half of m_link's note, and the paragraph above is
+//   this test's evidence for it -- break the declaration order and this is the repeat that
+//   corrupts the heap.
+//
+// The mix decides which dominates: at 163 to 197 satisfied of 200, most of the 95 skipped
+// cancel()s are the second case, not the first. The guard of record for the cancel() swap
+// stays where it was: CancelMarksTheWaitReleasedBeforeStoppingTheChildren above,
+// WhenAnyTest.ASatisfiedWaitWithTheCancellationFlagSetDiscardsItsWinner, and -- under
+// AddressSanitizer, which that note names -- WhenAllTest.CancellingTheAwaitingChain-
+// ReportsOperationCanceled.
+//
+// Nor does it sharpen the contended ELECTION. A try_claim split into a load and a store is
+// detected 0 of 20 in debug here (debug only; not measured under either sanitizer),
+// because the stop's relay still offsets the two claims, as the one-sided verdict mix
+// below shows. The tests that do catch that are
+// WaiterList.AConcurrentSatisfierAndStopDoNotBothResume, whose rendezvous sits either side
+// of the claim itself, and
 // TaskCompletionSourceTest.AStopRacingSetValueResumesTheWaiterExactlyOnce.
 //
 // So what this adds over ARaceBetweenAStopAndTheLastReleaseIsClean, which races a stop
 // against the last release already: that block is constructed with ZERO children, so no
 // complete() is ever in flight against a cancel() and no joiner is parked for the two to
-// contend over. This one has both, and it is the only test in the suite that does.
+// contend over. This one has both. It is NOT the only test that reaches that
+// configuration -- WhenAllTest.ASatisfierThatBeatsTheStopStillDrainsIntoTheSharedBlock's
+// raced phase has it too, which is exactly why that file calls the overlap arranged -- it
+// is the only one that reaches it DETERMINISTICALLY, on every repeat, with no chain in the
+// way.
 //
 // The guards are a resumption count, a deleter count and live_frames -- all of which
 // hold whichever way the race goes -- plus both sanitizers over the whole thing. None is
@@ -582,6 +627,14 @@ namespace
 // 197 and 170 satisfied of 200, 29 of 200 under ThreadSanitizer, and 0 of 200 under
 // AddressSanitizer, where the stop takes every joiner. A bound over any of those is the
 // mistake test_when_all.cpp's retired EXPECT_GT records.
+//
+// ONE CONSEQUENCE OF THAT ASAN ZERO, because it is not only a curiosity. The satisfied
+// repeat is the one where the DRAIN thread frees the block, and AddressSanitizer -- the
+// only build that can name a memory fault rather than report heap corruption -- never
+// takes it. So the build with the sharpest instrument is the build that never walks the
+// interleaving the instrument would be sharpest on, and that is part of why the cancel()
+// swap above is a zero there rather than a report. The declaration-order mutation is
+// detected under ASan anyway, 14 of 20, because it also breaks the released repeat.
 TEST_F(CombinatorStateTest, ACancelRacingAChildsDrainIntoTheBlockIsClean)
 {
 	verdict_tally tally;
