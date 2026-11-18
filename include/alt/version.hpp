@@ -5,7 +5,7 @@
 // NOLINT(cppcoreguidelines-macro-usage,cppcoreguidelines-macro-to-enum,modernize-macro-to-enum): version macros must be macros for preprocessor-time version checks
 #define ALT_VERSION_MAJOR 1  // NOLINT(cppcoreguidelines-macro-usage,cppcoreguidelines-macro-to-enum,modernize-macro-to-enum)
 #define ALT_VERSION_MINOR 12 // NOLINT(cppcoreguidelines-macro-usage,cppcoreguidelines-macro-to-enum,modernize-macro-to-enum)
-#define ALT_VERSION_PATCH 2  // NOLINT(cppcoreguidelines-macro-usage,cppcoreguidelines-macro-to-enum,modernize-macro-to-enum)
+#define ALT_VERSION_PATCH 3  // NOLINT(cppcoreguidelines-macro-usage,cppcoreguidelines-macro-to-enum,modernize-macro-to-enum)
 
 namespace alt
 {
