@@ -11,6 +11,7 @@
 #include <exception>
 #include <expected>
 #include <functional>
+#include <latch>
 #include <optional>
 #include <stop_token>
 #include <string_view>
@@ -800,4 +801,42 @@ TEST_F(CancellationRefTest, AnOffThreadCompletionResumesSafely)
 	EXPECT_TRUE(body_ran_after_await);
 	EXPECT_EQ(awaited_result, 42);
 	EXPECT_EQ(live_frames, 0);
+}
+
+TEST_F(CancellationRefTest, AnOffThreadCompletionRacesAStopRequest)
+{
+	// The design's thread-crossing case, and the only test in this file where
+	// resume_or_abandon's read of the stop state and abandon_chain's teardown actually
+	// race a request_stop() on another thread. The test above orders everything with
+	// join(), so it instruments the resume branch off-thread but no contention; this one
+	// releases both sides together through a std::latch -- never a sleep, which would
+	// only make the interleaving likely rather than contended.
+	//
+	// Which side wins is a genuine race, so the assertion is the disjunction rather than
+	// a fixed outcome: the frames must be gone either way, and the body must have run if
+	// and only if resume_or_abandon resumed rather than abandoned. Asserting a particular
+	// winner here would be asserting a scheduling accident.
+	//
+	// This one matters most under ThreadSanitizer. The jthread's join at scope exit is
+	// what orders the worker's writes before the reads below.
+	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon));
+	ASSERT_EQ(operation_starts, 1);
+
+	std::latch both_ready{2};
+
+	{
+		const std::jthread worker{[&both_ready] {
+			both_ready.arrive_and_wait();
+			complete_pending_operation();
+		}};
+
+		both_ready.arrive_and_wait();
+		handle.request_stop();
+	}
+
+	EXPECT_TRUE(handle.stop_requested());
+	EXPECT_EQ(live_frames, 0);
+
+	// The disjunction: resumed means the body ran, abandoned means it did not.
+	EXPECT_EQ(body_ran_after_await, completion_resumed);
 }
