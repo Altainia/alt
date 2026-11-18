@@ -315,6 +315,50 @@ namespace
 		body_ran_after_await = true;
 	}
 
+	// The same adapter shape, except that the abandoning std::stop_callback is NOT the
+	// only registration on the chain's own token. Registration order is load-bearing:
+	// libstdc++ walks the callback list in reverse registration order, so the no-op is
+	// emplaced first to put the abandoning one at the head of the list. The abandoning
+	// one then runs first and frees the chain, and the walk still has the no-op left to
+	// reach -- which is where the chain's stop state gets touched after the teardown
+	// unless something outside the destroyed frames owns it. Both callbacks live in the
+	// awaiter, i.e. in a frame the teardown destroys.
+	struct two_callback_awaiter
+	{
+		std::optional<std::stop_callback<std::function<void()>>> noop;
+		std::optional<std::stop_callback<std::function<void()>>> abandoner;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return false;
+		}
+
+		template<typename Promise>
+		void await_suspend(std::coroutine_handle<Promise> h)
+		{
+			const alt::cancellation_ref view = alt::get_cancellation_ref(h);
+
+			recorded_view     = view;
+			view_was_recorded = true;
+			parked            = h;
+
+			noop.emplace(view.get_stop_token(), std::function<void()>{[] {}});
+			abandoner.emplace(view.get_stop_token(), std::function<void()>{[view, h] { static_cast<void>(view.resume_or_abandon(h)); }});
+		}
+
+		void await_resume() const noexcept
+		{}
+	};
+
+	alt::cancellable_task cancellable_with_two_stop_callbacks()
+	{
+		const frame_tracker t{1};
+		body_reached_await = true;
+		two_callback_awaiter awaiter;
+		co_await awaiter;
+		body_ran_after_await = true;
+	}
+
 	// What the when_all in combinator_root reported.
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
 	bool combinator_reported = false;
@@ -670,6 +714,38 @@ TEST_F(CancellationRefTest, ATeardownFromInsideALinkedTokensRequestStopIsSafe)
 	EXPECT_EQ(live_frames, 0);
 	EXPECT_TRUE(source.stop_requested());
 	EXPECT_TRUE(source.get_token().stop_requested());
+	EXPECT_FALSE(source.request_stop());
+}
+
+TEST_F(CancellationRefTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
+{
+	// The instrument for the keepalive in detail::stop_forwarder::operator()
+	// (include/alt/cancellable_task.hpp). It pins the one shape where every owner of the
+	// chain's stop state lives inside the frames the teardown destroys: the stop arrives
+	// through start_options::token, the chain's own cancellation_handle is discarded, so
+	// the only owners are the promise's m_source, m_context.token and the stop_forwarder
+	// inside m_external -- all in the root frame. The awaiter registers two callbacks on
+	// the chain's token so that libstdc++'s walk has somewhere left to go after the
+	// abandoning one has freed those frames; with only the abandoning callback
+	// registered, _M_request_stop's "last callback" early return hides the freed state
+	// and the test above passes either way.
+	//
+	// This is clean ONLY because of that keepalive. Without it the run is an
+	// AddressSanitizer heap-use-after-free: a READ of the freed stop state in
+	// _Stop_state_t::_M_lock(), reached from stop_forwarder::operator() via the outer
+	// request_stop(). So this test belongs to the AddressSanitizer gate above all.
+	std::stop_source source;
+
+	static_cast<void>(alt::start(cancellable_with_two_stop_callbacks(), {.token = source.get_token()}));
+	ASSERT_TRUE(body_reached_await);
+	ASSERT_TRUE(view_was_recorded);
+	ASSERT_EQ(live_frames, 1);
+
+	EXPECT_TRUE(source.request_stop());
+
+	EXPECT_FALSE(body_ran_after_await);
+	EXPECT_EQ(live_frames, 0);
+	EXPECT_TRUE(source.stop_requested());
 	EXPECT_FALSE(source.request_stop());
 }
 
