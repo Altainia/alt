@@ -20,6 +20,17 @@
 
 #include "coroutine_test_support.hpp"
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#	include <intrin.h>
+#	define ALT_TEST_NOINLINE __declspec(noinline)
+// The address of the return-address slot sits at the top of the caller's frame, so it
+// moves with stack depth exactly as GCC's and Clang's frame address does.
+#	define ALT_TEST_FRAME_ADDRESS() _AddressOfReturnAddress()
+#else
+#	define ALT_TEST_NOINLINE [[gnu::noinline]]
+#	define ALT_TEST_FRAME_ADDRESS() __builtin_frame_address(0)
+#endif
+
 using namespace alt_test;
 
 // The concept describes context-free awaitables, so this is the check that the
@@ -223,9 +234,9 @@ namespace
 	 * mebibyte. Reading the frame address instead gave a spread of zero bytes on all
 	 * four presets, and 3999600 bytes against a recursive hand-off.
 	 */
-	[[gnu::noinline]] void note_stack_depth(std::uintptr_t& lowest, std::uintptr_t& highest)
+	ALT_TEST_NOINLINE void note_stack_depth(std::uintptr_t& lowest, std::uintptr_t& highest)
 	{
-		const auto address = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+		const auto address = reinterpret_cast<std::uintptr_t>(ALT_TEST_FRAME_ADDRESS());
 
 		lowest  = std::min(lowest, address);
 		highest = std::max(highest, address);

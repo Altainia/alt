@@ -417,6 +417,12 @@ namespace
 
 	/** A tracked task that parks on @p gate and then completes by throwing. */
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters): the event is owned by the calling test, which holds it until live_frames is back to zero.
+#ifdef _MSC_VER
+	// C4033 "must return a value" is a false positive for a coroutine: the body ends in
+	// a throw, so control never reaches the end without a co_return.
+#	pragma warning(push)
+#	pragma warning(disable : 4033)
+#endif
 	alt::task<int> wait_then_throw(alt::async_event& gate, int tag)
 	{
 		const frame_tracker tracker{tag};
@@ -424,6 +430,9 @@ namespace
 
 		throw std::runtime_error{"winner body"};
 	}
+#ifdef _MSC_VER
+#	pragma warning(pop)
+#endif
 
 	/**
 	 * @brief An awaitable parked on a handle only the test can resume, which then yields

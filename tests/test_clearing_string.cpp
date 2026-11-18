@@ -653,12 +653,17 @@ namespace
 #elifdef __GNUC__
 #	pragma GCC diagnostic push
 #	pragma GCC diagnostic ignored "-Wunused-result"
+#elifdef _MSC_VER
+#	pragma warning(push)
+#	pragma warning(disable : 4834)
 #endif
 		EXPECT_THROW(s.substr(100), std::out_of_range);
 #ifdef __clang__
 #	pragma clang diagnostic pop
 #elifdef __GNUC__
 #	pragma GCC diagnostic pop
+#elifdef _MSC_VER
+#	pragma warning(pop)
 #endif
 	}
 
