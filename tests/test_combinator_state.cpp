@@ -23,7 +23,15 @@ static_assert(!std::is_move_constructible_v<combinator_state>);
 
 namespace
 {
-	/** How many times the contended test repeats its race. */
+	/**
+	 * How many times each of this file's three contended tests repeats its race.
+	 *
+	 * Shared by ARaceBetweenAStopAndTheLastReleaseIsClean,
+	 * ACancelFromAnotherThreadIsObservedThroughCancelled and
+	 * ACancelRacingAChildsDrainIntoTheBlockIsClean, and not by
+	 * ConcurrentAddRefAndReleaseRunTheDeleterExactlyOnce, which carries its own count
+	 * because each of its repeats is eight threads over 2,000 rounds rather than one race.
+	 */
 	constexpr int race_repeats = 200;
 
 	/** Records destruction of the owner. */
@@ -487,6 +495,16 @@ namespace
 		// emplaces its stop_forwarder before handle.resume() parks the joiner.
 		const auto handle = alt::start(draining_joiner(*state, record, 1), {.token = chain.get_token()});
 
+		// These two return from this function with the joiner still parked and both
+		// references outstanding, and THAT PATH NEEDS NO TEARDOWN OF ITS OWN -- measured,
+		// because the obvious reading is that it leaks the frame and the block. It does
+		// not. heap_owner's std::unique_ptr frees the block as this scope unwinds, and
+		// ~completion_counter resumes the still-parked joiner unsatisfied on its way out,
+		// whose body drops its reference and whose frame then retires. A scope guard here
+		// that serialized the two parties' work was written, measured and removed: with it
+		// armed and a precondition forced to fire, AddressSanitizer with detect_leaks=1
+		// reports nothing, and with it released it reports nothing either -- against a
+		// deliberate `new int[64]` in the same toolchain, which it does report.
 		ASSERT_EQ(alt_test::live_frames, 1) << "repeat " << repeat << ": the joiner did not park";
 		ASSERT_EQ(record.resumptions, 0) << "repeat " << repeat << ": the joiner was resumed before the race";
 
