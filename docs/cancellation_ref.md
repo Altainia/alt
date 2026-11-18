@@ -75,13 +75,19 @@ template<typename Promise>
   always `false` for an empty view.
 - `abandon()` destroys the root frame and with it every frame below it, or posts
   that destruction to the chain's `start_options::home`. It has two
-  preconditions — a non-empty view, and a stop already requested on the chain —
-  and breaking either is a precondition violation, asserted in a build with
-  asserts enabled.
+  preconditions, each carrying its own assert in
+  `include/alt/cancellation_ref.hpp`: the view is not empty
+  (`"abandoning an empty alt::cancellation_ref"`) and a stop has already been
+  requested on the chain (`"abandoning an alt chain with no stop requested"`).
+  Those asserts are compiled out by `NDEBUG`; the preconditions are not.
 - `resume_or_abandon(h)` abandons the chain if a stop has been requested and
   resumes `h` otherwise, returning `true` when it resumed. An empty view resumes.
   It is what an awaiter calls in place of `h.resume()`, and `h` must not be
   empty.
+- `get_cancellation_ref(h)` is the only way to obtain a non-empty view. Its one
+  precondition is that `h` is not empty, asserted at
+  `include/alt/cancellation_ref.hpp`'s `"getting a cancellation_ref from an empty
+  coroutine handle"`. What it returns for an erased handle is the next section.
 
 There is deliberately no access to the chain's root handle or its home scheduler.
 A view can read the stop state and trigger the one teardown the library already
@@ -94,7 +100,8 @@ default constructed, when the awaiting coroutine's promise carries no
 cancellation state, or when it is an `alt::task` that was not awaited from a
 chain rooted at an `alt::cancellable_task` — a plain `alt::task` under
 [`alt::sync_wait`](sync_wait.md), for instance. Inside an
-`alt::cancellable_task` the view is never empty.
+`alt::cancellable_task`, an `await_suspend` templated over the promise type never
+gets an empty view.
 
 An empty view is a working view, not an error: it reports no stop requested, its
 token can never be stopped, and `resume_or_abandon` resumes. That is what lets
@@ -175,10 +182,31 @@ And `await_suspend` takes the typed handle, per the previous section. The handle
 stored for the resumption can be the erased one; it is only the accessor that
 needs the promise type.
 
+### Tearing down from inside `await_suspend`
+
+The recipe above abandons from the completion callback, which is the common case.
+An awaiter that instead decides inside `await_suspend` that it cannot start —
+because `stop_requested()` is already true, say — may call `abandon()` there, and
+then has one extra rule to keep: **return from `await_suspend` immediately, in a
+way that does not resume the coroutine.** A `void await_suspend` returns; a
+`bool` one returns `true`. The frame is gone by then, so resuming it, or
+returning `false` and letting the compiler resume it, is a use-after-free. For
+the handle-returning form, return `std::noop_coroutine()` — which is what the
+library's own wrapper does on this path; `detail::cancellation_checked::await_suspend`
+in `include/alt/detail/cancellation.hpp` carries the three cases side by side.
+
+Note that this path is rarely needed. Cancellation is already checked on entry to
+every suspension point, so a chain stopped before the `co_await` is torn down
+before the awaiter's `await_suspend` runs at all —
+`tests/test_cancellation_ref.cpp`'s `AStopBeforeTheAwaitStopsTheOperationStarting`
+pins that.
+
 ## Both forms of the await, and which constraint applies to each
 
-`await_transform` takes the awaitable **by value**, so a prvalue await requires
-the awaiter to be move constructible:
+`await_transform` *deduces* the awaitable, through a forwarding reference, and
+the wrapper it builds stores what it deduced **by value** — the `A m_awaitable`
+member of `detail::cancellation_checked_awaitable<A>`. So a prvalue await makes
+`A` the awaiter's own type, and requires it to be move constructible:
 
 ```cpp
 co_await my_awaiter<my_operation>{/* ... */};   // needs a move constructor
@@ -190,9 +218,10 @@ which is the natural thing for an adapter to register, or a `std::execution`
 operation state, which is immovable by design — issue #10 cites CWG2327 for
 that, and says it is not a bug in alt.
 
-It is dodgeable without placement-new, by awaiting a **named lvalue**. The
-awaitable template parameter then deduces to `my_awaiter&`, and the library's
-wrapper stores a reference rather than a value, so nothing is moved at any point:
+It is dodgeable without placement-new, by awaiting a **named lvalue**. Because
+`await_transform` deduces rather than copies, `A` is then `my_awaiter&`, the
+wrapper's member is a reference rather than a value, and nothing is moved at any
+point:
 
 ```cpp
 my_awaiter<my_operation> awaiter{/* ... */};   // an immovable member is fine here
@@ -267,9 +296,9 @@ UBSan and under ThreadSanitizer on GCC 15.2, and
 two shapes clean on `clang++-19` as well. That shows the
 toolchains agree with the clause. It is not the reason the guarantee holds, and
 must not be read as one: a green sanitizer run is weak evidence for this hazard
-class, as `include/alt/detail/waiter_list.hpp` records at length, where a
-freed-chain access had no instrumented access anywhere on its path and neither
-tool reported it.
+class, as `include/alt/detail/waiter_list.hpp` records at length — there, as that
+class shipped and before its liveness sentinel, a freed-heap access had no
+instrumented access anywhere on its path and neither tool reported it.
 
 ## Lifetime
 

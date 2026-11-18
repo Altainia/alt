@@ -113,5 +113,5 @@ operation was in flight can opt in, by declaring `await_suspend` as a template
 over the promise type and asking
 [`alt::cancellation_ref`](cancellation_ref.md) for a view of the chain it is
 suspending in. Awaiting it as a named lvalue rather than a prvalue is also what
-lifts the move-constructibility requirement `await_transform`'s by-value capture
-otherwise imposes; that page carries both forms.
+lifts the move-constructibility requirement the by-value capture otherwise
+imposes; that page carries both forms.

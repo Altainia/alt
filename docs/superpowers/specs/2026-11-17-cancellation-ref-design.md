@@ -387,11 +387,17 @@ the first draft asked for.
 
 ### The awaiter does not have to be movable, and the page says how
 
-Issue #10's third limit stands and is **not** fixed here: `await_transform` takes the
-awaitable by value, so `co_await my_awaiter{...}` as a prvalue needs a move constructor,
-and a sender's operation state is immovable (CWG2327). Changing that capture is a much
-larger change to the cancellation wrapper than this component, and the issue itself says
-it is not a bug in alt.
+Issue #10's third limit stands and is **not** fixed here: `await_transform` *deduces*
+the awaitable through a forwarding reference (`task.hpp:76-77`,
+`cancellable_task.hpp:239-240`) and the wrapper it builds stores what it deduced by
+value — the capture is `cancellation_checked_awaitable<A>`'s `A m_awaitable` member
+(`detail/cancellation.hpp:254-255`), not a by-value `await_transform` parameter. So
+`co_await my_awaiter{...}` as a prvalue deduces `A = my_awaiter` and needs a move
+constructor, and a sender's operation state is immovable (CWG2327). Changing that
+capture is a much larger change to the cancellation wrapper than this component, and
+the issue itself says it is not a bug in alt. Note that issue #10 words this as
+"`await_transform` takes the awaitable by value"; that is the imprecision, and it
+matters here because the deduction is exactly what makes the lvalue form below work.
 
 It is also dodgeable without placement-new, which is worth documenting because the
 recipe above would otherwise mislead an author whose operation is immovable. Awaiting a
