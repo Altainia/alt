@@ -190,6 +190,11 @@ namespace
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
 	int awaited_result = 0;
 
+	// Set on the line before the co_await, so a test can tell a body that reached its
+	// suspension point from one that never ran.
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
+	bool body_reached_await = false;
+
 	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): deliberately mutable test state
 	completion pending_completion = completion::resume_or_abandon;
 
@@ -252,6 +257,7 @@ namespace
 	alt::cancellable_task cancellable_completing(completion on_completion)
 	{
 		const frame_tracker t{1};
+		body_reached_await   = true;
 		awaited_result       = co_await completing_awaiter{on_completion};
 		body_ran_after_await = true;
 	}
@@ -286,6 +292,7 @@ protected:
 		operation_starts     = 0;
 		completion_resumed   = false;
 		awaited_result       = 0;
+		body_reached_await   = false;
 		body_ran_after_await = false;
 		pending_view         = alt::cancellation_ref{};
 		pending_handle       = {};
@@ -519,13 +526,17 @@ TEST_F(CancellationRefTest, ResumeOrAbandonResumesWhenTheViewIsEmpty)
 
 TEST_F(CancellationRefTest, AStopBeforeTheAwaitStopsTheOperationStarting)
 {
-	// A token that is already stopped stops the chain before the body runs, so the
-	// wrapper's entry check fires first and the awaiter is never asked to start.
+	// A token that is already stopped stops the chain before the body runs. The body
+	// reaching its co_await while the awaiter is never started is what shows the chain
+	// was torn down at the suspension point, by the check that was already there.
 	std::stop_source source;
 	source.request_stop();
 
+	ASSERT_FALSE(body_reached_await);
+
 	auto handle = alt::start(cancellable_completing(completion::resume_or_abandon), {.token = source.get_token()});
 
+	EXPECT_TRUE(body_reached_await);
 	EXPECT_EQ(operation_starts, 0);
 	EXPECT_FALSE(body_ran_after_await);
 	EXPECT_EQ(live_frames, 0);
