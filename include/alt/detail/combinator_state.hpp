@@ -225,9 +225,14 @@ namespace alt::detail
 			// A counted copy makes that survivable. The standard library reference counts
 			// the stop state, so request_stop() runs on state this local keeps alive even
 			// after m_children itself is gone, and nothing in this function touches
-			// *this afterwards. This is detail::stop_forwarder's reason for holding a
-			// std::stop_source rather than a pointer into the promise, and the same trick
-			// at a different level.
+			// *this afterwards.
+			//
+			// detail::stop_forwarder::operator() takes the same counted local for the same
+			// reason, one level up. Do not read that as the reason its MEMBER is a
+			// std::stop_source rather than a pointer into the promise: the member solves
+			// the promise's declaration order and nothing else, and the frame holding the
+			// member is itself what a re-entrant teardown frees. Only the local keeps the
+			// state alive across the walk. Its DELICATE note separates the two.
 			//
 			// Measured rather than argued: without the copy,
 			// WhenAllTest.TheChildrensStopOutlivesABlockTheLastChildFreed reports

@@ -189,11 +189,21 @@ namespace alt
 		 *
 		 * The keepalive local is what makes that safe: it is a counted copy on *this*
 		 * frame's stack, outside the frames the teardown destroys, so the stop state
-		 * survives the nested walk whatever the chain's own owners do. The library
-		 * already pays for this exact hazard twice elsewhere -- see
-		 * detail::combinator_state::cancel and request_children_stop, which take the
-		 * same counted local, and when_all's DELICATE note on the children's stop
-		 * source, which records the identical use-after-free being measured once before.
+		 * survives the nested walk whatever the chain's own owners do.
+		 *
+		 * detail::combinator_state::cancel and request_children_stop take the same
+		 * counted local against the same hazard: there too the owner of the state being
+		 * requested is freed by the very stop it requests, and only a local outside the
+		 * freed object saves it. Read those two as the precedent, not the member above.
+		 *
+		 * when_all's DELICATE note on the children's stop source is a near neighbor
+		 * rather than the same thing, and the difference is worth keeping straight. The
+		 * AddressSanitizer signature it records is the same -- a freed stop state read in
+		 * _M_lock(), reached from stop_forwarder::operator() -- but there the freed state
+		 * is the one an OUTER walk is traversing, dropped by a ~stop_callback releasing
+		 * the last reference mid-walk, and that note says in terms that a counted copy of
+		 * m_children does not save it. A local here protects the state this call requests
+		 * a stop on; it does not protect a state some enclosing walk is reading.
 		 *
 		 * [stopcallback.cons] still carries the other half: a std::stop_callback
 		 * destructor called from within its own callback's invocation on the current
