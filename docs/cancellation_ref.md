@@ -85,9 +85,10 @@ template<typename Promise>
   It is what an awaiter calls in place of `h.resume()`, and `h` must not be
   empty.
 - `get_cancellation_ref(h)` is the only way to obtain a non-empty view. Its one
-  precondition is that `h` is not empty, asserted at
-  `include/alt/cancellation_ref.hpp`'s `"getting a cancellation_ref from an empty
-  coroutine handle"`. What it returns for an erased handle is the next section.
+  precondition is that `h` is not empty, asserted in
+  `include/alt/cancellation_ref.hpp` with
+  `"getting a cancellation_ref from an empty coroutine handle"`.
+  What it returns for an erased handle is the next section.
 
 There is deliberately no access to the chain's root handle or its home scheduler.
 A view can read the stop state and trigger the one teardown the library already
@@ -169,9 +170,10 @@ Three things about that shape are load-bearing.
 `resume_or_abandon` must be the awaiter's **last statement**. Both branches can
 free the frame the awaiter lives in: resuming can run the coroutine to
 completion, and abandoning destroys the chain. Nothing may be read through the
-view, the awaiter, or any other view of the same chain afterwards. The return
-value is only safe to read where the awaiter is independently known to outlive
-the call.
+view, the awaiter, or any other view of the same chain afterwards. The returned
+`bool` itself is fine: it is a value in the caller's own frame, so testing it
+costs nothing and is always safe. It is what the caller then reaches *through*
+that is not.
 
 It must be called **at most once per suspension**, because both branches end that
 suspension. An operation that can complete twice, or that completes and is also
@@ -275,30 +277,71 @@ external-link `std::stop_callback` — while `request_stop()` is still walking t
 stop state's callback list, and destroys the frame that the executing callback
 itself lives in.
 
-This is supported, in this narrow form: **it is safe provided some owner of the
-stop state outlives the call, which the caller of `request_stop()` always is.**
+This is supported, in this narrow form: **it is safe provided the chain's stop
+state retains an owner outside the frames the teardown destroys.**
 
-The basis is **[stopcallback.cons]**. A `std::stop_callback` destructor called
-from within its own callback's invocation on the current thread returns without
-waiting, which covers both the leaf's callback and the chain's external link when
-that is the one mid-invocation. Destroying the source and the token only drop
-references to the stop state; the state itself survives, because the party that
-called `request_stop()` necessarily holds a source that outlives the call. That
-clause is what carries the guarantee, and the proviso above is exactly its reach:
-a teardown that destroyed the *last* owner of the stop state while a request was
-in progress is not covered by it and is not what this says is safe.
+Two separate things have to hold, and they are easy to run together.
 
-`tests/test_cancellation_ref.cpp` exercises both realistic shapes — a stop
-through the chain's own `cancellation_handle`, and a stop through a linked
-`start_options::token`. Both were run and passed under AddressSanitizer with
-UBSan and under ThreadSanitizer on GCC 15.2, and
-`docs/superpowers/specs/2026-11-17-cancellation-ref-design.md` records the same
-two shapes clean on `clang++-19` as well. That shows the
-toolchains agree with the clause. It is not the reason the guarantee holds, and
-must not be read as one: a green sanitizer run is weak evidence for this hazard
-class, as `include/alt/detail/waiter_list.hpp` records at length — there, as that
-class shipped and before its liveness sentinel, a freed-heap access had no
-instrumented access anywhere on its path and neither tool reported it.
+**Destroying the callbacks is allowed.** That part is **[stopcallback.cons]**: a
+`std::stop_callback` destructor called from within its own callback's invocation
+on the current thread returns without waiting, which covers both the leaf's
+callback and the chain's external link when that is the one mid-invocation. The
+clause is correct and is cited correctly here. It is about the *destructor*
+returning, though — it says nothing about the stop state the interrupted
+`request_stop()` is still reading.
+
+**Keeping the stop state alive is a separate question, and the answer depends on
+the shape.** Destroying the promise's `std::stop_source`, the chain's token and
+the external link only drops references; whether the state survives depends on
+whether anything outside the destroyed frames still holds one.
+
+- A **retained `alt::cancellation_handle`** from `alt::start` holds a counted
+  source of the chain's own stop state, in the caller's frame, which the teardown
+  does not touch. That satisfies the proviso directly.
+- A **linked `start_options::token` with the chain's own handle discarded** does
+  not. Every owner of the *chain's* stop state then lives in the frames the
+  teardown destroys: the promise's `m_source`, `m_context.token`, and the
+  `detail::stop_forwarder` inside the external link. The party that called
+  `request_stop()` holds a source for the **external** state, not for the chain's,
+  and the caller of the chain's own nested `request_stop()` is the
+  `stop_forwarder` sitting in the frame being freed.
+
+An earlier version of this page said the proviso was satisfied automatically,
+"which the caller of `request_stop()` always is". That was wrong for exactly the
+second shape above, and the shape is the one this page recommends. It is measured:
+without a keepalive, requesting the stop produces an AddressSanitizer
+heap-use-after-free, a `READ` of the freed stop state in
+`_Stop_state_t::_M_lock()` reached from `detail::stop_forwarder::operator()`.
+
+That shape is nonetheless safe today, because `detail::stop_forwarder::operator()`
+in `include/alt/cancellable_task.hpp` takes a counted copy of the source on its
+own stack — outside the destroyed frames — before requesting the stop, so the
+state survives the nested walk whatever the chain's own owners do. Its DELICATE
+note carries the full reasoning and the two in-repo precedents for the same
+keepalive. Adapter authors do not have to do anything for this; it is named here
+only so the guarantee is not read as a property of the standard clause alone.
+
+`tests/test_cancellation_ref.cpp` exercises three shapes — a stop through the
+chain's own `cancellation_handle`, a stop through a linked `start_options::token`,
+and `ATeardownWithASecondCallbackOnTheChainsTokenIsSafe`, the linked-token shape
+with a second `std::stop_callback` on the chain's token so that libstdc++'s
+callback walk has somewhere left to go after the abandoning one has freed the
+chain. That third one is the instrument for the keepalive: with only the
+abandoning callback registered, `_M_request_stop`'s "last callback" early return
+hides the freed state and the first two shapes pass with or without it. So do not
+read either of the first two as evidence that the proviso holds by itself — they
+are consistent with it being false, which is how the earlier wording survived.
+
+All three were run and passed under AddressSanitizer with UBSan and under
+ThreadSanitizer on GCC 15.2, and
+`docs/superpowers/specs/2026-11-17-cancellation-ref-design.md` records the first
+two clean on `clang++-19` as well. A green sanitizer run is weak evidence for this
+hazard class, as `include/alt/detail/waiter_list.hpp` records at length — there, as
+that class shipped and before its liveness sentinel, a freed-heap access had no
+instrumented access anywhere on its path and neither tool reported it. The
+instrumented access here is `_M_lock()`'s read of the stop state's own word,
+inlined from `<stop_token>`, which is why this one *is* visible once the shape
+reaches it at all — and why the shape, not the tool, was the thing missing.
 
 ## Lifetime
 

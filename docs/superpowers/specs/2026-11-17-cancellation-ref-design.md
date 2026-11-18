@@ -361,29 +361,62 @@ either run from a scheduler post or deliberately resume rather than tear down �
 was no precedent to copy, and it was settled on the standard plus a measurement rather
 than on either alone:
 
-- **[stopcallback.cons]** permits it. A `std::stop_callback` destructor called from
-  within its own callback's invocation on the current thread returns without waiting,
-  which covers both the leaf's callback and `m_external` (itself mid-invocation in the
-  linked-token shape). Destroying `m_source` and `m_context.token` only drops references;
-  the stop state survives because `request_stop()`'s caller necessarily holds a source
-  that outlives the call.
-- **Measured** on GCC 15.2 and `clang++-19`, under AddressSanitizer + UBSan and under
-  ThreadSanitizer, in both realistic shapes: a stop through the chain's own
-  `cancellation_handle`, and a stop through a linked `start_options::token` with the
-  chain's own handle discarded. Clean in all four runs, with the body not running and
-  the stopping party's source still usable afterwards.
+- **[stopcallback.cons]** permits the *destruction*. A `std::stop_callback` destructor
+  called from within its own callback's invocation on the current thread returns without
+  waiting, which covers both the leaf's callback and `m_external` (itself mid-invocation
+  in the linked-token shape). That citation is correct and stands. Destroying `m_source`
+  and `m_context.token` only drops references.
+- **Keeping the stop state alive is a separate question**, and the design originally got
+  it wrong. This clause read: "the stop state survives because `request_stop()`'s
+  caller necessarily holds a source that outlives the call." That is false for the
+  linked-token shape. With an external `start_options::token` and the chain's own
+  `cancellation_handle` discarded, every owner of the *chain's* stop state lives inside
+  the frames the teardown destroys — `m_source`, `m_context.token`, and the
+  `detail::stop_forwarder` inside `m_external`. The caller of the chain's own nested
+  `request_stop()` is that `stop_forwarder`, in the frame being freed; the caller of the
+  outer one holds a source for the **external** state, not for the chain's.
 
-The guarantee is stated in exactly that narrow form on the reference page: safe provided
-some owner of the stop state outlives the call, which the caller of `request_stop()`
-always is. It is **not** stated as "re-entrancy is always fine", because a green
-sanitizer run is weak evidence for this hazard class — a freed-chain access reached only
-through a lock has no instrumented access on its path, which `detail/waiter_list.hpp`
-records this library paying for once already. The standard clause is what carries the
-guarantee; the measurement only shows the two toolchains agree with it.
+  The correct condition is: **the chain's stop state must retain an owner outside the
+  frames the teardown destroys.** A retained `cancellation_handle` from `alt::start`
+  provides that. The linked-token-with-discarded-handle shape does not, and is safe only
+  because `detail::stop_forwarder::operator()` takes a counted copy of the source on its
+  own stack before requesting the stop — a keepalive added for this, precedented by
+  `detail::combinator_state::cancel`/`request_children_stop` and by `when_all`'s
+  DELICATE note on the children's stop source.
+- **What the design-time measurement actually showed.** It was run on GCC 15.2 and
+  `clang++-19`, under AddressSanitizer + UBSan and under ThreadSanitizer, in both
+  realistic shapes: a stop through the chain's own `cancellation_handle`, and a stop
+  through a linked `start_options::token` with the chain's own handle discarded. All four
+  runs were clean, the body did not run, and the stopping party's source was still usable
+  afterwards. All of that is true and was reproduced.
 
-Tests: the two shapes above, under the AddressSanitizer and ThreadSanitizer gates. These
-are the design's thread-crossing cases, replacing the vaguer "something to instrument"
-the first draft asked for.
+  It was *read* as confirming the clause above, and it cannot. Every case it exercised had
+  the abandoning `std::stop_callback` as the **only** registration on the chain's token,
+  and libstdc++'s `_M_request_stop` early-returns on the last callback (`if (__last_cb)
+  return true;`) without touching the state again — so the walk never reads the freed
+  state and the measurement is clean whether the clause holds or not. It therefore never
+  tested the condition the clause turns on. Add one further `std::stop_callback` on the
+  chain's own token and the same shape is a heap-use-after-free: a `READ` in
+  `_Stop_state_t::_M_lock()` reached from `stop_forwarder::operator()`. That second
+  registration only became constructible with this component — before `cancellation_ref`
+  there was no public way for a body to obtain its own chain's token — which is why the
+  gap was both introduced and missed here.
+
+The guarantee on the reference page is stated in the corrected narrow form: safe provided
+the chain's stop state retains an owner outside the frames the teardown destroys. It is
+**not** stated as "re-entrancy is always fine", because a green sanitizer run is weak
+evidence for this hazard class — a freed-chain access reached only through a lock has no
+instrumented access on its path, which `detail/waiter_list.hpp` records this library
+paying for once already. Here the instrumented access does exist (`_M_lock()`'s read of
+the state's own word, inlined from `<stop_token>`), so the tool was never the limitation;
+the *shape* was.
+
+Tests: the two shapes above, plus `ATeardownWithASecondCallbackOnTheChainsTokenIsSafe` —
+the linked-token shape with a second, non-abandoning `std::stop_callback` registered on
+the chain's token so libstdc++'s walk continues past the abandoning one. That third test
+is the instrument for the keepalive; the first two pass with or without it. All under the
+AddressSanitizer and ThreadSanitizer gates. These are the design's thread-crossing cases,
+replacing the vaguer "something to instrument" the first draft asked for.
 
 ### The awaiter does not have to be movable, and the page says how
 
@@ -496,10 +529,17 @@ The rest:
   `ATeardownFromInsideALinkedTokensRequestStopIsSafe`: the two re-entrant shapes the
   guarantee above covers, each asserting the body did not run and the stopping party's
   source is still usable afterwards. These carry the AddressSanitizer and ThreadSanitizer
-  gates for this component.
+  gates for this component. Note that neither one discriminates the guarantee's
+  proviso — see the correction above — which is what
+  `ATeardownWithASecondCallbackOnTheChainsTokenIsSafe` is for.
 - A thread-crossing case on top of those: the operation completes on a `std::jthread`
   while the stop is requested from the test thread, synchronized with a latch rather than
   a sleep, so the resume branch is also instrumented off-thread.
+  `AnOffThreadCompletionResumesSafely` covers the off-thread resume but orders everything
+  with `join()` and never stops the chain, so it is not that case;
+  `AnOffThreadCompletionRacesAStopRequest` is, releasing both sides through a
+  `std::latch` and asserting the disjunction (frames gone either way, body ran iff
+  `resume_or_abandon` resumed) rather than a fixed winner.
 - Death tests, in the suite's house pattern (`NDEBUG` and ThreadSanitizer skip guards, a
   scoped `"threadsafe"` style, `TEST(CancellationRefDeathTest, ...)`): `abandon()` on an
   empty view, matching `"abandoning an empty alt::cancellation_ref"`, and
