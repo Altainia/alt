@@ -5,7 +5,7 @@ A generic C++23 utility library. Namespace: `alt`.
 ## Requirements
 
 - CMake 3.25 or later
-- GCC 13+ or Clang 19+
+- GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026)
 
 ## Build
 
@@ -33,6 +33,23 @@ Available presets:
 > **MSan note:** MemorySanitizer requires a fully instrumented C++ standard library.
 > The `debug-msan` preset is provided for use with a custom MSan-instrumented
 > libc++ build. It will not work correctly with the system libstdc++.
+
+### Windows (MSVC)
+
+The same presets work on Windows. CMake's default generator there is the newest
+installed Visual Studio, and no Developer Command Prompt is needed:
+
+```powershell
+cmake --preset debug; cmake --build --preset debug
+ctest --preset debug --output-on-failure
+```
+
+`debug`, `release`, `release-tests` and `debug-asan` are supported with MSVC. MSVC has
+AddressSanitizer but no UndefinedBehaviorSanitizer, so `debug-asan` runs ASan alone
+there. `debug-tsan` stops at configure with an error naming the reason, and
+`debug-msan` and `debug-coverage` are not MSVC presets: they select Clang and GCC
+themselves. The build copies the ASan runtime DLL next to the test
+executable, so the tests run from any shell.
 
 ### Manual build
 
@@ -64,7 +81,8 @@ ctest --test-dir build --output-on-failure
 
 ### Sanitizers
 
-Run the test suite under AddressSanitizer and UndefinedBehaviorSanitizer:
+Run the test suite under AddressSanitizer and UndefinedBehaviorSanitizer (AddressSanitizer
+alone with MSVC):
 
 ```bash
 cmake --preset debug-asan && cmake --build --preset debug-asan

@@ -163,53 +163,59 @@ namespace alt
 		/**
 		 * @brief Forwards an external stop request into the task's own source.
 		 *
-		 * DELICATE. Two separate lifetime problems meet here, and the member and the
-		 * local each solve one of them.
+		 * Holds a copy of the source, not a pointer to the promise's member. The
+		 * copy shares the same reference-counted stop state, so requesting a stop
+		 * on it is equivalent, and it lives inside the std::stop_callback that
+		 * invokes it. Since that callback's destructor blocks until an invocation
+		 * running on ANOTHER thread returns, a pointer here would instead make
+		 * correctness depend on the promise's member declaration order, which nothing
+		 * in the language checks.
 		 *
-		 * The member is a copy of the source, not a pointer to the promise's member.
-		 * The copy shares the same reference-counted stop state, so requesting a stop
-		 * on it is equivalent, and it lives inside the std::stop_callback that invokes
-		 * it rather than in the promise. A pointer here would instead make correctness
-		 * depend on the promise's member declaration order, which nothing in the
-		 * language checks.
+		 * DELICATE. The stop is requested on a local copy, not on the member. A
+		 * destructor on the invoking thread itself does not block, and this call
+		 * reaches one: the stop cancels the task's wait, which tears the frame down on
+		 * this thread, inside this call, destroying the std::stop_callback that holds
+		 * this forwarder, its member source with it. When that member was the last
+		 * reference to the task's stop state, the state is freed while request_stop()
+		 * is still walking its callback list. The local keeps a counted reference on
+		 * this stack frame, so the state outlives the walk. This is the same trick as
+		 * detail::combinator_state::cancel()'s, for the same reason.
 		 *
-		 * That is not sufficient on its own, which an earlier version of this comment
-		 * got wrong: the member is in the coroutine frame, and this callback's body can
-		 * reach code that destroys that frame. An awaiter that holds an
-		 * alt::cancellation_ref may register its own std::stop_callback on the chain's
-		 * token and abandon the chain from it, which destroys the root frame -- and with
-		 * it the promise's m_source, m_context.token and the m_external link holding
-		 * *this -- while the inner request_stop() below is still walking the chain's
-		 * callback list. If nothing outside those frames owns the chain's stop state,
-		 * the walk then continues on freed memory: measured as an AddressSanitizer
-		 * heap-use-after-free in _Stop_state_t::_M_lock() reached from here, in the shape
-		 * where the chain is linked to an external token, its own cancellation_handle is
-		 * discarded, and a second std::stop_callback is registered on the chain's token
-		 * so libstdc++'s walk has somewhere left to go after the abandoning one returns.
+		 * Measured: without the copy, every cancellation test that destroys a parked
+		 * frame hangs on MSVC, spinning in the stop state's callback-list lock over
+		 * memory the debug heap has already filled with 0xDD. MSVC's request_stop()
+		 * relocks the list after every callback, including the last; libstdc++ skips
+		 * that relock after the last one, which is why the defect never showed there,
+		 * AddressSanitizer included.
 		 *
-		 * The keepalive local is what makes that safe: it is a counted copy on *this*
-		 * frame's stack, outside the frames the teardown destroys, so the stop state
-		 * survives the nested walk whatever the chain's own owners do.
+		 * One shape does reach the defect on libstdc++, and tests/test_cancellation_ref.cpp
+		 * pins it: an awaiter holding an alt::cancellation_ref may register its own
+		 * std::stop_callback on the chain's token and abandon the chain from it, which
+		 * destroys the root frame -- and with it the promise's m_source, m_context.token and
+		 * the m_external link holding *this -- while the request_stop() below is still
+		 * walking the chain's callback list. When the chain is linked to an external token,
+		 * its own cancellation_handle is discarded, and a SECOND std::stop_callback is
+		 * registered on the chain's token, libstdc++'s walk still has somewhere to go after
+		 * the abandoning callback returns, so the relock it skips after the LAST callback is
+		 * not the one that matters here. Measured: without the local, that shape reports an
+		 * AddressSanitizer heap-use-after-free in _Stop_state_t::_M_lock() reached from this
+		 * function. It is the one shape in which Linux sees this defect at all, which is why
+		 * the paragraph above and this one are not in conflict.
 		 *
-		 * detail::combinator_state::cancel and request_children_stop take the same
-		 * counted local against the same hazard: there too the owner of the state being
-		 * requested is freed by the very stop it requests, and only a local outside the
-		 * freed object saves it. Read those two as the precedent, not the member above.
-		 *
-		 * when_all's DELICATE note on the children's stop source is a near neighbor
-		 * rather than the same thing, and the difference is worth keeping straight. The
+		 * when_all's DELICATE note on the children's stop source is a near neighbor rather
+		 * than the same thing, and the difference is worth keeping straight. The
 		 * AddressSanitizer signature it records is the same -- a freed stop state read in
-		 * _M_lock(), reached from stop_forwarder::operator() -- but there the freed state
-		 * is the one an OUTER walk is traversing, dropped by a ~stop_callback releasing
-		 * the last reference mid-walk, and that note says in terms that a counted copy of
-		 * m_children does not save it. A local here protects the state this call requests
-		 * a stop on; it does not protect a state some enclosing walk is reading.
+		 * _M_lock(), reached from stop_forwarder::operator() -- but there the freed state is
+		 * the one an OUTER walk is traversing, dropped by a ~stop_callback releasing the last
+		 * reference mid-walk, and that note says in terms that a counted copy of m_children
+		 * does not save it. A local here protects the state this call requests a stop on; it
+		 * does not protect a state some enclosing walk is reading.
 		 *
-		 * [stopcallback.cons] still carries the other half: a std::stop_callback
-		 * destructor called from within its own callback's invocation on the current
-		 * thread returns without waiting, so destroying the executing m_external link is
-		 * allowed. That clause says the destructor may run; it says nothing about the
-		 * state the walk is still reading, which is what the keepalive is for.
+		 * [stopcallback.cons] is where the non-blocking destructor above is specified: a
+		 * std::stop_callback destructor called from within its own callback's invocation on
+		 * the current thread returns without waiting, so destroying the executing m_external
+		 * link is allowed. That clause says the destructor may run; it says nothing about the
+		 * state the walk is still reading, which is what the local is for.
 		 */
 		struct stop_forwarder
 		{
@@ -217,9 +223,10 @@ namespace alt
 
 			void operator()() const noexcept
 			{
-				// Must outlive the call below: see the DELICATE note above.
-				const std::stop_source keepalive = target;
-				keepalive.request_stop();
+				// Not const: the standard declares request_stop() non-const, as MSVC's
+				// library does; libstdc++ alone marks it const.
+				std::stop_source keep_alive = target;
+				keep_alive.request_stop();
 			}
 		};
 

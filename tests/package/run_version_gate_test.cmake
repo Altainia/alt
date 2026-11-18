@@ -18,8 +18,17 @@ set(prefix "${SCRATCH}/prefix")
 file(REMOVE_RECURSE "${SCRATCH}")
 file(MAKE_DIRECTORY "${prefix}")
 
+# A multi-config generator (Visual Studio) has no single build type to install, and
+# cmake --install falls back to Release there, which ctest -C Debug never built.
+# ALT_BUILD_CONFIG is the configuration ctest is testing; under a single-config
+# generator it is the build type, and empty when that is unset.
+set(_config_args "")
+if(ALT_BUILD_CONFIG)
+    set(_config_args --config "${ALT_BUILD_CONFIG}")
+endif()
+
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" --install "${ALT_BUILD_DIR}" --prefix "${prefix}"
+    COMMAND "${CMAKE_COMMAND}" --install "${ALT_BUILD_DIR}" --prefix "${prefix}" ${_config_args}
     RESULT_VARIABLE _install_rc
     OUTPUT_VARIABLE _install_out
     ERROR_VARIABLE _install_out

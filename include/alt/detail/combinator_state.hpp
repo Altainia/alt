@@ -253,7 +253,10 @@ namespace alt::detail
 			// there. The difference is what the freed memory is touched BY, not how
 			// exotic the race is; see waiter_list's class notes before generalizing
 			// either way.
-			const std::stop_source children_source = m_children;
+			//
+			// Not const: the standard declares request_stop() non-const. libstdc++ marks
+			// it const, MSVC's library does not.
+			std::stop_source children_source = m_children;
 			children_source.request_stop();
 		}
 
@@ -269,7 +272,7 @@ namespace alt::detail
 		{
 			// The counted copy cancel() holds, for the reason its DELICATE note gives.
 			// The one difference: this never touches m_cancelled.
-			const std::stop_source children_source = m_children;
+			std::stop_source children_source = m_children;
 			children_source.request_stop();
 		}
 

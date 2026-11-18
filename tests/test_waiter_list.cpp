@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <exception>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -64,6 +63,61 @@ namespace
 	// The two-party rendezvous both contended tests below are built around lives in
 	// coroutine_test_support.hpp, because alt::async_event's tests need the same one.
 	using alt_test::rendezvous;
+
+	/**
+	 * @brief Holds one object in storage that outlives it, so the death tests can reach
+	 *        an object that has been destroyed but whose bytes have not been handed back.
+	 *
+	 * Deliberately not std::optional, which did this job until MSVC: its standard library
+	 * annotates std::optional for AddressSanitizer and poisons the storage of an empty
+	 * one, so under MSVC's ASan a call through a pointer into a reset optional is
+	 * reported as use-after-poison before the sentinel's assert can run. Raw aligned
+	 * storage with std::destroy_at ends the object's lifetime the same way, leaves the
+	 * sentinel's dead_pattern in place, and carries no library's annotations.
+	 *
+	 * get() works before and after destroy(), which is the point: a stop callback that
+	 * outlived its block holds exactly such a pointer. It also sidesteps the libstdc++
+	 * hazard the optional had, where _GLIBCXX_ASSERTIONS made operator-> on a reset
+	 * optional abort inside <optional> before the call under test was reached.
+	 */
+	template<typename ValueType>
+	class destroyable_in_place
+	{
+	public:
+		destroyable_in_place(): m_object{std::construct_at(reinterpret_cast<ValueType*>(m_storage.data()))}
+		{}
+
+		~destroyable_in_place()
+		{
+			if(m_alive)
+			{
+				std::destroy_at(m_object);
+			}
+		}
+
+		destroyable_in_place(const destroyable_in_place&)            = delete;
+		destroyable_in_place& operator=(const destroyable_in_place&) = delete;
+		destroyable_in_place(destroyable_in_place&&)                 = delete;
+		destroyable_in_place& operator=(destroyable_in_place&&)      = delete;
+
+		/** The object's address, valid to hold, though not to use, after destroy(). */
+		[[nodiscard]] ValueType* get() const noexcept
+		{
+			return m_object;
+		}
+
+		/** Ends the object's lifetime and leaves its storage intact. */
+		void destroy() noexcept
+		{
+			std::destroy_at(m_object);
+			m_alive = false;
+		}
+
+	private:
+		alignas(ValueType) std::array<std::byte, sizeof(ValueType)> m_storage{};
+		ValueType* m_object;
+		bool       m_alive = true;
+	};
 
 	/**
 	 * A real, self-destroying coroutine. Its final_suspend never suspends, so the
@@ -679,7 +733,7 @@ TEST(WaiterList, DestroyingTheListWithLinkedNodesLeavesNoneLinked)
 //   would change the class layout between translation units built with different flags
 //   -- but nothing reads it. All three death tests skip there and say so.
 // - The freed-and-returned window, as opposed to the destroyed-but-not-yet-freed one.
-//   std::optional::reset() is what makes the latter reachable: it ends the list's
+//   destroyable_in_place::destroy() is what makes the latter reachable: it ends the list's
 //   lifetime and leaves its storage intact, so the sentinel's bytes still read
 //   dead_pattern. Once the storage is handed back and reused it reads neither pattern,
 //   which is why waiter_list::alive() tests positively for alive_pattern; what no test
@@ -707,20 +761,15 @@ TEST(WaiterListDeathTest, ClaimingAWaiterOnADestroyedListAborts)
 	// see scoped_death_test_style.
 	const scoped_death_test_style style{"threadsafe"};
 
-	std::optional<waiter_list> list{std::in_place};
-	waiter_node                node;
+	destroyable_in_place<waiter_list> list;
+	waiter_node                       node;
 
-	// Taken while the optional is still engaged, which is the whole reason the pointer
-	// is named here rather than the call being written as list->claim(node).
-	// _GLIBCXX_ASSERTIONS is on by default on this distribution's GCC and its Clang
-	// alike, so std::optional::operator-> on a reset optional aborts inside
-	// <optional> -- measured, with the message "Assertion 'this->_M_is_engaged()'
-	// failed" -- and the call under test is never reached. Holding the address past
-	// the reset is also the more faithful model: a stop callback holds a pointer into
-	// the block, not an optional.
-	waiter_list* const storage = &*list;
+	// Holding the address past the destruction is the faithful model: a stop callback
+	// holds a pointer into the block. See destroyable_in_place for why the storage is
+	// not a std::optional.
+	waiter_list* const storage = list.get();
 
-	list.reset();
+	list.destroy();
 
 	// Calling through that pointer is formally undefined, and deliberately so: it is
 	// the only way to name the destroyed object's storage, which is exactly what a
@@ -743,7 +792,7 @@ TEST(WaiterListDeathTest, LinkingAWaiterOnADestroyedListAborts)
 
 	const scoped_death_test_style style{"threadsafe"};
 
-	std::optional<waiter_list> list{std::in_place};
+	destroyable_in_place<waiter_list> list;
 
 	// Given a resumable handle so that the liveness assert is the only precondition this
 	// call can trip. link's older asserts carry their own messages, and the regex below
@@ -751,11 +800,9 @@ TEST(WaiterListDeathTest, LinkingAWaiterOnADestroyedListAborts)
 	// happens to come first.
 	waiter_node node{.handle = std::noop_coroutine()};
 
-	// See the test above for why the storage is named before the reset rather than
-	// reached through the optional after it.
-	waiter_list* const storage = &*list;
+	waiter_list* const storage = list.get();
 
-	list.reset();
+	list.destroy();
 
 	EXPECT_DEATH(static_cast<void>(storage->link(node)), "linking an alt waiter on a destroyed list");
 }
@@ -775,7 +822,7 @@ TEST(WaiterListDeathTest, AClaimThatWouldLoseTheElectionOnADestroyedListAborts)
 
 	const scoped_death_test_style style{"threadsafe"};
 
-	std::optional<waiter_list> list{std::in_place};
+	destroyable_in_place<waiter_list> list;
 
 	// Already won by another party, so try_claim's compare-exchange from linked fails
 	// and this claim would return lost having touched nothing at all: not the mutex,
@@ -795,11 +842,9 @@ TEST(WaiterListDeathTest, AClaimThatWouldLoseTheElectionOnADestroyedListAborts)
 	waiter_node node;
 	node.state.store(waiter_state::done, std::memory_order_relaxed);
 
-	// See ClaimingAWaiterOnADestroyedListAborts for why the storage is named before the
-	// reset rather than reached through the optional after it.
-	waiter_list* const storage = &*list;
+	waiter_list* const storage = list.get();
 
-	list.reset();
+	list.destroy();
 
 	EXPECT_DEATH(static_cast<void>(storage->claim(node)), "claiming an alt waiter on a destroyed list");
 }
