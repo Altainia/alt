@@ -280,6 +280,18 @@ itself lives in.
 This is supported, in this narrow form: **it is safe provided the chain's stop
 state retains an owner outside the frames the teardown destroys.**
 
+The same requirement applies, in principle, to *any* stop state whose
+`request_stop()` walk is on the stack when the teardown runs — not only the
+chain's. A state whose last owner sat inside the frames the teardown destroys
+would be freed mid-walk in exactly the same way, and the counted copy in
+`detail::stop_forwarder::operator()` described below would not help, because it
+holds an owner of the chain's state alone. No such state is constructible through
+today's public API: a `start_options::token` has to be supplied before the chain's
+frames exist, so its source necessarily outlives them, and nothing else hands a
+foreign stop state into a chain. It is stated here so that the proviso is on
+record as a property of the walk rather than of the chain, in case a later API
+makes the other case reachable.
+
 Two separate things have to hold, and they are easy to run together.
 
 **Destroying the callbacks is allowed.** That part is **[stopcallback.cons]**: a

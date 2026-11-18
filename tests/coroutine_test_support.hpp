@@ -19,7 +19,15 @@ namespace alt_test
 
 	/**
 	 * Tags of destroyed frame_tracker instances, in destruction order.
-	 * Single-threaded tests only: a vector shared across threads would need a mutex.
+	 *
+	 * Unsynchronized on purpose, and the contract is one writer at a time rather than
+	 * one thread overall: a test may let a worker thread run the destructors, as
+	 * CancellationRefTest.AnOffThreadCompletionRacesAStopRequest does, provided nothing
+	 * else appends concurrently and a join orders the worker's writes before the test
+	 * thread reads. A test whose teardown can run on two threads at once -- an awaiter
+	 * that registers a std::stop_callback on the chain's token, say, so that one branch
+	 * tears down on the requesting thread while the other tears down on the completing
+	 * one -- would race here, and needs a mutex added before it can use this.
 	 */
 	inline std::vector<int> destruction_order;
 
