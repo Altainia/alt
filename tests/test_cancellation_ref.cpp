@@ -757,9 +757,17 @@ TEST_F(CancellationRefTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
 	//     1: the same missing keepalive also takes out ten when_all cases, nine when_any
 	//     cases, ATeardownFromInsideALinkedTokensRequestStopIsSafe and a task_group
 	//     case, because MSVC relocks after every callback and so needs the state alive
-	//     in shapes where libstdc++'s early return does not. MSVC's release-tests
-	//     preset, which has no sanitizer, passed the whole suite -- a use-after-free
-	//     that reads mapped memory need not fail anything.
+	//     in shapes where libstdc++'s early return does not.
+	//   - MSVC 14.51, plain debug, no sanitizer: 28 of 837 fail, and every one of them
+	//     as a ctest TIMEOUT rather than a crash, this case among them. That is the hang
+	//     CLAUDE.md's MSVC section describes, measured: the walk spins in the callback
+	//     list's lock over freed memory instead of faulting. It is also what the 60s
+	//     TIMEOUT in tests/CMakeLists.txt buys -- 28 named failures in about 70 minutes
+	//     instead of one silent stall.
+	//   - MSVC 14.51, release-tests, no sanitizer: the whole suite passed. A
+	//     use-after-free that reads mapped memory need not fail anything, which is why
+	//     the sanitizer presets are where this case earns its keep even though it does
+	//     not depend on them.
 	//
 	// The local is not this component's: main's f3f0a8b added it while porting to MSVC,
 	// where request_stop() relocks the callback list after the LAST callback too and so
