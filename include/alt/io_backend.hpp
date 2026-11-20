@@ -147,7 +147,10 @@ namespace alt
 	 *
 	 * A read or write moves at most `min(size, buffer.size())` bytes: a `size` larger
 	 * than the buffer is clamped, and the short transfer is reported as success, which
-	 * is indistinguishable from a real short read. A layer that must refuse that
+	 * is indistinguishable from a real short read. The Windows arm also clamps to
+	 * `std::numeric_limits<DWORD>::max()` bytes, because ReadFile and WriteFile take a
+	 * 32-bit count, so a transfer above that is short in the same way whatever the
+	 * buffer holds. A layer that must refuse that
 	 * request has to do so before submitting.
 	 */
 	struct io_request

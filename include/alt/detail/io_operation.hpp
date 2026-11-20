@@ -488,7 +488,9 @@ namespace alt::detail
 	 * with the callable destroyed, so its captures die on the worker in either case rather
 	 * than on whichever thread happens to drop the block's last reference. That is a
 	 * behavior a consumer relies on: a job whose captures own a temporary file removes it
-	 * when the job is dropped unrun.
+	 * when the job is dropped unrun, once it has been submitted. A job cancelled while
+	 * still parked on a backpressure slot has not been submitted, and its callable is
+	 * destroyed on the thread that tears the operation down instead.
 	 */
 	class io_invocable
 	{

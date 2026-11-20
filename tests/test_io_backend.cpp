@@ -462,7 +462,6 @@ namespace
 		}
 
 	private:
-		// The pool is declared first so it is destroyed last: the backend borrows it.
 		// m_dir is declared before the pool so it is removed after the pool has joined.
 		struct scratch_dir
 		{

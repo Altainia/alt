@@ -112,6 +112,17 @@ namespace alt
 		 *               mean a double close, which can close a recycled descriptor.
 		 *               invalid_native_handle is allowed and yields a file on which
 		 *               every operation reports std::errc::bad_file_descriptor.
+		 *               Any other handle must be one on which a transfer blocks until
+		 *               it is done, and that is the caller's responsibility:
+		 *               a Windows HANDLE must NOT have been opened with
+		 *               FILE_FLAG_OVERLAPPED, because the transfer arm passes an
+		 *               OVERLAPPED only to carry the offset and treats
+		 *               ERROR_IO_PENDING as a failure, after which the operation
+		 *               completes and releases its buffer while the kernel may still
+		 *               be writing into it; a POSIX descriptor must NOT be in
+		 *               O_NONBLOCK mode (a FIFO or character device opened that way),
+		 *               on which every read_at fails with EAGAIN. Handles opened by
+		 *               file_io::open satisfy both.
 		 */
 		[[nodiscard]] static async_file adopt(const file_io& io, native_handle handle);
 

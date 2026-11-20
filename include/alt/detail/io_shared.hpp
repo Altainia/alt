@@ -63,8 +63,9 @@ namespace alt::detail
 		 *                      where every permit is released. Must not be empty, and must
 		 *                      outlive every operation; alt::file_io::create is where that
 		 *                      is checked rather than asserted on an I/O thread.
-		 * @param pool          The borrowed pool the thread-pool arm runs on, or null when
-		 *                      the service has no pool arm (a test backend). Not owned.
+		 * @param pool          The borrowed pool passed to alt::file_io::create. Not owned.
+		 *                      Stored and not read by anything in this release; see
+		 *                      `workers`.
 		 * @param max_in_flight How many operations may be at the backend at once. Must be
 		 *                      positive: a zero bound would park the first operation on a
 		 *                      permit that can never exist.
@@ -111,11 +112,11 @@ namespace alt::detail
 		const scheduler_ref completion;
 
 		/**
-		 * The borrowed pool the thread-pool arm runs on, or null.
+		 * The pool alt::file_io::create was given, or null. Not owned.
 		 *
-		 * Held here rather than inside the backend because the escape hatch and the
-		 * operations no kernel interface covers (a directory listing, an arbitrary
-		 * callable) run on a pool on every platform, whichever backend is in front of it.
+		 * Reserved for a later phase; unused in this release. Nothing reads it: the
+		 * thread-pool backend holds the pool reference it needs, and an operation reaches
+		 * a pool through the backend's submit(), not through this member.
 		 */
 		thread_pool* const workers;
 
@@ -129,11 +130,12 @@ namespace alt::detail
 		std::atomic<std::size_t> at_backend{0};
 
 		/**
-		 * False once the service has begun shutting down and will accept no more
-		 * submissions.
+		 * False once the service has begun shutting down.
 		 *
-		 * Submitting after that is a precondition violation rather than a reportable
-		 * error: the service must outlive every operation started on it, which is the
+		 * Nothing refuses a submission on this flag: it is consulted only by an assert
+		 * in the submission path, so in a build with NDEBUG it is stored and never read.
+		 * Submitting after shutdown has begun is a precondition violation rather than a
+		 * reportable error: the service must outlive every operation started on it, which is the
 		 * same contract alt::thread_pool and alt::scheduler_ref already state.
 		 */
 		std::atomic<bool> accepting{true};

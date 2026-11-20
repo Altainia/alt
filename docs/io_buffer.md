@@ -57,14 +57,15 @@ namespace alt
 ## Three factories, three ownership stories
 
 All three fit one shared pointer plus one span, so there is no variant and no second
-ownership member.
+owner. (The class also carries a flag recording whether a factory produced it, which is
+what `operator bool` reports; it takes no part in ownership.)
 
 - `allocate(size)` owns fresh, zero-initialized storage. Failure to allocate is
   reported as `std::errc::not_enough_memory` rather than thrown, so a caller sizing a
   buffer from untrusted input can handle it.
 - `borrow(bytes, keepalive)` views storage someone else owns and holds that owner's
-  keepalive for as long as any copy lives. The keepalive is stored by aliasing, so there
-  is no extra control block. The buffer does not check that the keepalive really keeps
+  keepalive for as long as any copy lives. The keepalive is stored as given, so it
+  costs no extra control block. The buffer does not check that the keepalive really keeps
   `bytes` valid. A null keepalive makes this behave like `borrow_unsafe`.
 - `borrow_unsafe(bytes)` views storage with nothing holding it. The caller promises the
   bytes outlive every operation that uses the buffer, **including one the caller has

@@ -68,7 +68,7 @@ is explicit: `alt::open_flags{open_flag::read} | alt::open_flags{open_flag::crea
 There is no seek and no current position. Every transfer names its offset, so two
 `read_at`/`write_at` calls on one file share no state and may be outstanding together.
 That is what makes concurrent use supported rather than merely tolerated. A file opened
-with `open_flag::append` ignores the offset of a write on POSIX.
+with `open_flag::append` ignores the offset of a write.
 
 ## What an operation owns
 
@@ -147,6 +147,18 @@ expressible through `open_flag`. The caller must not close it afterwards or adop
 same one twice: two owners mean a double close, which can close a recycled descriptor.
 `invalid_native_handle` is allowed and yields a file on which every operation reports
 `bad_file_descriptor`.
+
+Any other handle must be one on which a transfer **blocks until it is done**, which is
+the caller's responsibility to arrange:
+
+- A Windows `HANDLE` must **not** have been opened with `FILE_FLAG_OVERLAPPED`. The
+  transfer arm passes an `OVERLAPPED` only to carry the offset and treats
+  `ERROR_IO_PENDING` as a failure, after which the operation completes and releases its
+  buffer while the kernel may still be writing into it.
+- A POSIX descriptor must **not** be in `O_NONBLOCK` mode, as a FIFO or character device
+  opened that way would be: every `read_at` on it fails with `EAGAIN`.
+
+Handles opened by `file_io::open` satisfy both.
 
 ## What a cancelled operation can still do
 

@@ -20,7 +20,9 @@ namespace alt
 	 * copy and the memory lives until the last holder, kernel-facing or not, lets go.
 	 *
 	 * Three factories cover three ownership stories, and all three fit one shared
-	 * pointer plus one span, so there is no variant and no second ownership member:
+	 * pointer plus one span, so there is no variant and no second owner. (The class
+	 * also carries a flag recording whether a factory produced it, which is what
+	 * operator bool reports; it takes no part in ownership.)
 	 *
 	 *  - allocate() owns fresh storage.
 	 *  - borrow() views storage someone else owns, and holds that owner's keepalive
@@ -105,7 +107,7 @@ namespace alt
 		/**
 		 * @brief Views storage owned elsewhere, holding the owner's keepalive.
 		 *
-		 * The keepalive is stored (by aliasing, so no extra control block) and released
+		 * The keepalive is stored as given, so it costs no extra control block, and released
 		 * when the last copy of this buffer dies. It should own, or otherwise keep
 		 * alive, the memory behind @p bytes. The buffer does not check that it does.
 		 *

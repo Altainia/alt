@@ -16,9 +16,12 @@ namespace alt
 	/**
 	 * @brief What a path or handle refers to.
 	 *
-	 * `unknown` is a real answer, not an error: `d_type` is `DT_UNKNOWN` on several
-	 * filesystems, and a directory listing reports it rather than paying a hidden stat
-	 * per entry. A caller that must know stats the entry.
+	 * `unknown` is a real answer, not an error: a directory listing reports it for an
+	 * entry whose status could not be determined, for example because the entry was
+	 * removed while the listing ran, instead of failing the whole listing. The listing
+	 * asks for each entry's own status (symlink_status), which resolves an entry whose
+	 * `d_type` is `DT_UNKNOWN` to its real type, so that case is not what produces it.
+	 * A caller that must know stats the entry.
 	 */
 	enum class file_kind : std::uint8_t
 	{
@@ -49,9 +52,12 @@ namespace alt
 	 * @brief What stat reports: size, modification time, kind and identity.
 	 *
 	 * `size` is the logical size in bytes, not the space allocated on disk. `kind` is
-	 * NEVER file_kind::symlink from either stat operation on either platform, because
-	 * both follow links and describe the target; a dangling link is an error, not a
-	 * `symlink`. A directory LISTING is the one place a link is reported as itself,
+	 * never file_kind::symlink from stat_path on either platform, because it follows
+	 * links and describes the target; a dangling link is an error, not a `symlink`.
+	 * stat_handle describes whatever the handle refers to, and for an adopted handle alt
+	 * does not control how it was opened: the Windows arm reports `symlink` for any
+	 * handle whose attributes carry the reparse-point flag, which a handle opened with
+	 * `FILE_FLAG_OPEN_REPARSE_POINT` can. A directory LISTING is the one place a link is reported as itself,
 	 * because it asks about the entry rather than what the entry points at.
 	 */
 	struct file_status
@@ -84,7 +90,7 @@ namespace alt
 		create        = 1U << 2, ///< Create the file if it does not exist.
 		exclusive     = 1U << 3, ///< With create: fail if it exists.
 		truncate      = 1U << 4, ///< Discard existing contents.
-		append        = 1U << 5, ///< Writes go to the end. Positional writes ignore their offset on POSIX.
+		append        = 1U << 5, ///< Writes go to the end. Positional writes ignore their offset.
 		close_on_exec = 1U << 6, ///< Do not leak the descriptor into child processes.
 	};
 
