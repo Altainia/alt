@@ -93,7 +93,14 @@ namespace alt::detail
 		 */
 		async_semaphore slots;
 
-		/** The seam. Not owned, and fixed at construction; see the constructor. */
+		/**
+		 * The seam. Not owned, and fixed at construction; see the constructor.
+		 *
+		 * A RESUMPTION MUST NEVER TOUCH THIS. alt::file_io may own the backend this points
+		 * at and destroys it when ~file_io finishes, which can be before a queued
+		 * resumption runs. Only the submission and cancel paths, which the destructor's
+		 * wait for quiescence orders ahead of that destruction, may dereference it.
+		 */
 		io_backend* const backend;
 
 		/** Where resumptions and permit releases happen. Not owned; fixed at construction. */

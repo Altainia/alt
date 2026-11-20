@@ -109,8 +109,8 @@ namespace
 			const std::shared_ptr<op_record> first  = std::make_shared<op_record>();
 			const std::shared_ptr<op_record> second = std::make_shared<op_record>();
 
-			const alt::cancellation_handle chain_a = alt::start(awaiting_chain(io->shared_state(), read_request(buffer), first));
-			const alt::cancellation_handle chain_b = alt::start(awaiting_chain(io->shared_state(), read_request(buffer), second));
+			const alt::cancellation_handle chain_a = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), first));
+			const alt::cancellation_handle chain_b = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), second));
 
 			// Destroyed at the end of this scope with the second operation still parked: the violation.
 		}
@@ -154,6 +154,22 @@ TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 	const auto conjured = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::manual});
 	ASSERT_FALSE(conjured.has_value());
 	EXPECT_EQ(conjured.error(), std::errc::invalid_argument);
+}
+
+TEST(FileIoTest, CreateWithABackendOverloadRejectsAMismatchingOptionsBackend)
+{
+	auto                   created = alt::thread_pool::create(1);
+	alt::thread_pool&      pool    = pool_of(created);
+	alt::manual_scheduler  home;
+	alt::manual_io_backend manual;
+
+	const auto mismatched = alt::file_io::create(pool, alt::scheduler_ref{home}, manual, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
+	ASSERT_FALSE(mismatched.has_value());
+	EXPECT_EQ(mismatched.error(), std::errc::invalid_argument);
+
+	const auto agreeing = alt::file_io::create(pool, alt::scheduler_ref{home}, manual, alt::file_io_options{.backend = alt::io_backend_kind::manual});
+	ASSERT_TRUE(agreeing.has_value());
+	EXPECT_EQ(agreeing->backend(), alt::io_backend_kind::manual);
 }
 
 TEST(FileIoTest, CreateRejectsAZeroMaxInFlight)
@@ -209,8 +225,8 @@ TEST(FileIoTest, TheDestructorReturnsOnceTheBackendIsQuietEvenWithResumptionsQue
 		const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend);
 		ASSERT_TRUE(io.has_value());
 
-		const alt::cancellation_handle chain_a = alt::start(awaiting_chain(io->shared_state(), read_request(buffer), finished));
-		const alt::cancellation_handle chain_b = alt::start(awaiting_chain(io->shared_state(), read_request(buffer), straggler));
+		const alt::cancellation_handle chain_a = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), finished));
+		const alt::cancellation_handle chain_b = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), straggler));
 		ASSERT_EQ(backend.pending(), 2U);
 
 		// One completion lands now, so its resumption is queued on a scheduler nobody
@@ -227,7 +243,10 @@ TEST(FileIoTest, TheDestructorReturnsOnceTheBackendIsQuietEvenWithResumptionsQue
 	}
 
 	// Only reachable once the destructor returned, and the backend had to be quiet for
-	// that: operation 1 is gone from it.
+	// that: operation 1 is gone from it. The ordering rests on a 20 ms sleep after
+	// `destroying` is stored, which is before the destructor has actually begun, so under
+	// extreme scheduling delay a destructor that did NOT wait could still pass here. The
+	// positive path is deterministic; the mutation result is weaker evidence than it looks.
 	EXPECT_EQ(backend.pending(), 0U);
 
 	// And the resumptions are still waiting, unrun, with nobody having pumped them.
@@ -256,7 +275,7 @@ TEST(FileIoTest, AQueuedResumptionRunSafelyAfterTheDestructorReturned)
 		const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend);
 		ASSERT_TRUE(io.has_value());
 
-		const alt::cancellation_handle chain = alt::start(awaiting_chain(io->shared_state(), read_request(buffer), record));
+		const alt::cancellation_handle chain = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), record));
 		ASSERT_EQ(backend.pending(), 1U);
 
 		// Completed at the backend, so the resumption is queued and unpumped when the
@@ -266,9 +285,11 @@ TEST(FileIoTest, AQueuedResumptionRunSafelyAfterTheDestructorReturned)
 	}
 
 	// The handle is gone. The resumption releases its permit against io_shared, which
-	// only the operation block's own reference is keeping alive now: that is what the
-	// refcounted state exists for, and AddressSanitizer is the instrument that reports
-	// the release if it touches freed memory.
+	// the operation's own co-owners (its block and the chain's frame, both of which hold
+	// a reference) are keeping alive now. This does NOT separate those two from each
+	// other; it shows that file_io is not what owns the state, which is the property
+	// that matters. AddressSanitizer is the instrument that reports the release if it
+	// touches freed memory.
 	EXPECT_EQ(home.drain(), 1U);
 	EXPECT_TRUE(record->body_ran);
 	EXPECT_EQ(alt_test::live_frames, 0);

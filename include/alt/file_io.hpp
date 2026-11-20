@@ -15,6 +15,7 @@ namespace alt
 	namespace detail
 	{
 		struct io_shared;
+		struct file_io_access;
 	}
 
 	/**
@@ -30,7 +31,8 @@ namespace alt
 		 * io_backend_kind::thread_pool, and file_io::backend() reports what was chosen.
 		 * Naming a kind this build does not provide, or `manual`, which cannot be
 		 * selected by value, fails create() rather than silently substituting another.
-		 * Ignored by the overload that is handed a backend, whose own kind() is reported.
+		 * With the overload that is handed a backend, `automatic` means that backend and any
+		 * other value must match its kind().
 		 */
 		io_backend_kind backend = io_backend_kind::automatic;
 
@@ -140,21 +142,35 @@ namespace alt
 		/** @brief Which backend is actually in use. Never io_backend_kind::automatic. */
 		[[nodiscard]] io_backend_kind backend() const noexcept;
 
-		/**
-		 * @brief The refcounted state every operation on this service co-owns.
-		 *
-		 * Engine-internal, like everything in alt::detail: the operations built on this
-		 * class, and the tests that drive the shutdown contract through
-		 * alt::detail::io_awaiter, take their co-ownership from here. Not part of the
-		 * surface a consumer programs against.
-		 */
-		[[nodiscard]] const std::shared_ptr<detail::io_shared>& shared_state() const noexcept;
-
 	private:
+		/** The one door to the engine-internal state; see alt::detail::file_io_access. */
+		friend struct detail::file_io_access;
+
 		/** The backend this object built, or null when the caller supplied one. */
 		std::unique_ptr<io_backend>        m_owned_backend;
 		std::shared_ptr<detail::io_shared> m_shared;
 		io_backend_kind                    m_kind;
+	};
+
+}
+
+namespace alt::detail
+{
+
+	/**
+	 * @brief The single route from an alt::file_io to the state its operations co-own.
+	 *
+	 * Befriended once by file_io, so the operations built on it and the tests that drive
+	 * its shutdown contract all take their co-ownership through this one door, and no
+	 * engine-internal type appears in file_io's public interface.
+	 */
+	struct file_io_access
+	{
+		/** @brief The refcounted state every operation on @p io co-owns. */
+		[[nodiscard]] static const std::shared_ptr<io_shared>& shared(const file_io& io) noexcept
+		{
+			return io.m_shared;
+		}
 	};
 
 }

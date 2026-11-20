@@ -82,6 +82,13 @@ namespace alt
 			return std::unexpected(bad);
 		}
 
+		// `automatic` means "whatever was passed". Anything else that disagrees with the
+		// backend is a caller who asked for one thing and would silently get another.
+		if(options.backend != io_backend_kind::automatic && options.backend != backend.kind())
+		{
+			return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+		}
+
 		try
 		{
 			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, nullptr, backend, workers, completion, options.max_in_flight};
@@ -103,6 +110,12 @@ namespace alt
 		// Violating the first precondition is not survivable: a parked operation's
 		// frame holds this state alive, so nothing crashes here, but nothing will ever
 		// release the permit it is waiting for either. Say so instead of hanging later.
+		// parked_waiters() is an upper bound: an operation a cancel has claimed but not
+		// yet unlinked still counts. That cannot abort a destroyer that has met the
+		// precondition, because the claimant unlinks before it resumes the chain, so a
+		// destroyer that waited for its chains never sees the overcount. One racing a
+		// cancel on another thread has not outlived its operations, so the abort is
+		// right there too.
 		assert(m_shared->parked_waiters() == 0 && "destroying an alt::file_io with an operation parked on a backpressure slot");
 
 		m_shared->stop_accepting();
@@ -115,11 +128,6 @@ namespace alt
 	io_backend_kind file_io::backend() const noexcept
 	{
 		return m_kind;
-	}
-
-	const std::shared_ptr<detail::io_shared>& file_io::shared_state() const noexcept
-	{
-		return m_shared;
 	}
 
 }
