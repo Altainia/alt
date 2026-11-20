@@ -89,7 +89,8 @@ namespace alt
 	 * input (a path pair for rename, an `io_invocable*` for invoke); `out` is
 	 * storage for a result that is not a byte count (a `file_status` for the two
 	 * stat operations, a `std::vector<directory_entry>` for list_directory). BOTH
-	 * MUST POINT INTO THE OPERATION BLOCK AND NEVER INTO A COROUTINE FRAME: a
+	 * MUST POINT INTO STORAGE THE OPERATION BLOCK CO-OWNS (see `state`) AND NEVER INTO A
+	 * COROUTINE FRAME: a
 	 * completion can land after the frame is gone, and a write through `out` into a
 	 * destroyed frame is a use-after-free no sanitizer reliably reports. This layer
 	 * cannot check it; it is a precondition on the layer that builds requests.
@@ -145,6 +146,22 @@ namespace alt
 		std::size_t   size   = 0;
 		const void*   in     = nullptr;
 		void*         out    = nullptr;
+
+		/**
+		 * What `in` and `out` point into, kept alive by the operation block.
+		 *
+		 * The seam's own answer to the rule above: `in` and `out` must outlive the
+		 * operation, a coroutine frame does not, and `buffer` is for the bytes of a transfer
+		 * rather than for this. A layer whose request carries a result slot or arguments
+		 * (a stat's file_status, an open's path and resulting handle) puts them in one
+		 * object, points `in`/`out` into it and stores the owner here; the block co-owns it
+		 * for its whole life, which is exactly as long as a late completion can write
+		 * through `out`. Null for a request that needs nothing beyond `buffer`.
+		 *
+		 * A backend need not touch it: copying the request copies the reference, which at
+		 * worst holds the object a little longer.
+		 */
+		std::shared_ptr<void> state;
 	};
 
 	/**

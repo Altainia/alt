@@ -77,9 +77,11 @@ namespace alt
 	 *
 	 * **Closing.** The destructor drops this object's reference and closes inline only
 	 * if that was the last one. With an operation outstanding it closes nothing and the
-	 * last operation to finish does, off the thread that destroyed the file. It cannot
-	 * report an error and it can block on a network filesystem, so `co_await
-	 * file.close()` is the form for a caller that cares about either.
+	 * last operation to finish does, off the thread that destroyed the file. Either way
+	 * the close cannot report an error, and where it runs inline it can block on a
+	 * network filesystem. close() does not remove either limit in this release (see its
+	 * note); it exists so that a backend with an asynchronous close can later report the
+	 * error and do the work off the calling thread without changing this interface.
 	 *
 	 * **Why every operation validates before it takes a backpressure permit.** The
 	 * checks run first so that the rejecting paths hold no permit and so have nothing to
@@ -143,6 +145,14 @@ namespace alt
 		 *
 		 * A @p size of 0 completes with 0 bytes immediately and submits nothing.
 		 * Anything else is the backend's error, such as std::errc::is_a_directory.
+		 *
+		 * std::errc::operation_canceled is the one error that comes from this layer rather
+		 * than the file: the wait for a backpressure permit ended without one. A
+		 * cancelled chain is abandoned rather than resumed, so nothing is delivered to it;
+		 * a caller sees this error only from a wait released without the chain being
+		 * cancelled, which is the service state being destroyed with the operation parked,
+		 * a violation of the service's own lifetime precondition. It is documented so that
+		 * an error switch is total, and every operation below can report it.
 		 */
 		[[nodiscard]] task<std::expected<std::size_t, std::error_code>> read_at(io_buffer buffer, std::uint64_t offset, std::size_t size) const;
 
@@ -160,6 +170,10 @@ namespace alt
 		 *
 		 * @param mode How much to make durable. See sync_mode, in particular that `data`
 		 *             never gives less than it promises.
+		 *
+		 * Reports std::errc::bad_file_descriptor for a closed file before submitting, and
+		 * std::errc::operation_canceled as read_at() describes; anything else is the
+		 * backend's.
 		 */
 		[[nodiscard]] task<std::expected<void, std::error_code>> sync(sync_mode mode = sync_mode::full) const;
 
@@ -170,11 +184,14 @@ namespace alt
 		 * been renamed or unlinked since it was opened. The file_identity is the same for
 		 * every descriptor of one file, which is what lets a caller build an ETag from
 		 * inode, size and mtime.
+		 *
+		 * Reports std::errc::bad_file_descriptor for a closed file before submitting, and
+		 * std::errc::operation_canceled as read_at() describes.
 		 */
 		[[nodiscard]] task<std::expected<file_status, std::error_code>> stat() const;
 
 		/**
-		 * @brief Closes the file, without waiting on the operating system.
+		 * @brief Marks the file closed, and releases this object's reference to the descriptor.
 		 *
 		 * **The closed state takes effect when this is CALLED, not when it is awaited.**
 		 * From that instant every operation that has not yet submitted, including tasks
@@ -184,6 +201,11 @@ namespace alt
 		 * returned task completes or is destroyed) and those of any operation still in
 		 * flight. So an operation already at the backend finishes against a live
 		 * descriptor, and a descriptor number is never closed under one.
+		 *
+		 * The operating-system close runs wherever the last reference drops: typically
+		 * inside the returned task, on the thread awaiting it, and so it can block that
+		 * thread on a network filesystem exactly as the destructor can. With an operation
+		 * still in flight it runs on whichever thread finishes last.
 		 *
 		 * Closing twice, or closing a moved-from file, succeeds and does nothing.
 		 *

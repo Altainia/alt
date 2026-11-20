@@ -195,6 +195,21 @@ namespace alt::detail
 	{
 	}
 
+	io_awaiter::io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file, io_permit& permit):
+	  m_block(std::make_shared<io_operation>(std::move(owner), std::move(request), std::move(file))),
+	  m_permit(&permit)
+	{
+	}
+
+	void io_awaiter::hand_over_permit() noexcept
+	{
+		if(m_permit != nullptr)
+		{
+			assert(m_permit->holds() && "awaiting an alt io_awaiter before its io_permit holds a permit");
+			m_permit->hand_over();
+		}
+	}
+
 	io_completion io_awaiter::await_resume()
 	{
 		// Deregistered here rather than left to the frame's destruction: the operation is
@@ -229,6 +244,10 @@ namespace alt::detail
 		// posts" rule is easier to keep true than two.
 		const std::shared_ptr<io_operation> block = m_block;
 		io_shared&                          owner = *block->owner;
+
+		// From here every path below releases the permit itself, including the throwing
+		// ones, so the frame's io_permit must stop doing so.
+		hand_over_permit();
 
 		// A precondition rather than a reportable error, and the same one alt::thread_pool
 		// and alt::scheduler_ref already state: the service must outlive every operation

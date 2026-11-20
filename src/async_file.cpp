@@ -5,7 +5,6 @@
 #include <alt/file_io.hpp>
 #include <filesystem>
 #include <memory>
-#include <span>
 #include <utility>
 
 // Every operation in this file is a coroutine taking its state BY VALUE, and the public
@@ -14,12 +13,16 @@
 // by-value parameter is copied into the frame when the member is called instead. The
 // forwarding adds no second frame: the member allocates nothing but the one it returns.
 //
-// Each coroutine that reaches the backend runs the same three steps, in this order:
-//   1. construct the io_awaiter, which allocates and so can throw;
+// Each coroutine that reaches the backend runs the same four steps, in this order:
+//   1. declare an empty io_permit and construct the io_awaiter, which allocates and so
+//      can throw, handing it the permit;
 //   2. co_await the backpressure permit and check it;
-//   3. co_await the awaiter, which takes the permit over and releases it.
-// Step 1 comes first because nothing between acquiring the permit and awaiting the
-// awaiter may throw or return: the awaiter is what releases the permit.
+//   3. permit.hold(owner), with nothing between the check and this line;
+//   4. co_await the awaiter, which hands the permit over when it submits.
+// The permit is a local of this frame because cancellation can destroy the frame between
+// steps 2 and 4, before the awaiter runs: the frame's own io_permit is then what puts the
+// permit back. Step 1 precedes the wait so that nothing which can throw runs while a
+// permit is held.
 
 namespace alt
 {
@@ -29,6 +32,7 @@ namespace alt
 
 		using detail::io_awaiter;
 		using detail::io_handle;
+		using detail::io_permit;
 		using detail::io_shared;
 
 		std::unexpected<std::error_code> failure(const std::errc code)
@@ -40,18 +44,6 @@ namespace alt
 		bool usable(const std::shared_ptr<io_handle>& file, const std::shared_ptr<io_shared>& owner) noexcept
 		{
 			return file && owner && file->has_handle() && !file->close_requested();
-		}
-
-		/**
-		 * A buffer that names no bytes and exists to keep @p state alive.
-		 *
-		 * io_request::in and ::out must outlive the operation block, and the block's only
-		 * co-owned storage is the buffer, so this is where a request that carries a
-		 * result slot (a stat, an open) parks it.
-		 */
-		io_buffer keepalive_buffer(std::shared_ptr<void> state) noexcept
-		{
-			return io_buffer::borrow(std::span<std::byte>{}, std::move(state));
 		}
 
 		/** What an open's block owns: the arguments, and the descriptor the backend produced. */
@@ -95,13 +87,15 @@ namespace alt
 				co_return std::size_t{0};
 			}
 
-			io_awaiter awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = std::move(buffer), .offset = offset, .size = size, .in = nullptr, .out = nullptr}, file};
+			io_permit  permit;
+			io_awaiter awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = std::move(buffer), .offset = offset, .size = size, .in = nullptr, .out = nullptr, .state = nullptr}, file, permit};
 
 			const wait_result slot = co_await owner->acquire_slot();
 			if(!slot)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
+			permit.hold(owner);
 			const io_completion done = co_await std::move(awaiter);
 			if(done.error)
 			{
@@ -117,13 +111,15 @@ namespace alt
 				co_return failure(std::errc::bad_file_descriptor);
 			}
 
-			io_awaiter awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr}, file};
+			io_permit  permit;
+			io_awaiter awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, permit};
 
 			const wait_result slot = co_await owner->acquire_slot();
 			if(!slot)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
+			permit.hold(owner);
 			const io_completion done = co_await std::move(awaiter);
 			if(done.error)
 			{
@@ -140,13 +136,15 @@ namespace alt
 			}
 
 			const std::shared_ptr<file_status> result = std::make_shared<file_status>();
-			io_awaiter                         awaiter{owner, io_request{.op = io_op::stat_handle, .handle = file->native(), .buffer = keepalive_buffer(result), .offset = 0, .size = 0, .in = nullptr, .out = result.get()}, file};
+			io_permit                          permit;
+			io_awaiter                         awaiter{owner, io_request{.op = io_op::stat_handle, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = result.get(), .state = result}, file, permit};
 
 			const wait_result slot = co_await owner->acquire_slot();
 			if(!slot)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
+			permit.hold(owner);
 			const io_completion done = co_await std::move(awaiter);
 			if(done.error)
 			{
@@ -159,13 +157,15 @@ namespace alt
 		{
 			const std::shared_ptr<open_state> state = std::make_shared<open_state>(io_open_args{.path = std::move(path), .open_flags = how, .mode = mode});
 
-			io_awaiter awaiter{owner, io_request{.op = io_op::open, .handle = invalid_native_handle, .buffer = keepalive_buffer(state), .offset = 0, .size = 0, .in = &state->args, .out = &state->created}, nullptr};
+			io_permit  permit;
+			io_awaiter awaiter{owner, io_request{.op = io_op::open, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &state->args, .out = &state->created, .state = state}, nullptr, permit};
 
 			const wait_result slot = co_await owner->acquire_slot();
 			if(!slot)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
+			permit.hold(owner);
 			const io_completion done = co_await std::move(awaiter);
 			if(done.error)
 			{

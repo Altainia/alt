@@ -149,9 +149,12 @@ namespace alt::detail
 		 * std::errc::operation_canceled and the operation never reaches the backend at
 		 * all. The interesting cancellation window is only the submitted phase.
 		 *
-		 * The permit the wait comes away with is then handed to alt::detail::io_awaiter,
-		 * which releases it. A caller that acquires a permit and does not go on to await an
-		 * io_awaiter must release it itself.
+		 * The permit the wait comes away with must be put in an alt::detail::io_permit the
+		 * moment the wait is checked, and that permit given to the io_awaiter. A permit held
+		 * any other way is lost if the chain is cancelled between this wait and the
+		 * awaiter's await_suspend: the cancellation check ahead of every suspension point
+		 * destroys the frame without ever calling the awaiter, so nothing the awaiter does
+		 * can release it, and a lost permit never comes back.
 		 */
 		[[nodiscard]] async_semaphore::semaphore_awaiter acquire_slot() noexcept
 		{
@@ -225,6 +228,84 @@ namespace alt::detail
 			std::unique_lock lock{quiet_mutex};
 			quiet.wait(lock, [this] { return at_backend.load(std::memory_order_acquire) == 0; });
 		}
+	};
+
+	/**
+	 * @brief One backpressure permit, owned by a coroutine frame until it is submitted.
+	 *
+	 * The answer to a window the two-phase contract cannot otherwise close. A caller takes a
+	 * permit with `co_await owner->acquire_slot()` and then awaits an alt::detail::io_awaiter,
+	 * and cancellation lands between the two: alt's cancellation check runs in the NEXT
+	 * await's await_suspend and destroys the frame before calling the awaiter's, so the
+	 * awaiter, which is the party that releases the permit, never runs and is itself only
+	 * destroyed. The permit has to be released by something the frame owns that is still
+	 * alive at that point, which is a local of the frame.
+	 *
+	 * So this is a frame local, and it has two ends. If the frame dies while it still
+	 * holds the permit (an early return, an exception, or the chain being abandoned before
+	 * submission) its destructor puts the permit back. If the operation is submitted, the
+	 * io_awaiter hands it over in start() and from then on the posted resumption releases
+	 * it, exactly once, on the completion scheduler; hand_over() makes the destructor do
+	 * nothing from that point.
+	 *
+	 * Construct it empty BEFORE anything that can throw, and call hold() immediately after
+	 * checking the wait's result. Nothing between the end of the wait and hold() may throw
+	 * or return.
+	 *
+	 * Not thread-safe: it is a coroutine-frame local, touched by that frame and by the
+	 * awaiter that frame is awaiting, which are never concurrent.
+	 */
+	class io_permit
+	{
+	public:
+		/** @brief An empty permit: holds nothing, releases nothing. */
+		io_permit() noexcept = default;
+
+		io_permit(const io_permit&)            = delete;
+		io_permit& operator=(const io_permit&) = delete;
+		io_permit(io_permit&&)                 = delete;
+		io_permit& operator=(io_permit&&)      = delete;
+
+		/** @brief Puts the permit back if it is still held, which hand_over() prevents. */
+		~io_permit()
+		{
+			if(m_owner)
+			{
+				m_owner->slots.release();
+			}
+		}
+
+		/**
+		 * @brief Records that the wait on @p owner's slots came away with a permit.
+		 *
+		 * Takes a counted reference, so the state the release touches outlives the frame
+		 * that may be destroyed on any thread. Must be called at most once.
+		 */
+		void hold(const std::shared_ptr<io_shared>& owner) noexcept
+		{
+			assert(!m_owner && "an alt io_permit already holds a permit");
+			m_owner = owner;
+		}
+
+		/** @brief True while the permit is held and this object would release it. */
+		[[nodiscard]] bool holds() const noexcept
+		{
+			return m_owner != nullptr;
+		}
+
+		/**
+		 * @brief The operation was submitted: its resumption releases the permit from here on.
+		 *
+		 * Called by io_awaiter, from the start of its own start(), which then owns every
+		 * path including the ones that throw.
+		 */
+		void hand_over() noexcept
+		{
+			m_owner.reset();
+		}
+
+	private:
+		std::shared_ptr<io_shared> m_owner;
 	};
 
 }

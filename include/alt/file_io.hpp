@@ -3,6 +3,7 @@
 #include <alt/async_file.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/scheduler.hpp>
+#include <alt/task.hpp>
 #include <cstddef>
 #include <expected>
 #include <filesystem>
@@ -155,7 +156,8 @@ namespace alt
 		 *              open_flag::create, and subject to the umask on POSIX.
 		 *
 		 * Fails with the operating system's error: std::errc::no_such_file_or_directory for
-		 * a missing path, file_exists for open_flag::exclusive over an existing one.
+		 * a missing path, file_exists for open_flag::exclusive over an existing one, and
+		 * std::errc::operation_canceled as async_file::read_at() describes.
 		 *
 		 * **A cancelled open does not leak the descriptor.** The open may still complete
 		 * at the backend after the awaiting frame is gone, and the descriptor it produces

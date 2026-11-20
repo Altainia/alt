@@ -133,6 +133,7 @@ namespace
 		  .size   = buffer.size(),
 		  .in     = nullptr,
 		  .out    = nullptr,
+		  .state  = nullptr,
 		};
 	}
 

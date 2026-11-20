@@ -3,6 +3,8 @@
 #include <alt/async_file.hpp>
 #include <alt/cancellable_task.hpp>
 #include <alt/detail/io_handle.hpp>
+#include <alt/detail/io_operation.hpp>
+#include <alt/detail/io_shared.hpp>
 #include <alt/file_io.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/io_buffer.hpp>
@@ -11,6 +13,8 @@
 #include <alt/task.hpp>
 #include <alt/thread_pool.hpp>
 #include <atomic>
+#include <chrono>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -19,9 +23,12 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <semaphore>
+#include <set>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace
@@ -31,16 +38,80 @@ namespace
 	template<typename T>
 	struct outcome
 	{
-		bool finished = false;
-		T    result{};
+		bool             finished = false;
+		std::optional<T> result;
 	};
 
 	/** Starts @p work and stores what it produced in @p out, so a test can run it without blocking. */
 	template<typename T>
 	alt::cancellable_task capture(alt::task<T> work, std::shared_ptr<outcome<T>> out)
 	{
-		out->result   = co_await std::move(work);
+		out->result.emplace(co_await std::move(work));
 		out->finished = true;
+	}
+
+	/** Parks the awaiting coroutine and hands its handle out, so a test can resume it at a chosen moment. */
+	struct park
+	{
+		std::coroutine_handle<>* where;
+
+		// NOLINTNEXTLINE(readability-convert-member-functions-to-static): the compiler calls await_ready() through an instance at every co_await of this type.
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			return false;
+		}
+
+		void await_suspend(const std::coroutine_handle<> handle) const noexcept
+		{
+			*where = handle;
+		}
+
+		void await_resume() const noexcept
+		{}
+	};
+
+	/** Requests the awaiting chain's stop from inside the chain, which is the only way to land it between two awaits. */
+	struct stop_this_chain
+	{
+		alt::cancellation_handle* chain;
+
+		[[nodiscard]] bool await_ready() const noexcept
+		{
+			static_cast<void>(chain->request_stop());
+			return true;
+		}
+
+		void await_suspend(std::coroutine_handle<> /*handle*/) const noexcept
+		{}
+
+		void await_resume() const noexcept
+		{}
+	};
+
+	/**
+	 * The file layer's own dance, with a stop requested between the permit wait and the
+	 * awaiter. Written out here rather than reached through async_file because nothing in
+	 * the public surface can request a stop at that exact point.
+	 */
+	alt::cancellable_task permit_then_stop_then_submit(std::shared_ptr<alt::detail::io_shared> owner, std::shared_ptr<alt::detail::io_handle> file, std::coroutine_handle<>* parked, alt::cancellation_handle* chain, std::shared_ptr<bool> submitted)
+	{
+		co_await park{parked};
+
+		alt::detail::io_permit  permit;
+		alt::detail::io_awaiter awaiter{owner, alt::io_request{.op = alt::io_op::sync_full, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, permit};
+
+		const alt::wait_result slot = co_await owner->acquire_slot();
+		if(!slot)
+		{
+			co_return;
+		}
+		permit.hold(owner);
+
+		co_await stop_this_chain{chain};
+		// The cancellation check ahead of this await destroys the frame before the awaiter
+		// is called, so nothing below runs.
+		static_cast<void>(co_await std::move(awaiter));
+		*submitted = true;
 	}
 
 	/** Collects one completion from a backend callback. */
@@ -84,6 +155,11 @@ namespace
 	class AsyncFileTest: public ::testing::Test
 	{
 	protected:
+		void TearDown() override
+		{
+			finish_manual_operations();
+		}
+
 		void SetUp() override
 		{
 			static std::atomic<int> counter{0};
@@ -126,21 +202,78 @@ namespace
 			return m_manual_backend;
 		}
 
-		/** Runs @p work to completion, driving the completion scheduler. */
+		/** How long a test waits for anything before it calls the wait a failure. */
+		static constexpr std::chrono::seconds deadline{10};
+
+		/**
+		 * Runs the completion scheduler until @p done reports true or the deadline passes.
+		 *
+		 * Polls rather than blocks, because a blocking pump is exactly how a defect that
+		 * submits when it should not turns into a hung CI job instead of a failed test.
+		 * Returns whether @p done became true.
+		 */
+		template<typename Predicate>
+		bool pump_until(Predicate done)
+		{
+			const auto limit = std::chrono::steady_clock::now() + deadline;
+			while(!done())
+			{
+				if(!m_home.run_one())
+				{
+					if(std::chrono::steady_clock::now() > limit)
+					{
+						return false;
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds{1});
+				}
+			}
+			return true;
+		}
+
+		/**
+		 * Runs @p work to completion, driving the completion scheduler, and fails by
+		 * assertion rather than hanging if it does not finish.
+		 *
+		 * On expiry every operation still at the manual backend is completed with an error
+		 * so that the fixture's teardown, which waits for the backend to go quiet, returns.
+		 */
 		template<typename T>
 		T run(alt::task<T> work)
 		{
-			return alt::sync_wait(std::move(work), m_home);
+			const auto                     state = std::make_shared<outcome<T>>();
+			const alt::cancellation_handle chain = alt::start(capture(std::move(work), state));
+			if(!pump_until([&] { return state->finished; }))
+			{
+				ADD_FAILURE() << "the operation did not finish within " << deadline.count() << " seconds";
+				finish_manual_operations();
+				return std::unexpected(std::make_error_code(std::errc::timed_out));
+			}
+			std::optional<T>& produced = state->result;
+			if(produced.has_value())
+			{
+				return std::move(*produced);
+			}
+			return std::unexpected(std::make_error_code(std::errc::timed_out));
 		}
 
-		/** Runs the completion scheduler until @p done reports true. */
-		template<typename Predicate>
-		void pump_until(Predicate done)
+		/** Completes operation @p index at the manual backend, remembering that it did. */
+		void complete_by_hand(const std::size_t index, const alt::io_completion result)
 		{
-			while(!done())
+			m_completed.insert(index);
+			m_manual_backend.complete(index, result);
+		}
+
+		/** Completes every operation still pending at the manual backend with an error. */
+		void finish_manual_operations()
+		{
+			for(std::size_t index = 0; m_manual_backend.pending() > 0; ++index)
 			{
-				m_home.run_one_or_wait();
+				if(!m_completed.contains(index))
+				{
+					complete_by_hand(index, alt::io_completion{.bytes = 0, .error = std::make_error_code(std::errc::timed_out)});
+				}
 			}
+			home().drain();
 		}
 
 		std::filesystem::path write_file(const std::string& name, const std::string& content) const
@@ -178,7 +311,15 @@ namespace
 			return handle;
 		}
 
-		/** Whether @p handle still names an open descriptor, asked of the operating system. */
+		/**
+		 * Whether @p handle still names an open descriptor, asked of the operating system.
+		 *
+		 * Builds a fresh thread-pool backend for every probe and does not open anything, so
+		 * the answer is the operating system's. That is also its weakness: a descriptor
+		 * number the system has since recycled would read as open. Nothing here opens a file
+		 * while a test runs, but a future backend that consumed a descriptor on construction
+		 * could take the recycled number and make the three tests that call this flaky.
+		 */
 		bool descriptor_is_open(const alt::native_handle handle)
 		{
 			const std::unique_ptr<alt::io_backend> backend = alt::make_thread_pool_backend(*m_pool);
@@ -209,6 +350,7 @@ namespace
 		// Declaration order is destruction order reversed: the services go first, then the
 		// backend and scheduler they use, then the pool they borrow, then the directory.
 		scratch_dir                                      m_dir;
+		std::set<std::size_t>                            m_completed;
 		std::expected<alt::thread_pool, std::error_code> m_pool = alt::thread_pool::create(1);
 		alt::manual_scheduler                            m_home;
 		alt::manual_io_backend                           m_manual_backend;
@@ -368,7 +510,7 @@ TEST_F(AsyncFileTest, StatReportsSizeKindAndAStableIdentity)
 	EXPECT_NE(status_first->identity, status_other->identity);
 }
 
-TEST_F(AsyncFileTest, SyncDataSucceedsOnEveryPlatform)
+TEST_F(AsyncFileTest, SyncDataSucceedsOnThisPlatform)
 {
 	auto file = run(real_io().open(dir() / "synced.bin", alt::flags(alt::open_flag::read_write) | alt::flags(alt::open_flag::create)));
 	ASSERT_TRUE(file.has_value());
@@ -379,7 +521,7 @@ TEST_F(AsyncFileTest, SyncDataSucceedsOnEveryPlatform)
 	EXPECT_TRUE(run(file->sync()).has_value());
 }
 
-TEST_F(AsyncFileTest, TwoConcurrentPositionalReadsEachGetTheirOwnOffsetsBytes)
+TEST_F(AsyncFileTest, TwoPositionalReadsOnOneFileEachGetTheirOwnOffsetsBytes)
 {
 	const auto path = write_file("data.txt", "AAAABBBBCCCC");
 	auto       file = run(real_io().open(path, alt::flags(alt::open_flag::read)));
@@ -393,7 +535,7 @@ TEST_F(AsyncFileTest, TwoConcurrentPositionalReadsEachGetTheirOwnOffsetsBytes)
 
 	const alt::cancellation_handle chain_first  = alt::start(capture(file->read_at(first_buffer, 8, 4), first));
 	const alt::cancellation_handle chain_second = alt::start(capture(file->read_at(second_buffer, 0, 4), second));
-	pump_until([&] { return first->finished && second->finished; });
+	ASSERT_TRUE(pump_until([&] { return first->finished && second->finished; }));
 
 	ASSERT_TRUE(first->result.has_value());
 	ASSERT_TRUE(second->result.has_value());
@@ -420,16 +562,14 @@ TEST_F(AsyncFileTest, TwoReadsOnOneFileAreBothAtTheBackendTogetherWithTheirOwnOf
 	EXPECT_EQ(manual_backend().request(1).handle, file.handle());
 
 	// Completed out of submission order: each task gets the outcome of ITS operation.
-	manual_backend().complete(1, alt::io_completion{.bytes = 3, .error = {}});
-	manual_backend().complete(0, alt::io_completion{.bytes = 4, .error = {}});
+	complete_by_hand(1, alt::io_completion{.bytes = 3, .error = {}});
+	complete_by_hand(0, alt::io_completion{.bytes = 4, .error = {}});
 	home().drain();
 
 	ASSERT_TRUE(first->finished);
 	ASSERT_TRUE(second->finished);
-	ASSERT_TRUE(first->result.has_value());
-	ASSERT_TRUE(second->result.has_value());
-	EXPECT_EQ(*first->result, 4U);
-	EXPECT_EQ(*second->result, 3U);
+	EXPECT_TRUE(first->result == result_type{4U});
+	EXPECT_TRUE(second->result == result_type{3U});
 }
 
 TEST_F(AsyncFileTest, TheDestructorWithAnOutstandingOperationClosesNothing)
@@ -449,7 +589,7 @@ TEST_F(AsyncFileTest, TheDestructorWithAnOutstandingOperationClosesNothing)
 	// The file object is gone, and the operation at the backend still holds the descriptor.
 	EXPECT_TRUE(descriptor_is_open(handle));
 
-	manual_backend().complete(0, alt::io_completion{.bytes = 4, .error = {}});
+	complete_by_hand(0, alt::io_completion{.bytes = 4, .error = {}});
 	home().drain();
 	ASSERT_TRUE(result->finished);
 
@@ -513,4 +653,66 @@ TEST_F(AsyncFileTest, OpenWithExclusiveOverAnExistingFileReportsFileExists)
 
 	ASSERT_FALSE(opened.has_value());
 	EXPECT_EQ(opened.error(), std::errc::file_exists);
+}
+
+TEST_F(AsyncFileTest, AStopBetweenThePermitWaitAndTheSubmissionReturnsThePermit)
+{
+	const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
+	const auto                 service = alt::file_io::create(pool(), alt::scheduler_ref{home()}, manual_backend(), options);
+	ASSERT_TRUE(service.has_value());
+	const auto shared = alt::detail::file_io_access::shared(*service);
+	const auto file   = alt::detail::io_handle::adopt(alt::invalid_native_handle);
+
+	std::coroutine_handle<>     parked;
+	alt::cancellation_handle    chain;
+	const std::shared_ptr<bool> submitted = std::make_shared<bool>(false);
+	chain                                 = alt::start(permit_then_stop_then_submit(shared, file, &parked, &chain, submitted));
+	ASSERT_TRUE(static_cast<bool>(parked));
+
+	parked.resume();
+	home().drain();
+
+	EXPECT_FALSE(*submitted);
+	EXPECT_EQ(manual_backend().pending(), 0U);
+	// The only permit there is. Had the abandoned frame kept it, this would be false and
+	// every later operation on the service would park forever.
+	EXPECT_TRUE(shared->slots.try_acquire());
+	shared->slots.release();
+}
+
+TEST_F(AsyncFileTest, AStopWhileParkedOnTheBackpressureLimitDeliversNothingAndLeavesTheLimitUsable)
+{
+	const auto                 path = write_file("data.txt", "0123456789");
+	const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
+	const auto                 service = alt::file_io::create(pool(), alt::scheduler_ref{home()}, manual_backend(), options);
+	ASSERT_TRUE(service.has_value());
+	const alt::async_file file = alt::async_file::adopt(*service, open_native(path, alt::flags(alt::open_flag::read)));
+
+	using result_type = std::expected<std::size_t, std::error_code>;
+	const auto holder = std::make_shared<outcome<result_type>>();
+	const auto parked = std::make_shared<outcome<result_type>>();
+	const auto later  = std::make_shared<outcome<result_type>>();
+
+	const alt::cancellation_handle holder_chain = alt::start(capture(file.read_at(buffer_of(4), 0, 4), holder));
+	alt::cancellation_handle       parked_chain = alt::start(capture(file.read_at(buffer_of(4), 0, 4), parked));
+	ASSERT_EQ(manual_backend().pending(), 1U);
+
+	ASSERT_TRUE(parked_chain.request_stop());
+	home().drain();
+
+	// A cancelled chain is abandoned, not resumed: the operation_canceled the permit wait
+	// produces is never delivered to anyone. It also never reached the backend.
+	EXPECT_FALSE(parked->finished);
+	EXPECT_EQ(manual_backend().pending(), 1U);
+
+	complete_by_hand(0, alt::io_completion{.bytes = 4, .error = {}});
+	home().drain();
+	ASSERT_TRUE(holder->finished);
+
+	// The permit the stopped waiter never took is still there for the next operation.
+	const alt::cancellation_handle later_chain = alt::start(capture(file.read_at(buffer_of(4), 0, 4), later));
+	EXPECT_EQ(manual_backend().pending(), 1U);
+	complete_by_hand(1, alt::io_completion{.bytes = 4, .error = {}});
+	home().drain();
+	EXPECT_TRUE(later->finished);
 }

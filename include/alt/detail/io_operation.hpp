@@ -368,6 +368,23 @@ namespace alt::detail
 		 */
 		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file);
 
+		/**
+		 * @brief As above, for a caller whose permit lives in an io_permit on its own frame.
+		 *
+		 * The form a coroutine uses. @p permit must be a local of the awaiting coroutine that
+		 * outlives this awaiter, and must hold the permit by the time the awaiter is awaited.
+		 * This awaiter hands the permit over in await_suspend, which is the point from which
+		 * it is the resumption's to release; until then the frame's own io_permit puts it
+		 * back, which is what makes a chain abandoned between the permit wait and this await
+		 * (the cancellation check destroys the frame before calling await_suspend) lose
+		 * nothing. Construct the awaiter before taking the permit: it allocates, and a throw
+		 * with a permit already held is the second way to leak one.
+		 *
+		 * The three-argument form leaves the permit with the caller and is only correct for
+		 * one that cannot be cancelled in that window.
+		 */
+		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file, io_permit& permit);
+
 		~io_awaiter() = default;
 
 		/**
@@ -435,10 +452,16 @@ namespace alt::detail
 		 */
 		bool start();
 
+		/** Tells the frame's io_permit, if there is one, that this awaiter now owns releasing it. */
+		void hand_over_permit() noexcept;
+
 		/** The stop callback's type, spelled once. */
 		using stop_registration = std::stop_callback<io_operation::stop_handler>;
 
 		std::shared_ptr<io_operation> m_block;
+
+		/** The frame's permit, handed over in start(), or null for the form that has none. */
+		io_permit* m_permit = nullptr;
 
 		/**
 		 * Declared after m_block so it is destroyed FIRST: deregistering the callback
