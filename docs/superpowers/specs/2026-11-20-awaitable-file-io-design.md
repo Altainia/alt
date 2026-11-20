@@ -1,7 +1,7 @@
 # Design: awaitable file I/O with platform backends
 
 **Date:** 2026-11-20
-**Status:** Proposed
+**Status:** Approved
 **Issue:** #49
 **Related:** `2026-09-10-coroutines-roadmap.md` (this is a new phase 7),
 `2026-11-17-cancellation-ref-design.md` (the mechanism this component is the first

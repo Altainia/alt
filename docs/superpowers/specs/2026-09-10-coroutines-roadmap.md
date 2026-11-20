@@ -30,6 +30,7 @@ spec, implementation plan, and pull request.
 | 4 | `when_all`, `when_any` | `include/alt/when_all.hpp`, `include/alt/when_any.hpp` | phases 1 and 3 |
 | 5 | `async_event`, `async_mutex`, `async_latch`, `async_semaphore`, `task_completion_source`, `task_group` | one header each | phases 1 and 3 |
 | 6 | `shared_task<T>`, `async_generator<T>` | one header each | phases 1 and 3 |
+| 7 | `io_buffer`, `io_backend`, `file_io`, `async_file`, and the platform backends | one header each | phases 1, 2, 3 and 5 |
 
 Phases 1 and 2 are specified together in the companion design document. They
 are inseparable because `task<T>` itself carries the cancellation hook: its
@@ -64,6 +65,22 @@ point at which every task it owns is known to be gone. Neither is required by
 the stated scenario, because a window can hold one `std::stop_source` and pass
 its token to every task it owns, which makes cancelling a whole window's worth
 of coroutines a single call.
+
+**Phase 7 is the first phase here that is not a coroutine primitive, and it is a
+deliberate expansion of the library's scope** from scheduling and utilities into
+platform I/O. It is in this roadmap rather than beside it because it depends on nearly
+all of it — `task` and the cancellation context for its awaiters, `thread_pool` and
+`scheduler_ref` for its worker and completion routing, `async_semaphore` for its
+backpressure — and because its hardest problem is one this roadmap created:
+`cancellation_ref::abandon()` destroys the frame an in-flight operation's memory would
+otherwise live in. It is specified in `2026-11-20-awaitable-file-io-design.md` and
+staged 7a (interface and thread-pool backend), 7b (io_uring), 7c (IOCP). Issue #49
+carries the requirement and the downstream consumer.
+
+Phase 7 does not depend on phase 6, and phase 6 remains unbuilt. The one place they
+meet is directory listing, which v1 does in one shot because there is no
+`async_generator<T>` to return; a streaming version is a follow-up once phase 6 lands,
+not a reason to order them.
 
 ## Deliberate exclusions
 
