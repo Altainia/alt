@@ -120,6 +120,7 @@ namespace alt
 		 *
 		 * @pre h is not empty.
 		 */
+		// NOLINTNEXTLINE(modernize-use-nodiscard): called for its effect, and the documented contract above is that the bool is informational -- resumed and abandoned are both correct outcomes, and an awaiter that does not branch on which one happened is the common case. Marking it [[nodiscard]] would make every such call site cast, including this library's own. Newly visible because phase 7a's src/io_operation.cpp is the first compiled translation unit to include this header, so the check now runs over it under the root config where tests/.clang-tidy's disables do not apply.
 		bool resume_or_abandon(std::coroutine_handle<> h) const noexcept
 		{
 			assert(h && "resuming or abandoning an alt chain with an empty coroutine handle");

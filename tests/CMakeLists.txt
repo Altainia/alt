@@ -63,6 +63,7 @@ add_executable(alt_tests
     test_io_buffer.cpp
     test_io_backend.cpp
     test_io_handle.cpp
+    test_io_operation.cpp
     test_cancellation.cpp
     test_cancellation_ref.cpp
     test_task.cpp

@@ -80,12 +80,20 @@ if(ALT_CPPCHECK)
             # is the set of headers the argument above actually covers: the ones that
             # define the await protocol. A finding in any other header is information,
             # not noise, and should be fixed rather than hidden.
+            #
+            # detail/io_operation.hpp joins the list for the same reason and by the same
+            # route: phase 7a's src/io_operation.cpp is the first compiled source to
+            # reach it, and the hand-written file I/O awaiter it declares is as much a
+            # part of the await protocol as the ones above. Its own
+            # NOLINTNEXTLINE(readability-convert-member-functions-to-static) carries the
+            # argument in full.
             --suppress=functionStatic:*/alt/awaitable.hpp
             --suppress=functionStatic:*/alt/cancellable_task.hpp
             --suppress=functionStatic:*/alt/scheduler.hpp
             --suppress=functionStatic:*/alt/sync_wait.hpp
             --suppress=functionStatic:*/alt/task.hpp
             --suppress=functionStatic:*/alt/detail/cancellation.hpp
+            --suppress=functionStatic:*/alt/detail/io_operation.hpp
             # Surfaced by phase 5's first compiled source, which is the first src/*.cpp
             # to reach cancellation.hpp. The parameter it names is a work_item callback,
             # whose signature is fixed by alt::work_item::invoke as void (*)(void*)
