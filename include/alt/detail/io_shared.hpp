@@ -13,11 +13,6 @@
 #include <system_error>
 #include <utility>
 
-namespace alt
-{
-	class thread_pool;
-}
-
 namespace alt::detail
 {
 
@@ -63,18 +58,14 @@ namespace alt::detail
 		 *                      where every permit is released. Must not be empty, and must
 		 *                      outlive every operation; alt::file_io::create is where that
 		 *                      is checked rather than asserted on an I/O thread.
-		 * @param pool          The borrowed pool passed to alt::file_io::create. Not owned.
-		 *                      Stored and not read by anything in this release; see
-		 *                      `workers`.
 		 * @param max_in_flight How many operations may be at the backend at once. Must be
 		 *                      positive: a zero bound would park the first operation on a
 		 *                      permit that can never exist.
 		 */
-		io_shared(io_backend& seam, const scheduler_ref home, thread_pool* const pool, const std::ptrdiff_t max_in_flight):
+		io_shared(io_backend& seam, const scheduler_ref home, const std::ptrdiff_t max_in_flight):
 		  slots(max_in_flight),
 		  backend(&seam),
-		  completion(home),
-		  workers(pool)
+		  completion(home)
 		{
 			assert(max_in_flight > 0 && "an alt file I/O service with no in-flight slots");
 			assert(home && "an alt file I/O service with no completion scheduler");
@@ -110,15 +101,6 @@ namespace alt::detail
 
 		/** Where resumptions and permit releases happen. Not owned; fixed at construction. */
 		const scheduler_ref completion;
-
-		/**
-		 * The pool alt::file_io::create was given, or null. Not owned.
-		 *
-		 * Reserved for a later phase; unused in this release. Nothing reads it: the
-		 * thread-pool backend holds the pool reference it needs, and an operation reaches
-		 * a pool through the backend's submit(), not through this member.
-		 */
-		thread_pool* const workers;
 
 		/**
 		 * How many operations the backend has been handed and not yet completed.
@@ -227,7 +209,8 @@ namespace alt::detail
 		 * scheduler, which is safe precisely because this object is refcounted.
 		 *
 		 * Must not be called from a thread the backend completes on, nor from a worker of
-		 * the borrowed pool, since it would then be waiting for work queued behind itself.
+		 * the pool the backend runs on, since it would then be waiting for work queued
+		 * behind itself.
 		 */
 		void wait_until_quiet()
 		{

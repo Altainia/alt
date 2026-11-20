@@ -11,10 +11,10 @@ touches it, except to inject a `manual_io_backend` in a test.
 #include <alt/file_io.hpp>
 #include <alt/io_backend.hpp>
 
-void drive_by_hand(alt::thread_pool& pool, alt::scheduler_ref loop)
+void drive_by_hand(alt::scheduler_ref loop)
 {
     alt::manual_io_backend backend;
-    auto io = alt::file_io::create(pool, loop, backend);   // the overload that is handed a backend
+    auto io = alt::file_io::create(loop, backend);   // the overload that is handed a backend; it takes no pool
 
     // ... start an operation on *io, then decide the order things happen in:
     backend.cancel(alt::io_token{1});                      // the first operation's token
