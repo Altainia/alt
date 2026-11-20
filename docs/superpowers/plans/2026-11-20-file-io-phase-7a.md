@@ -99,9 +99,19 @@ Expected: FAIL — `alt/io_buffer.hpp` not found.
 
 - [ ] **Step 3: Implement `io_buffer`**
 
-A single `std::shared_ptr<std::byte[]>` plus a `std::span<std::byte>`, which covers all
-three factories: `allocate` makes the `shared_ptr` own new storage, `borrow` puts the
-caller's keepalive in it with a no-op deleter aliasing, `borrow_unsafe` leaves it null.
+A single `std::shared_ptr<void>` plus a `std::span<std::byte>`, which covers all three
+factories: `allocate` makes the `shared_ptr` own new storage, `borrow` stores the
+caller's keepalive in it directly, `borrow_unsafe` leaves it null. `shared_ptr<void>`
+rather than a typed pointer is what lets the keepalive be any type the caller already
+owns. Pick the owned storage type to suit `clang-tidy-19`, which rejects a C-style array
+here under `modernize-avoid-c-arrays`.
+
+**Write the move operations by hand rather than defaulting them.** A defaulted move
+leaves the source with a null owner but an unchanged span — a live-looking view into
+storage nothing keeps alive, which is the hazard this type exists to remove, and Task 4
+moves these buffers into operation blocks. The source must be reset to the default
+state, and the Doxygen must say why the moves are user-provided so nobody defaults them
+again later.
 `allocate` returns `std::unexpected(std::make_error_code(std::errc::not_enough_memory))`
 on a failed allocation rather than throwing.
 
