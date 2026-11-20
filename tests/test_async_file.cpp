@@ -354,7 +354,7 @@ namespace
 		alt::manual_scheduler                            m_home;
 		alt::manual_io_backend                           m_manual_backend;
 		std::expected<alt::file_io, std::error_code>     m_real   = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home});
-		std::expected<alt::file_io, std::error_code>     m_manual = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home}, m_manual_backend);
+		std::expected<alt::file_io, std::error_code>     m_manual = alt::file_io::create(alt::scheduler_ref{m_home}, m_manual_backend);
 	};
 
 }
@@ -669,7 +669,7 @@ TEST_F(AsyncFileTest, OpenWithExclusiveOverAnExistingFileReportsFileExists)
 TEST_F(AsyncFileTest, AStopBetweenThePermitWaitAndTheSubmissionReturnsThePermit)
 {
 	const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
-	const auto                 service = alt::file_io::create(pool(), alt::scheduler_ref{home()}, manual_backend(), options);
+	const auto                 service = alt::file_io::create(alt::scheduler_ref{home()}, manual_backend(), options);
 	ASSERT_TRUE(service.has_value());
 	const auto shared = alt::detail::file_io_access::shared(*service);
 	const auto file   = alt::detail::io_handle::adopt(alt::invalid_native_handle);
@@ -695,7 +695,7 @@ TEST_F(AsyncFileTest, AStopWhileParkedOnTheBackpressureLimitDeliversNothingAndLe
 {
 	const auto                 path = write_file("data.txt", "0123456789");
 	const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
-	const auto                 service = alt::file_io::create(pool(), alt::scheduler_ref{home()}, manual_backend(), options);
+	const auto                 service = alt::file_io::create(alt::scheduler_ref{home()}, manual_backend(), options);
 	ASSERT_TRUE(service.has_value());
 	const alt::async_file file = alt::async_file::adopt(*service, open_native(path, alt::flags(alt::open_flag::read)));
 

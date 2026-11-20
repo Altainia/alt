@@ -161,7 +161,7 @@ namespace alt
 			std::unique_ptr<io_backend> owned = make_thread_pool_backend(workers);
 			io_backend&                 seam  = *owned;
 			assert(seam.kind() == *chosen && "the backend built is not the one the probe settled on");
-			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, std::move(owned), seam, workers, completion, options.max_in_flight};
+			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, std::move(owned), seam, completion, options.max_in_flight};
 		}
 		catch(const std::bad_alloc&)
 		{
@@ -169,7 +169,7 @@ namespace alt
 		}
 	}
 
-	std::expected<file_io, std::error_code> file_io::create(thread_pool& workers, const scheduler_ref completion, io_backend& backend, const file_io_options& options)
+	std::expected<file_io, std::error_code> file_io::create(const scheduler_ref completion, io_backend& backend, const file_io_options& options)
 	{
 		if(const std::error_code bad = check_arguments(completion, options))
 		{
@@ -185,7 +185,7 @@ namespace alt
 
 		try
 		{
-			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, nullptr, backend, workers, completion, options.max_in_flight};
+			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, nullptr, backend, completion, options.max_in_flight};
 		}
 		catch(const std::bad_alloc&)
 		{
@@ -193,9 +193,9 @@ namespace alt
 		}
 	}
 
-	file_io::file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, thread_pool& workers, const scheduler_ref completion, const std::size_t max_in_flight):
+	file_io::file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, const scheduler_ref completion, const std::size_t max_in_flight):
 	  m_owned_backend(std::move(owned)),
-	  m_shared(std::make_shared<detail::io_shared>(backend, completion, &workers, static_cast<std::ptrdiff_t>(max_in_flight))),
+	  m_shared(std::make_shared<detail::io_shared>(backend, completion, static_cast<std::ptrdiff_t>(max_in_flight))),
 	  m_kind(backend.kind())
 	{}
 

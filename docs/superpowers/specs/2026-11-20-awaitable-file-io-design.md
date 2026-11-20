@@ -407,7 +407,7 @@ unreachable through the stated API. `create` gets an overload:
 
 ```cpp
 [[nodiscard]] static std::expected<file_io, std::error_code>
-    create(thread_pool& workers, scheduler_ref completion, io_backend& backend,
+    create(scheduler_ref completion, io_backend& backend,
            file_io_options options = {});
 ```
 
@@ -663,7 +663,7 @@ why `io_shared` is refcounted and `file_io` is only a handle to it.
   `scheduler_ref` and `thread_pool` already state ("the pool must outlive every
   suspension that targets it"). This is why no "never ran" enumerator appears in the
   surface: there is no legitimate way to observe one.
-- **`~file_io` must not run on a thread of the `thread_pool` it borrows.** It would be
+- **`~file_io` must not run on a thread of the pool its backend runs on** (the borrowed `thread_pool` for the built-in overload, or whichever pool an injected backend was built with, if any). It would be
   waiting for jobs queued behind itself. This is exactly the hazard `cpwf` hand-rolled
   `StoreWorker` to escape — the last reference to the store can be held by a finishing
   job, so the store can die on the worker thread — and borrowing the pool rather than
@@ -712,7 +712,7 @@ Stated per-member in the Doxygen, as every other alt primitive does. In summary:
 | Subject | Contract |
 |---------|----------|
 | `file_io` operations | May be initiated from any thread; internally synchronized. In practice the slot invariant above means they are initiated on a home thread. |
-| `~file_io` | Not from a borrowed `thread_pool` worker. See "Shutdown". |
+| `~file_io` | Not from a worker of the pool the backend runs on (the borrowed `thread_pool` for the built-in overload). See "Shutdown". |
 | Two `read_at`/`write_at` on one `async_file` | Supported concurrently. They are positional and share no file offset, which is why the operation set has no seek and no current-position read. |
 | `close()` racing an outstanding operation on the same file | A precondition violation. The refcounted `io_handle` keeps the descriptor valid regardless, so this is a logic error rather than a memory error. |
 | Two operations sharing one `io_buffer` region | A precondition violation; `io_buffer` does no interlocking. |

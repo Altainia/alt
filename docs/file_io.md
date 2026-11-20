@@ -66,7 +66,7 @@ namespace alt
         [[nodiscard]] static std::expected<file_io, std::error_code>
             create(thread_pool& workers, scheduler_ref completion, const file_io_options& options = {});
         [[nodiscard]] static std::expected<file_io, std::error_code>
-            create(thread_pool& workers, scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
+            create(scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
 
         file_io(file_io&&) = delete;     // immovable; so are the copies
         ~file_io();                      // blocks until the backend is quiet
@@ -167,9 +167,10 @@ Two preconditions, stated rather than enforced, both with precedent in
 1. **The object must outlive every operation started on it.** An operation still parked
    on a backpressure permit at destruction is a violation, and asserts in builds with
    asserts enabled.
-2. **The destructor must not run on a thread of the borrowed `thread_pool`**, where it
-   would wait for jobs queued behind itself. That is why the pool is borrowed rather than
-   owned: a precondition can be stated, an owned pool's last reference dying on its own
+2. **The destructor must not run on a thread of the pool the backend runs on**: the
+   borrowed `thread_pool` for the built-in overload, or whichever pool an injected
+   backend was built with, if any. It would wait for jobs queued behind itself. That is
+   why the built-in overload borrows its pool rather than owning it: a precondition can be stated, an owned pool's last reference dying on its own
    worker cannot be.
 
 There is deliberately no separate stop-accepting or drain API. One documented obligation
@@ -226,7 +227,7 @@ All of them copy their paths into the operation, so a path need not outlive the 
 what it returned (`std::expected<void, std::error_code>` for a `void` callable). It is
 for platform calls the portable operation set does not cover, such as a Linux `openat2`
 with `RESOLVE_BENEATH`, which is several system calls that must run as a unit. It always
-runs on the thread pool, on every platform, and it consumes an in-flight slot like any
+runs on the thread pool, on every platform (on an injected backend, wherever that backend's `submit()` sends it), and it consumes an in-flight slot like any
 operation, so it cannot be used to route around `max_in_flight`.
 
 **Why `f` is not simply kept in the coroutine.** Cancellation destroys frames, and a

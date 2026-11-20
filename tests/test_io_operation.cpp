@@ -139,7 +139,7 @@ namespace
 
 	std::shared_ptr<io_shared> make_shared_state(alt::io_backend& backend, const alt::scheduler_ref completion, std::ptrdiff_t max_in_flight = 4)
 	{
-		return std::make_shared<io_shared>(backend, completion, nullptr, max_in_flight);
+		return std::make_shared<io_shared>(backend, completion, max_in_flight);
 	}
 
 	/**

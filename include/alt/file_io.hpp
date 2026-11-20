@@ -88,10 +88,12 @@ namespace alt
 	 *  - this object must outlive every operation started on it. An operation still
 	 *    parked on a backpressure permit at destruction is a violation, and asserts in
 	 *    builds with asserts enabled;
-	 *  - the destructor must not run on a thread of the borrowed alt::thread_pool, where
-	 *    it would wait for jobs queued behind itself. That is why the pool is borrowed
-	 *    rather than owned: a precondition can be stated, an owned pool's last
-	 *    reference dying on its own worker cannot be.
+	 *  - the destructor must not run on a thread of the pool the backend runs on: the
+	 *    borrowed alt::thread_pool for the built-in overload, or whichever pool an
+	 *    injected backend was built with, if any. It would wait for jobs queued behind
+	 *    itself. That is why the built-in overload borrows its pool rather than owning it:
+	 *    a precondition can be stated, an owned pool's last reference dying on its own
+	 *    worker cannot be.
 	 *
 	 * There is deliberately no separate stop-accepting/drain API: one documented
 	 * obligation beats a second shutdown protocol with different ergonomics from
@@ -130,16 +132,20 @@ namespace alt
 		 * @brief Creates a service over a backend the caller owns.
 		 *
 		 * This is how a test drives the service with a manual_io_backend, which an
-		 * enumerator cannot conjure. @p backend must outlive this object. The same
-		 * argument failures as the overload above, and options.backend must be
-		 * `automatic` or equal to @p backend's kind(): a mismatch fails with
-		 * std::errc::invalid_argument rather than silently using a backend the caller did
-		 * not ask for. backend() reports @p backend's own kind().
+		 * enumerator cannot conjure. @p backend must outlive this object.
+		 *
+		 * There is no pool parameter, unlike the overload above: a backend that needs a pool
+		 * (make_thread_pool_backend) was handed one when it was built, and every operation
+		 * that needs one reaches it through that backend's submit(). The same argument
+		 * failures as the overload above, and options.backend must be `automatic` or equal
+		 * to @p backend's kind(): a mismatch fails with std::errc::invalid_argument rather
+		 * than silently using a backend the caller did not ask for. backend() reports
+		 * @p backend's own kind().
 		 */
-		[[nodiscard]] static std::expected<file_io, std::error_code> create(thread_pool& workers, scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
+		[[nodiscard]] static std::expected<file_io, std::error_code> create(scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
 
 		/** Called only by create(). The passkey is private, so nothing else can. */
-		file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, thread_pool& workers, scheduler_ref completion, std::size_t max_in_flight);
+		file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, scheduler_ref completion, std::size_t max_in_flight);
 
 		file_io()                          = delete;
 		file_io(const file_io&)            = delete;

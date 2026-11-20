@@ -111,8 +111,6 @@ namespace
 	 */
 	void destroy_a_service_with_an_operation_parked()
 	{
-		auto                   created = alt::thread_pool::create(1);
-		alt::thread_pool&      pool    = pool_of(created);
 		alt::manual_io_backend backend;
 		alt::manual_scheduler  home;
 		const alt::io_buffer   buffer = alt::io_buffer::allocate(16).value();
@@ -120,7 +118,7 @@ namespace
 		const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
 
 		{
-			const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend, options);
+			const auto io = alt::file_io::create(alt::scheduler_ref{home}, backend, options);
 
 			const std::shared_ptr<op_record> first  = std::make_shared<op_record>();
 			const std::shared_ptr<op_record> second = std::make_shared<op_record>();
@@ -244,11 +242,9 @@ namespace
 	template<typename T, typename MakeTask>
 	std::string finish_after_the_chain_is_cancelled(MakeTask make_task)
 	{
-		auto                  created = alt::thread_pool::create(1);
-		alt::thread_pool&     pool    = pool_of(created);
 		alt::manual_scheduler home;
 		late_worker_backend   backend;
-		const auto            io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend);
+		const auto            io = alt::file_io::create(alt::scheduler_ref{home}, backend);
 		EXPECT_TRUE(io.has_value());
 
 		const auto               state = std::make_shared<outcome<T>>();
@@ -620,7 +616,7 @@ TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 	EXPECT_EQ(named->backend(), alt::io_backend_kind::thread_pool);
 
 	alt::manual_io_backend manual;
-	const auto             injected = alt::file_io::create(pool, alt::scheduler_ref{home}, manual);
+	const auto             injected = alt::file_io::create(alt::scheduler_ref{home}, manual);
 	ASSERT_TRUE(injected.has_value());
 	EXPECT_EQ(injected->backend(), alt::io_backend_kind::manual);
 
@@ -637,16 +633,14 @@ TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 
 TEST(FileIoTest, CreateWithABackendOverloadRejectsAMismatchingOptionsBackend)
 {
-	auto                   created = alt::thread_pool::create(1);
-	alt::thread_pool&      pool    = pool_of(created);
 	alt::manual_scheduler  home;
 	alt::manual_io_backend manual;
 
-	const auto mismatched = alt::file_io::create(pool, alt::scheduler_ref{home}, manual, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
+	const auto mismatched = alt::file_io::create(alt::scheduler_ref{home}, manual, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
 	ASSERT_FALSE(mismatched.has_value());
 	EXPECT_EQ(mismatched.error(), std::errc::invalid_argument);
 
-	const auto agreeing = alt::file_io::create(pool, alt::scheduler_ref{home}, manual, alt::file_io_options{.backend = alt::io_backend_kind::manual});
+	const auto agreeing = alt::file_io::create(alt::scheduler_ref{home}, manual, alt::file_io_options{.backend = alt::io_backend_kind::manual});
 	ASSERT_TRUE(agreeing.has_value());
 	EXPECT_EQ(agreeing->backend(), alt::io_backend_kind::manual);
 }
@@ -663,7 +657,7 @@ TEST(FileIoTest, CreateRejectsAZeroMaxInFlight)
 	ASSERT_FALSE(built_in.has_value());
 	EXPECT_EQ(built_in.error(), std::errc::invalid_argument);
 
-	const auto injected = alt::file_io::create(pool, alt::scheduler_ref{home}, manual, alt::file_io_options{.max_in_flight = 0});
+	const auto injected = alt::file_io::create(alt::scheduler_ref{home}, manual, alt::file_io_options{.max_in_flight = 0});
 	ASSERT_FALSE(injected.has_value());
 	EXPECT_EQ(injected.error(), std::errc::invalid_argument);
 }
@@ -679,7 +673,7 @@ TEST(FileIoTest, CreateRejectsAnEmptyCompletionScheduler)
 	ASSERT_FALSE(built_in.has_value());
 	EXPECT_EQ(built_in.error(), std::errc::invalid_argument);
 
-	const auto injected = alt::file_io::create(pool, alt::scheduler_ref{}, manual);
+	const auto injected = alt::file_io::create(alt::scheduler_ref{}, manual);
 	ASSERT_FALSE(injected.has_value());
 	EXPECT_EQ(injected.error(), std::errc::invalid_argument);
 }
@@ -688,8 +682,6 @@ TEST(FileIoTest, TheDestructorReturnsOnceTheBackendIsQuietEvenWithResumptionsQue
 {
 	alt_test::reset_coroutine_test_state();
 
-	auto                   created = alt::thread_pool::create(1);
-	alt::thread_pool&      pool    = pool_of(created);
 	alt::manual_io_backend backend;
 	alt::manual_scheduler  home;
 	const alt::io_buffer   buffer = alt::io_buffer::allocate(16).value();
@@ -701,7 +693,7 @@ TEST(FileIoTest, TheDestructorReturnsOnceTheBackendIsQuietEvenWithResumptionsQue
 	std::jthread      late_completer;
 
 	{
-		const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend);
+		const auto io = alt::file_io::create(alt::scheduler_ref{home}, backend);
 		ASSERT_TRUE(io.has_value());
 
 		const alt::cancellation_handle chain_a = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), finished));
@@ -742,8 +734,6 @@ TEST(FileIoTest, AQueuedResumptionRunSafelyAfterTheDestructorReturned)
 {
 	alt_test::reset_coroutine_test_state();
 
-	auto                   created = alt::thread_pool::create(1);
-	alt::thread_pool&      pool    = pool_of(created);
 	alt::manual_io_backend backend;
 	alt::manual_scheduler  home;
 	const alt::io_buffer   buffer = alt::io_buffer::allocate(16).value();
@@ -751,7 +741,7 @@ TEST(FileIoTest, AQueuedResumptionRunSafelyAfterTheDestructorReturned)
 	const std::shared_ptr<op_record> record = std::make_shared<op_record>();
 
 	{
-		const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend);
+		const auto io = alt::file_io::create(alt::scheduler_ref{home}, backend);
 		ASSERT_TRUE(io.has_value());
 
 		const alt::cancellation_handle chain = alt::start(awaiting_chain(alt::detail::file_io_access::shared(*io), read_request(buffer), record));
