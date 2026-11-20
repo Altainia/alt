@@ -121,7 +121,8 @@ namespace alt
 		 * @p completion (reported here, because posting to an empty scheduler_ref
 		 * asserts on whichever I/O thread finishes first, far from the mistake), or
 		 * io_backend_kind::manual; with std::errc::not_supported for a kind this build
-		 * does not provide.
+		 * does not provide; and with std::errc::not_enough_memory if constructing the
+		 * service throws std::bad_alloc.
 		 */
 		[[nodiscard]] static std::expected<file_io, std::error_code> create(thread_pool& workers, scheduler_ref completion, const file_io_options& options = {});
 

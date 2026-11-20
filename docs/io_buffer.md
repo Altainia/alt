@@ -10,16 +10,20 @@ by its owner. A plain `std::span` would then dangle under the kernel's feet.
 until the last holder, kernel-facing or not, lets go.
 
 ```cpp
+#include <alt/async_file.hpp>
 #include <alt/io_buffer.hpp>
 
-auto buffer = alt::io_buffer::allocate(4096);   // std::expected<io_buffer, std::error_code>
-if(!buffer)
+alt::task<void> fill(const alt::async_file& file)
 {
-    return;     // std::errc::not_enough_memory, reported rather than thrown
-}
+    auto buffer = alt::io_buffer::allocate(4096);   // std::expected<io_buffer, std::error_code>
+    if(!buffer)
+    {
+        co_return;      // std::errc::not_enough_memory, reported rather than thrown
+    }
 
-// Copies share storage; handing one to an operation does not copy a byte.
-const auto n = co_await file.read_at(*buffer, 0, buffer->size());
+    // Copies share storage; handing one to an operation does not copy a byte.
+    const auto n = co_await file.read_at(*buffer, 0, buffer->size());
+}
 ```
 
 The header includes no platform headers. The buffer is plain memory.

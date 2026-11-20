@@ -32,9 +32,17 @@ alt::task<void> copy_header(alt::file_io& io)
     // ...
 }
 
-// Elsewhere, once, on the thread that owns the loop:
-auto service = alt::file_io::create(pool, loop);   // std::expected<file_io, std::error_code>
-alt::file_io& io = *service;
+// Once, on the thread that owns the loop:
+void start(alt::thread_pool& pool, alt::scheduler_ref loop)
+{
+    auto service = alt::file_io::create(pool, loop);   // std::expected<file_io, std::error_code>
+    if(!service)
+    {
+        return;
+    }
+    alt::file_io& io = *service;   // address-stable: built in place inside the expected
+    static_cast<void>(io);
+}
 ```
 
 `pool` is an [`alt::thread_pool`](thread_pool.md), borrowed, and `loop` is the
@@ -77,6 +85,9 @@ namespace alt
             list_directory(const std::filesystem::path& path) const;
 
         template<std::invocable F>
+            requires std::is_nothrow_move_constructible_v<F>
+                  && (!std::is_reference_v<std::invoke_result_t<F>>)
+                  && (!std::is_array_v<std::invoke_result_t<F>>)
         [[nodiscard]] task<std::expected<std::invoke_result_t<F>, std::error_code>> run(F f) const;
     };
 }
@@ -91,7 +102,8 @@ thread:
   first operation on a permit that can never exist), for an empty `completion` (posting
   to an empty `scheduler_ref` asserts on whichever I/O thread finishes first, far from
   the mistake), and for `io_backend_kind::manual`, which cannot be selected by value;
-- `std::errc::not_supported` for a kind this build does not provide.
+- `std::errc::not_supported` for a kind this build does not provide;
+- `std::errc::not_enough_memory` if constructing the service throws `std::bad_alloc`.
 
 `automatic` asks the factory to pick. In this release that is always
 `io_backend_kind::thread_pool`, and `backend()` reports what was chosen; it never reports
@@ -175,7 +187,8 @@ from the backend's callback: `async_semaphore::release()` resumes a parked waite
 on the releasing thread, so releasing from the callback would put the next operation's
 submission on an I/O thread. Releasing on the home thread means **every submission
 happens on a thread the completion scheduler runs on, never on an I/O thread**, and a
-backend is never re-entered from its own completion thread.
+backend is never re-entered from its own completion thread. "Every" holds in practice
+rather than absolutely: a chain's first submission happens on whichever thread awaits it.
 
 The consequence is worth stating rather than discovering: **slot handoff is serialized
 through the home scheduler. A loop that stops pumping stops issuing new I/O.** For a

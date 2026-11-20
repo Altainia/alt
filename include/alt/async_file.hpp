@@ -140,7 +140,7 @@ namespace alt
 		 *    moved from, or adopted an invalid handle. Reported here rather than
 		 *    submitted because a descriptor number may have been reused by then;
 		 *  - std::errc::invalid_argument: @p size exceeds buffer.size(). It is rejected,
-		 *    not clamped: the backend does clamp, as a second line of defence, but a
+		 *    not clamped: the backend does clamp, as a second line of defense, but a
 		 *    clamp reports a short read that a caller cannot tell from a real one.
 		 *
 		 * A @p size of 0 completes with 0 bytes immediately and submits nothing.

@@ -8,14 +8,18 @@ one callback, and cancel as a hint. A backend implements it; application code ra
 touches it, except to inject a `manual_io_backend` in a test.
 
 ```cpp
+#include <alt/file_io.hpp>
 #include <alt/io_backend.hpp>
 
-alt::manual_io_backend backend;
-auto io = alt::file_io::create(pool, loop, backend);   // the overload that is handed a backend
+void drive_by_hand(alt::thread_pool& pool, alt::scheduler_ref loop)
+{
+    alt::manual_io_backend backend;
+    auto io = alt::file_io::create(pool, loop, backend);   // the overload that is handed a backend
 
-// ... start an operation, then decide the order things happen in:
-backend.cancel(alt::io_token{1});                      // the first operation's token
-backend.complete(0, alt::io_completion{.bytes = 5});   // the callback runs here, on this thread
+    // ... start an operation on *io, then decide the order things happen in:
+    backend.cancel(alt::io_token{1});                      // the first operation's token
+    backend.complete(0, alt::io_completion{.bytes = 5, .error = {}});   // the callback runs here, on this thread
+}
 ```
 
 This release ships one real backend, the thread-pool one, which `file_io::backend()`
@@ -136,7 +140,7 @@ Which fields each operation reads, and where its result goes, is the table on
   backend runs them on a helper thread**. That is an implementation burden on the
   backend, not a gap in the interface.
 - **An `invoke` job carries an obligation the others do not.** Its `out` is an
-  `io_invocable*`, and the backend must call `invoke()` when the job runs, or
+  `alt::detail::io_invocable*` (declared in `<alt/detail/io_operation.hpp>`), and the backend must call `invoke()` when the job runs, or
   `discard()` *instead* for a job cancelled before it started, and complete that job with
   `std::errc::operation_canceled`. `discard()` is what destroys the callable and its
   captures on the helper thread. A backend that skips a cancelled job leaves the
@@ -163,7 +167,7 @@ proven by ordering a cancel before a completion on purpose.
   lock, and delivers `result` as is, cancelled or not. Completing an index twice, or one
   never submitted, is a test bug and asserts.
 - `complete_inline_next(result)` arms the *next* `submit()` to complete before it
-  returns, modelling the inline path. `fail_next_submission(error)` arms it to be
+  returns, which models the inline path. `fail_next_submission(error)` arms it to be
   rejected, and the callback of a rejected submission never runs. Both are one-shot, and
   when both are armed the failure wins and consumes both.
 - `cancel` records the request and never completes the operation; `was_cancelled(index)`

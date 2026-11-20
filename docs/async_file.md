@@ -10,6 +10,7 @@ the price of one coroutine frame allocation per operation.
 
 ```cpp
 #include <alt/async_file.hpp>
+#include <alt/file_io.hpp>
 
 alt::task<void> save(alt::file_io& io, alt::io_buffer data)
 {
@@ -92,7 +93,7 @@ the task is cancelled first.
    handle. It is reported here rather than submitted because the descriptor number may
    have been reused by then.
 2. `std::errc::invalid_argument`: `size` exceeds `buffer.size()`. It is **rejected, not
-   clamped**. The backend does clamp, as a second line of defence, but a clamp reports a
+   clamped**. The backend does clamp, as a second line of defense, but a clamp reports a
    short read that a caller cannot tell from a real one.
 
 A `size` of 0 completes with 0 bytes immediately and submits nothing. A read is shorter
