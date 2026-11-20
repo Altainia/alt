@@ -69,6 +69,7 @@ namespace
 	{
 		bool                    slot_acquired = false;
 		bool                    body_ran      = false;
+		bool                    threw         = false;
 		alt::io_completion      result{};
 		std::coroutine_handle<> self;
 	};
@@ -256,6 +257,104 @@ namespace
 			}};
 		}
 		return used;
+	}
+
+	/**
+	 * A backend whose submit() runs a hook and then throws, which the seam permits
+	 * nothing about: a throwing submit is neither of the two outcomes it specifies, so
+	 * the awaiter treats it as a submission that never happened. The hook is what makes
+	 * the detached arm of that path reachable, by requesting a stop from inside submit()
+	 * while the awaiter's gate is still up.
+	 */
+	class throwing_backend final: public alt::io_backend
+	{
+	public:
+		explicit throwing_backend(std::function<void()> before_throw) noexcept: m_before_throw(std::move(before_throw))
+		{}
+
+		throwing_backend(const throwing_backend&)            = delete;
+		throwing_backend& operator=(const throwing_backend&) = delete;
+		throwing_backend(throwing_backend&&)                 = delete;
+		throwing_backend& operator=(throwing_backend&&)      = delete;
+		~throwing_backend() override                         = default;
+
+		[[nodiscard]] std::expected<alt::io_token, std::error_code> submit(const alt::io_request& /*request*/,
+		                                                                   alt::io_completion_fn /*on_done*/,
+		                                                                   void* /*state*/) override
+		{
+			++m_submissions;
+
+			if(m_before_throw)
+			{
+				m_before_throw();
+			}
+
+			throw std::bad_alloc{};
+		}
+
+		void cancel(alt::io_token /*token*/) noexcept override
+		{
+			++m_cancels;
+		}
+
+		[[nodiscard]] alt::io_backend_kind kind() const noexcept override
+		{
+			return alt::io_backend_kind::manual;
+		}
+
+		[[nodiscard]] int submissions() const noexcept
+		{
+			return m_submissions;
+		}
+
+		[[nodiscard]] int cancels() const noexcept
+		{
+			return m_cancels;
+		}
+
+	private:
+		std::function<void()> m_before_throw;
+		int                   m_submissions = 0;
+		int                   m_cancels     = 0;
+	};
+
+	/**
+	 * A throwing_backend hook that requests a stop on @p source from inside submit(), so
+	 * the block is detached while the awaiter's gate is still up. Lifted out of the test
+	 * bodies it serves, where the lambda's nesting is what pushes them past clang-tidy's
+	 * cognitive-complexity threshold.
+	 */
+	std::function<void()> stop_from_inside_submit(std::stop_source& source)
+	{
+		return [&source] { static_cast<void>(source.request_stop()); };
+	}
+
+	/** The same chain, but reporting what the co_await threw instead of letting it escape. */
+	alt::cancellable_task chain_catching_the_await(std::shared_ptr<io_shared> shared,
+	                                               alt::io_request            request,
+	                                               std::shared_ptr<io_handle> file,
+	                                               std::shared_ptr<op_record> record)
+	{
+		const logged_frame tracker{1};
+
+		const alt::wait_result slot = co_await shared->acquire_slot();
+		if(!slot)
+		{
+			co_return;
+		}
+		record->slot_acquired = true;
+
+		try
+		{
+			record->result = co_await io_awaiter{shared, std::move(request), std::move(file)};
+		}
+		catch(const std::bad_alloc&)
+		{
+			record->threw = true;
+			co_return;
+		}
+
+		record->body_ran = true;
 	}
 
 	/** A completion scheduler with nowhere to post. See the test that uses it. */
@@ -478,6 +577,14 @@ TEST(IoOperationTest, TheBufferSurvivesTheChainsTeardownAndTheBackendsLateWrite)
 	// alive either way and the pattern would read back either way. The weak_ptr
 	// separates reading the bytes from owning them, so the survival claim is asserted
 	// rather than assumed.
+	//
+	// WHAT THIS TEST CANNOT SEPARATE, stated so phases 7b and 7c do not assume it covers
+	// them: the block's co-ownership and the backend's own are satisfied by the SAME
+	// io_buffer, because manual_io_backend copies the request the block hands it. The
+	// mutation that proves this test bites -- the block holding a bare span -- therefore
+	// strips both at once. A real backend that does not retain the io_buffer across its
+	// completion would leave the block's half of the property unverified by this case, so
+	// each backend owes a test of its own that the storage outlives its late write.
 	constexpr std::size_t                       size    = 32;
 	auto                                        storage = std::make_shared<std::vector<std::byte>>(size, std::byte{0});
 	const std::weak_ptr<std::vector<std::byte>> watch   = storage;
@@ -699,4 +806,137 @@ TEST(IoOperationTest, ATeardownWithASecondCallbackOnTheChainsTokenIsSafe)
 	EXPECT_EQ(backend.pending(), 0U);
 	EXPECT_TRUE(source.stop_requested());
 	EXPECT_FALSE(source.request_stop());
+}
+
+TEST(IoOperationTest, AThrowingSubmitPropagatesOutOfTheAwaitAndHandsBackThePermit)
+{
+	alt_test::reset_coroutine_test_state();
+
+	// A throwing submit is outside the seam's two specified outcomes, so the awaiter
+	// treats it as a submission that never happened: no callback is coming, the block's
+	// own reference for the backend is dropped, the permit goes back, and the exception
+	// travels out of await_suspend into the awaiting body.
+	throwing_backend      backend{nullptr};
+	alt::manual_scheduler home;
+	const auto            shared = make_shared_state(backend, alt::scheduler_ref{home}, 1);
+	const auto            file   = io_handle::adopt(alt::invalid_native_handle);
+	const alt::io_buffer  buffer = alt::io_buffer::allocate(16).value();
+
+	const std::shared_ptr<op_record> record = std::make_shared<op_record>();
+	alt::cancellation_handle         chain  = alt::start(chain_catching_the_await(shared, read_request(buffer, file), file, record));
+
+	ASSERT_TRUE(record->slot_acquired);
+	EXPECT_EQ(backend.submissions(), 1);
+	EXPECT_TRUE(record->threw);
+	EXPECT_FALSE(record->body_ran);
+
+	// Nothing was posted, the backend count is back to zero, and the permit is available
+	// again rather than lost with the unwound frame.
+	EXPECT_EQ(home.drain(), 0U);
+	EXPECT_EQ(shared->at_backend.load(), 0U);
+	EXPECT_EQ(shared->slots.available(), 1);
+	EXPECT_EQ(alt_test::live_frames, 0);
+	EXPECT_FALSE(chain.stop_requested());
+}
+
+TEST(IoOperationTest, AThrowingSubmitOnADetachedBlockPostsTheTeardownAndSwallowsTheThrow)
+{
+	alt_test::reset_coroutine_test_state();
+
+	// The other arm of the same path, and the most intricate branch in this component: the
+	// chain is stopped from inside submit(), while the awaiter's gate is still up, and
+	// submit() then throws. A detached chain must not resume, with or without an exception,
+	// so the throw dies with the block and the teardown is posted instead.
+	std::stop_source source;
+	throwing_backend backend{stop_from_inside_submit(source)};
+
+	alt::manual_scheduler home;
+	const auto            shared = make_shared_state(backend, alt::scheduler_ref{home}, 1);
+	const auto            file   = io_handle::adopt(alt::invalid_native_handle);
+	const alt::io_buffer  buffer = alt::io_buffer::allocate(16).value();
+
+	const std::shared_ptr<op_record> record = std::make_shared<op_record>();
+
+	static_cast<void>(alt::start(chain_catching_the_await(shared, read_request(buffer, file), file, record), {.token = source.get_token()}));
+
+	ASSERT_TRUE(record->slot_acquired);
+	EXPECT_EQ(backend.submissions(), 1);
+
+	// Swallowed, not propagated: the awaiting body saw neither the exception nor another
+	// statement of its own.
+	EXPECT_FALSE(record->threw);
+	EXPECT_FALSE(record->body_ran);
+	EXPECT_EQ(alt_test::live_frames, 1);
+
+	EXPECT_EQ(home.drain(), 1U);
+	EXPECT_EQ(alt_test::live_frames, 0);
+	EXPECT_FALSE(record->threw);
+	EXPECT_FALSE(record->body_ran);
+	EXPECT_EQ(alt_test::take_destruction_order(), std::vector<int>{1});
+
+	// The permit came back through the resumption's own release, and nothing is left at
+	// the backend.
+	EXPECT_EQ(shared->slots.available(), 1);
+	EXPECT_EQ(shared->at_backend.load(), 0U);
+}
+
+TEST(IoOperationTest, AChainStoppedBeforeTheAwaitNeverReachesTheBackend)
+{
+	alt_test::reset_coroutine_test_state();
+
+	// What this pins, and what it does not, because the distinction is the whole value of
+	// the case. A chain whose stop is already requested never reaches the backend. The
+	// layer that refuses it is alt's own, one above this component:
+	// detail::cancellation_checked::await_ready returns false for a stopped chain and its
+	// await_suspend abandons WITHOUT ENTERING THE INNER AWAITER AT ALL, so io_awaiter::start
+	// never runs and no io_operation block is ever submitted. The property is worth a
+	// regression test here because this component is the first in-library consumer of that
+	// layer and silently losing the pre-check would turn every stopped chain into a
+	// submission.
+	//
+	// It is NOT a test of start()'s own already-detached check, and no test in this file is.
+	// That check fires only for a stop that lands between cancellation_checked's pre-check
+	// and the std::stop_callback registration a few statements later, and nothing
+	// single-threaded can land there: the only code between those two points is the
+	// awaiter's own prologue, which calls out to nothing, so a stop would have to arrive
+	// from another thread inside that window. The check is therefore guarded but
+	// unexercised, and it stays because the window exists rather than because anything here
+	// reaches it. Same for the `starting` gate's stop-side half, which that window is also
+	// the whole reason for.
+	//
+	// The throwing backend is used only because it is the one backend here whose submit()
+	// can arm the stop from inside itself; the assertion is about the SECOND operation,
+	// which never reaches submit() and so never throws.
+	std::stop_source source;
+	throwing_backend backend{stop_from_inside_submit(source)};
+
+	alt::manual_scheduler home;
+	const auto            shared = make_shared_state(backend, alt::scheduler_ref{home}, 2);
+	const auto            file   = io_handle::adopt(alt::invalid_native_handle);
+	const alt::io_buffer  buffer = alt::io_buffer::allocate(16).value();
+
+	const std::shared_ptr<op_record> first  = std::make_shared<op_record>();
+	const std::shared_ptr<op_record> second = std::make_shared<op_record>();
+
+	// The first chain arms the stop from inside submit() and is detached by it.
+	static_cast<void>(alt::start(chain_catching_the_await(shared, read_request(buffer, file), file, first), {.token = source.get_token()}));
+	ASSERT_EQ(backend.submissions(), 1);
+	ASSERT_TRUE(source.stop_requested());
+
+	// The second starts on a token that is already stopped.
+	static_cast<void>(alt::start(chain_catching_the_await(shared, read_request(buffer, file), file, second), {.token = source.get_token()}));
+
+	// Still 1. The second chain was torn down at its first suspension point, so it never
+	// took a permit either.
+	EXPECT_EQ(backend.submissions(), 1);
+	EXPECT_EQ(backend.cancels(), 0);
+	EXPECT_FALSE(second->slot_acquired);
+	EXPECT_FALSE(second->body_ran);
+	EXPECT_FALSE(second->threw);
+
+	EXPECT_EQ(home.drain(), 1U);
+	EXPECT_FALSE(first->body_ran);
+	EXPECT_EQ(alt_test::live_frames, 0);
+	EXPECT_EQ(shared->slots.available(), 2);
+	EXPECT_EQ(shared->at_backend.load(), 0U);
 }

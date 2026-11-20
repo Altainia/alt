@@ -212,12 +212,21 @@ namespace alt::detail
 
 	bool io_awaiter::start()
 	{
-		// A counted local, and load-bearing from the registration below to the end of this
-		// function. Past that point a stop request on another thread can detach the block,
-		// and on a completion scheduler that runs a posted item where it is posted the
-		// resulting teardown frees this awaiter's frame. `block->starting` is what keeps
-		// that from happening while this function runs -- but only because nothing below
-		// reads a member of *this once the gate is cleared.
+		// A counted local, and the exact invariant matters: FROM THE std::stop_callback
+		// REGISTRATION BELOW TO THE END OF THIS FUNCTION, NOTHING READS A MEMBER OF *this.
+		// Everything past that one line goes through this local and the io_shared&
+		// derived from it. That is where the whole safety argument sits, because from the
+		// registration onwards a stop request on another thread can detach the block, and
+		// on a completion scheduler that runs a posted item where it is posted the
+		// resulting teardown frees this awaiter's frame.
+		//
+		// `block->starting` is the other half, and only its stop-side half is load-bearing
+		// in this body: the one statement that writes a member after the registration is
+		// the assignment OF that registration, so a handler which fired inline from its
+		// own constructor and posted immediately would free the frame mid-assignment. The
+		// gate also defers an inline backend completion's post, which this body does not
+		// need -- it reads no member by then -- and is kept because one uniform "who
+		// posts" rule is easier to keep true than two.
 		const std::shared_ptr<io_operation> block = m_block;
 		io_shared&                          owner = *block->owner;
 
@@ -249,6 +258,38 @@ namespace alt::detail
 			throw;
 		}
 
+		// The handler above may have fired inline from its own registration, which is the
+		// one window in which a block can be detached before anything has been submitted.
+		// Submitting anyway and cancelling afterwards would be within the seam's contract
+		// -- the cancel is a hint and the completion still arrives -- but it would mean a
+		// write the caller stopped BEFORE IT WAS EVER SUBMITTED still reaching the kernel.
+		// Skipping the submission outright is strictly better, and it makes this window
+		// behave like the slot window ahead of it, where a stop means the operation never
+		// reaches the backend at all.
+		{
+			bool teardown = false;
+			{
+				const std::scoped_lock lock{block->mutex};
+
+				if(block->state != io_operation::phase::waiting)
+				{
+					assert(block->state == io_operation::phase::detached && "an alt file I/O operation was completed before it was submitted");
+
+					block->starting = false;
+					block->keep     = block;
+					teardown        = true;
+				}
+			}
+
+			if(teardown)
+			{
+				// THE LAST STATEMENT on this path: the post may run the teardown here and
+				// free this awaiter's frame, so nothing below may touch *this.
+				block->post_resumption();
+				return true;
+			}
+		}
+
 		// The reference the seam's void* stands for, parked before the submission because
 		// the completion may fire inline inside submit() and takes it straight back out.
 		{
@@ -267,6 +308,15 @@ namespace alt::detail
 		{
 			// Treated as a submission that never happened, which the seam's contract
 			// allows: only a submission that RETURNS a token runs its callback.
+			//
+			// The one combination this cannot survive is a backend that runs the
+			// completion callback INLINE and then throws: on_backend_complete has already
+			// lowered the backend count, so this would lower it a second time and underflow
+			// it. The seam forbids that combination -- a submission either runs its
+			// callback exactly once and returns a token, or does neither -- so this is a
+			// note rather than a guard. A guard here would have to distinguish "the
+			// callback ran" from "the chain was detached", and the block's own state cannot:
+			// both leave it non-waiting.
 			owner.leave_backend();
 
 			bool teardown = false;

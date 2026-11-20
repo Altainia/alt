@@ -93,11 +93,11 @@ namespace alt::detail
 		 */
 		async_semaphore slots;
 
-		/** The seam. Not owned; see the constructor. */
-		io_backend* backend;
+		/** The seam. Not owned, and fixed at construction; see the constructor. */
+		io_backend* const backend;
 
-		/** Where resumptions and permit releases happen. Not owned; see the constructor. */
-		scheduler_ref completion;
+		/** Where resumptions and permit releases happen. Not owned; fixed at construction. */
+		const scheduler_ref completion;
 
 		/**
 		 * The borrowed pool the thread-pool arm runs on, or null.
@@ -106,7 +106,7 @@ namespace alt::detail
 		 * operations no kernel interface covers (a directory listing, an arbitrary
 		 * callable) run on a pool on every platform, whichever backend is in front of it.
 		 */
-		thread_pool* workers;
+		thread_pool* const workers;
 
 		/**
 		 * How many operations the backend has been handed and not yet completed.

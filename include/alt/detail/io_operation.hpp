@@ -349,13 +349,24 @@ namespace alt::detail
 		 *
 		 * @param owner   The service state the operation co-owns. Must not be null.
 		 * @param request The operation. Moved into the block; see io_operation::request.
-		 * @param file    The descriptor to co-own, or null for an operation that names no
-		 *                handle. An operation against a handle MUST pass the
+		 * @param file    The descriptor to co-own, or an explicit nullptr for an operation
+		 *                that names no handle (a path operation, or an escape-hatch call).
+		 *                An operation against a handle MUST pass the
 		 *                alt::detail::io_handle that owns it and not merely set
 		 *                `request.handle`, or nothing keeps the descriptor -- or its
 		 *                NUMBER -- from being reused under the backend.
+		 *
+		 *                DELIBERATELY NOT DEFAULTED. A caller that sets `request.handle`
+		 *                and omits this argument loses the keepalive silently, leaving the
+		 *                descriptor owned by nothing but the frame that cancellation
+		 *                destroys -- which is the defect
+		 *                IoOperationTest.TheDescriptorSurvivesTheChainsTeardown exists to
+		 *                detect, and which it does detect. Requiring the argument turns
+		 *                that from a documented hazard into a compile error, at the cost of
+		 *                an explicit nullptr at the handle-less call sites -- which reads
+		 *                better than an invisible omission anyway.
 		 */
-		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file = {});
+		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file);
 
 		~io_awaiter() = default;
 
