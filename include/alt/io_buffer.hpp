@@ -5,6 +5,7 @@
 #include <memory>
 #include <span>
 #include <system_error>
+#include <utility>
 
 namespace alt
 {
@@ -49,6 +50,43 @@ namespace alt
 		 * which the buffer is false; see operator bool.
 		 */
 		io_buffer() noexcept = default;
+
+		/** @brief Copies share storage; see the class description. */
+		io_buffer(const io_buffer&) noexcept = default;
+
+		/** @brief Copies share storage; see the class description. */
+		io_buffer& operator=(const io_buffer&) noexcept = default;
+
+		/**
+		 * @brief Takes the storage and leaves @p other empty and false.
+		 *
+		 * User-provided on purpose, not defaulted. A defaulted move would move the
+		 * owner out but copy the span and flag, leaving the source with a live-looking
+		 * bytes() into storage it no longer keeps alive: the dangling view this type
+		 * exists to remove, and one that becomes a use-after-free if a moved-from
+		 * buffer ever reaches the kernel. Do not simplify back to = default.
+		 */
+		io_buffer(io_buffer&& other) noexcept
+		  : m_owner(std::move(other.m_owner)),
+		    m_bytes(std::exchange(other.m_bytes, {})),
+		    m_named(std::exchange(other.m_named, false))
+		{
+		}
+
+		/** @brief Move-assigns as the move constructor does; self-move is a no-op. */
+		io_buffer& operator=(io_buffer&& other) noexcept
+		{
+			if(this != &other)
+			{
+				m_owner = std::move(other.m_owner);
+				m_bytes = std::exchange(other.m_bytes, {});
+				m_named = std::exchange(other.m_named, false);
+				other.m_owner.reset();
+			}
+			return *this;
+		}
+
+		~io_buffer() = default;
 
 		/**
 		 * @brief Allocates zero-initialized storage of the given size.
@@ -110,7 +148,7 @@ namespace alt
 		 * @brief Whether this buffer names storage at all.
 		 *
 		 * False only for a default-constructed buffer. A moved-from buffer is
-		 * unspecified and should not be consulted. It is
+		 * reset to the default-constructed state, so it is false too. It is
 		 * not "has bytes": a zero-size allocate() result is a real buffer and is true,
 		 * so test size() when the question is whether there is anything to read or
 		 * write.

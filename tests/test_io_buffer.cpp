@@ -47,6 +47,8 @@ TEST(IoBufferTest, CopiesShareStorageSoAWriteThroughOneIsSeenByTheOther)
 {
 	auto original = alt::io_buffer::allocate(16);
 	ASSERT_TRUE(original.has_value());
+	// The copy is the test: a second owner of the storage.
+	// NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
 	const alt::io_buffer copy = *original;
 
 	original->bytes()[3] = sentinel;
@@ -62,6 +64,8 @@ TEST(IoBufferTest, AllocatedStorageOutlivesEveryCopyButTheLast)
 	const alt::io_buffer survivor = *original;
 
 	{
+		// The copy is the test: a second owner of the storage.
+		// NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
 		const alt::io_buffer writer = *original;
 		for(auto& byte: writer.bytes())
 		{
@@ -90,6 +94,8 @@ TEST(IoBufferTest, BorrowHoldsItsKeepaliveForAsLongAsTheBufferLives)
 		EXPECT_EQ(buffer.size(), storage.size());
 		EXPECT_TRUE(static_cast<bool>(buffer));
 
+		// The copy is the test: it must bump the shared refcount.
+		// NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
 		const alt::io_buffer copy = buffer;
 		EXPECT_EQ(keepalive.use_count(), 3);
 	}
@@ -108,4 +114,25 @@ TEST(IoBufferTest, BorrowUnsafeHoldsNothingAndStillExposesTheBytes)
 	EXPECT_EQ(buffer.size(), storage.size());
 	EXPECT_EQ(storage[2], sentinel);
 	EXPECT_TRUE(static_cast<bool>(buffer));
+}
+
+TEST(IoBufferTest, AMovedFromBufferIsEmptyAndFalsey)
+{
+	auto source = alt::io_buffer::allocate(32);
+	ASSERT_TRUE(source.has_value());
+
+	alt::io_buffer moved_to{std::move(*source)};
+	alt::io_buffer assigned;
+	assigned = std::move(moved_to);
+
+	EXPECT_EQ(assigned.size(), 32U);
+	EXPECT_TRUE(static_cast<bool>(assigned));
+	// NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+	EXPECT_EQ(source->size(), 0U);
+	EXPECT_TRUE(source->bytes().empty());
+	EXPECT_FALSE(static_cast<bool>(*source));
+	EXPECT_EQ(moved_to.size(), 0U);
+	EXPECT_TRUE(moved_to.bytes().empty());
+	EXPECT_FALSE(static_cast<bool>(moved_to));
+	// NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
 }
