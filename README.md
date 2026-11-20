@@ -138,11 +138,11 @@ Pass a different `--prefix` to install elsewhere.
 
 ### Debian package
 
-Produces `altlib_1.14.0_amd64.deb` in the project root:
+Produces `altlib_1.15.0_amd64.deb` in the project root:
 
 ```bash
 bash packaging/build-deb.sh
-sudo dpkg -i altlib_1.14.0_amd64.deb
+sudo dpkg -i altlib_1.15.0_amd64.deb
 ```
 
 ## Using in your project
@@ -150,15 +150,15 @@ sudo dpkg -i altlib_1.14.0_amd64.deb
 After installing, other CMake projects can consume the library via `find_package`:
 
 ```cmake
-find_package(Alt 1.14.0 REQUIRED)
+find_package(Alt 1.15.0 REQUIRED)
 target_link_libraries(my_target PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release, because the
 inline sizes of the async primitives can change between minors. The package config
-enforces this: requesting `1.14.0` accepts 1.14.0 and later 1.14.x releases, but rejects
-1.15.0 and 1.13.x, and a request for a higher patch than the installed one (1.14.1
-against 1.14.0) also fails. Update the requested version when you upgrade across a minor
+enforces this: requesting `1.15.0` accepts 1.15.0 and later 1.15.x releases, but rejects
+1.16.0 and 1.14.x, and a request for a higher patch than the installed one (1.15.1
+against 1.15.0) also fails. Update the requested version when you upgrade across a minor
 release.
 
 A refused request prints which minor series the installed package accepts and why, so a
@@ -208,3 +208,7 @@ Then include headers as needed:
 | `<alt/task_group.hpp>` | The owner's teardown point for spawned tasks: `task_group` | [docs/task_group.md](docs/task_group.md) |
 | `<alt/when_all.hpp>` | Awaits several awaitables concurrently and yields every result: `when_all` | [docs/when_all.md](docs/when_all.md) |
 | `<alt/when_any.hpp>` | Races several awaitables and yields the first to complete: `when_any` | [docs/when_any.md](docs/when_any.md) |
+| `<alt/io_buffer.hpp>` | Refcounted byte buffer that outlives an abandoned operation: `io_buffer` | [docs/io_buffer.md](docs/io_buffer.md) |
+| `<alt/io_backend.hpp>` | The seam between the file layer and an I/O engine, with a hand-driven test backend and a thread-pool backend: `io_backend`, `io_request`, `io_completion`, `io_token`, `manual_io_backend`, `make_thread_pool_backend` | [docs/io_backend.md](docs/io_backend.md) |
+| `<alt/file_io.hpp>` | Service for awaitable file I/O with backpressure: `file_io`, `file_io_options`; `open`, `stat`, `rename`, `unlink`, `list_directory` and the `run` escape hatch | [docs/file_io.md](docs/file_io.md) |
+| `<alt/async_file.hpp>` | An open file with awaitable positional operations: `async_file`, `open_flags`, `sync_mode` | [docs/async_file.md](docs/async_file.md) |

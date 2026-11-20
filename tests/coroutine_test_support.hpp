@@ -4,7 +4,9 @@
 #include <coroutine>
 #include <cstddef>
 #include <exception>
+#include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace alt_test
@@ -27,9 +29,67 @@ namespace alt_test
 	 * thread reads. A test whose teardown can run on two threads at once -- an awaiter
 	 * that registers a std::stop_callback on the chain's token, say, so that one branch
 	 * tears down on the requesting thread while the other tears down on the completing
-	 * one -- would race here, and needs a mutex added before it can use this.
+	 * one -- would race here, and needs a mutex added before it can use this. That mutex
+	 * now exists beside this vector rather than on it: record_destruction() and
+	 * take_destruction_order() below are the answer for a two-thread teardown, and a test
+	 * in that shape uses those instead of this. This vector keeps its unsynchronized
+	 * contract because the suites that already append to it directly rely on reading it
+	 * without consuming it, which the locked pair deliberately does not offer.
 	 */
 	inline std::vector<int> destruction_order;
+
+	namespace detail
+	{
+
+		/**
+		 * The lock behind record_destruction() and take_destruction_order(). File-local to
+		 * this header's inline entities, so every translation unit that includes it shares
+		 * the one object and the one log.
+		 */
+		inline std::mutex& destruction_log_mutex() noexcept
+		{
+			static std::mutex mutex;
+			return mutex;
+		}
+
+		/** The log itself. Reached only under destruction_log_mutex(). */
+		inline std::vector<int>& destruction_log() noexcept
+		{
+			static std::vector<int> log;
+			return log;
+		}
+
+	}
+
+	/**
+	 * @brief Appends @p tag to the mutex-guarded destruction log.
+	 *
+	 * The answer to destruction_order's stated limit. An awaiter that registers a
+	 * std::stop_callback on its chain's token can have one branch of a teardown run on the
+	 * thread that requested the stop while the other runs on the thread that completed the
+	 * operation, so a test over such an awaiter has two concurrent writers and cannot use
+	 * the unsynchronized vector above. Safe to call from any thread, and from a destructor:
+	 * it takes one lock and appends one int.
+	 */
+	inline void record_destruction(int tag)
+	{
+		const std::scoped_lock lock{detail::destruction_log_mutex()};
+		detail::destruction_log().push_back(tag);
+	}
+
+	/**
+	 * @brief Takes the recorded tags, in destruction order, and leaves the log empty.
+	 *
+	 * Consuming rather than observing, which is what makes the result safe to read without
+	 * the lock: the caller owns the vector it gets back, so no writer on another thread can
+	 * be appending to it. A test that wants to assert twice holds on to the one result
+	 * rather than calling this twice.
+	 */
+	[[nodiscard]] inline std::vector<int> take_destruction_order()
+	{
+		const std::scoped_lock lock{detail::destruction_log_mutex()};
+		return std::exchange(detail::destruction_log(), std::vector<int>{});
+	}
 
 	/** Tracks a coroutine frame's lifetime for the tests in this suite. */
 	struct frame_tracker
@@ -255,6 +315,7 @@ namespace alt_test
 		typed_transfers_resumed = 0;
 		live_frames             = 0;
 		destruction_order.clear();
+		static_cast<void>(take_destruction_order());
 		parked = {};
 	}
 

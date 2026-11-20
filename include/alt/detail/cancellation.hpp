@@ -222,6 +222,7 @@ namespace alt::detail
 		}
 
 	private:
+		// NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members): Inner is deduced from what alt::get_awaiter returned, and is an rvalue reference exactly when the awaitable's own wrapper (cancellation_checked_awaitable) owns the awaiter and outlives this object. Storing a value instead would move an awaiter that may be immovable, and the tests' .clang-tidy already suppresses this check for the same instantiations; a library translation unit that awaits an rvalue awaiter is the first to need it in the gate.
 		Inner                 m_inner;
 		cancellation_context* m_context;
 	};

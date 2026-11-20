@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Alt VERSION 1.14.0 LANGUAGES CXX)
+project(Alt VERSION 1.15.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -80,12 +80,20 @@ if(ALT_CPPCHECK)
             # is the set of headers the argument above actually covers: the ones that
             # define the await protocol. A finding in any other header is information,
             # not noise, and should be fixed rather than hidden.
+            #
+            # detail/io_operation.hpp joins the list for the same reason and by the same
+            # route: phase 7a's src/io_operation.cpp is the first compiled source to
+            # reach it, and the hand-written file I/O awaiter it declares is as much a
+            # part of the await protocol as the ones above. Its own
+            # NOLINTNEXTLINE(readability-convert-member-functions-to-static) carries the
+            # argument in full.
             --suppress=functionStatic:*/alt/awaitable.hpp
             --suppress=functionStatic:*/alt/cancellable_task.hpp
             --suppress=functionStatic:*/alt/scheduler.hpp
             --suppress=functionStatic:*/alt/sync_wait.hpp
             --suppress=functionStatic:*/alt/task.hpp
             --suppress=functionStatic:*/alt/detail/cancellation.hpp
+            --suppress=functionStatic:*/alt/detail/io_operation.hpp
             # Surfaced by phase 5's first compiled source, which is the first src/*.cpp
             # to reach cancellation.hpp. The parameter it names is a work_item callback,
             # whose signature is fixed by alt::work_item::invoke as void (*)(void*)
@@ -104,6 +112,18 @@ if(ALT_CPPCHECK)
             # the base's non-public would change machinery async_event, async_latch and
             # async_semaphore all resume through.
             --suppress=duplInheritedMember:*/alt/async_mutex.hpp
+            # src/io_backend_thread_pool.cpp is the first source whose platform arms
+            # (_WIN32, __APPLE__, __linux__) multiply into enough configurations that
+            # cppcheck stops short of analyzing every branch at the default check level,
+            # and says so as an information message, which --error-exitcode counts. The
+            # message reports a limit on the analysis, not a finding in the code; every
+            # other check still runs on the file.
+            --suppress=normalCheckLevelMaxBranches:*/src/io_backend_thread_pool.cpp
+            # src/async_file.cpp is the first source to instantiate alt::task coroutines,
+            # and every co_await expands into the cancellation wrapper's branches, which
+            # takes the file past the same default-level limit. Same reasoning as above:
+            # it reports a limit on the analysis, and every other check still runs.
+            --suppress=normalCheckLevelMaxBranches:*/src/async_file.cpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

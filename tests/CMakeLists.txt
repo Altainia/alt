@@ -60,6 +60,12 @@ add_executable(alt_tests
     test_task_group.cpp
     test_run_loop.cpp
     test_thread_pool.cpp
+    test_io_buffer.cpp
+    test_io_backend.cpp
+    test_io_handle.cpp
+    test_io_operation.cpp
+    test_async_file.cpp
+    test_file_io.cpp
     test_cancellation.cpp
     test_cancellation_ref.cpp
     test_task.cpp
