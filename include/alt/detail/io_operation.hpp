@@ -7,10 +7,15 @@
 #include <atomic>
 #include <coroutine>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace alt::detail
 {
@@ -465,6 +470,124 @@ namespace alt::detail
 		 * where the address of the thing the callback refers to is finally stable.
 		 */
 		std::unique_ptr<stop_registration> m_stop;
+	};
+
+	/**
+	 * @brief What an escape-hatch callable is erased behind, so that io_operation stays one type.
+	 *
+	 * alt::file_io::run() takes an arbitrary callable. Making the operation block a template
+	 * over it would turn one type into a family and put the callable in the block's layout;
+	 * this is the small virtual that avoids both. The request's `in` is a pointer to one of
+	 * these, and its `state` is the shared_ptr that keeps it alive, so the callable and its
+	 * captures live in storage the operation block co-owns and NEVER in the coroutine frame
+	 * that cancellation destroys while a worker may still be running them.
+	 *
+	 * Exactly one of invoke() and discard() is called, once, on a worker thread: invoke()
+	 * when the job runs, discard() when the job was cancelled before it started. Both end
+	 * with the callable destroyed, so its captures die on the worker in either case rather
+	 * than on whichever thread happens to drop the block's last reference. That is a
+	 * behavior a consumer relies on: a job whose captures own a temporary file removes it
+	 * when the job is dropped unrun.
+	 */
+	class io_invocable
+	{
+	public:
+		io_invocable()          = default;
+		virtual ~io_invocable() = default;
+
+		io_invocable(const io_invocable&)            = delete;
+		io_invocable& operator=(const io_invocable&) = delete;
+		io_invocable(io_invocable&&)                 = delete;
+		io_invocable& operator=(io_invocable&&)      = delete;
+
+		/**
+		 * @brief Runs the callable, keeps its result or exception, and destroys the callable.
+		 *
+		 * Never throws: an exception the callable throws is captured for the awaiting
+		 * coroutine to rethrow, if the chain is still there to receive it.
+		 */
+		virtual void invoke() noexcept = 0;
+
+		/** @brief Destroys the callable without running it. */
+		virtual void discard() noexcept = 0;
+	};
+
+	/**
+	 * @brief The io_invocable for one concrete callable, and the home of its outcome.
+	 *
+	 * The result and the exception live here, in the block's co-owned storage, because a
+	 * cancelled chain's frame is gone by the time a worker produces them. Both are read by the
+	 * awaiting coroutine only after the completion has been delivered to it, which is the
+	 * synchronization that orders the worker's writes before those reads.
+	 *
+	 * @tparam F A callable invocable with no arguments, nothrow move constructible so that
+	 *           moving it into this object cannot fail halfway.
+	 */
+	template<typename F>
+	class io_invocation final: public io_invocable
+	{
+	public:
+		/** What the callable returns. May be void. */
+		using result_type = std::invoke_result_t<F>;
+
+		/** @brief Takes ownership of @p callable. */
+		explicit io_invocation(F callable) noexcept(std::is_nothrow_move_constructible_v<F>): m_callable(std::move(callable))
+		{}
+
+		void invoke() noexcept override
+		{
+			if(!m_callable)
+			{
+				return; // already invoked or discarded; the contract is once, so this is defensive
+			}
+			try
+			{
+				if constexpr(std::is_void_v<result_type>)
+				{
+					std::invoke(*m_callable);
+				}
+				else
+				{
+					m_result.emplace(std::invoke(*m_callable));
+				}
+			}
+			catch(...)
+			{
+				m_error = std::current_exception();
+			}
+			m_callable.reset();
+		}
+
+		void discard() noexcept override
+		{
+			m_callable.reset();
+		}
+
+		/** @brief Rethrows what the callable threw, if it threw. Call after the completion only. */
+		void rethrow_if_failed() const
+		{
+			if(m_error)
+			{
+				std::rethrow_exception(m_error);
+			}
+		}
+
+		/** @brief Takes the callable's value out. Call after the completion, once, and only for a non-void result. */
+		[[nodiscard]] result_type take()
+		  requires(!std::is_void_v<result_type>)
+		{
+			// Present whenever the callable returned, which the caller has established by finding no exception.
+			if(!m_result)
+			{
+				std::terminate();
+			}
+			return std::move(*m_result);
+		}
+
+	private:
+		std::optional<F>                                                                            m_callable;
+		std::conditional_t<std::is_void_v<result_type>, std::monostate, std::optional<result_type>> m_result;
+		std::exception_ptr                                                                          m_error;
 	};
 
 }

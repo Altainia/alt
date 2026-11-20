@@ -1,14 +1,19 @@
 #pragma once
 
 #include <alt/async_file.hpp>
+#include <alt/detail/io_operation.hpp>
+#include <alt/detail/io_shared.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/scheduler.hpp>
 #include <alt/task.hpp>
+#include <concepts>
 #include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <new>
 #include <system_error>
+#include <type_traits>
 #include <vector>
 
 namespace alt
@@ -224,6 +229,46 @@ namespace alt
 		 */
 		[[nodiscard]] task<std::expected<std::vector<directory_entry>, std::error_code>> list_directory(const std::filesystem::path& path) const;
 
+		/**
+		 * @brief The escape hatch: runs @p f on an I/O worker and resumes on the completion
+		 *        scheduler with what it returned.
+		 *
+		 * For platform calls the portable operation set does not cover, such as a Linux
+		 * `openat2` with `RESOLVE_BENEATH`, which is several system calls that must run as a
+		 * unit. A `void` callable yields `std::expected<void, std::error_code>`.
+		 *
+		 * **Why @p f is not simply kept in the coroutine.** Cancellation tears a chain down by
+		 * destroying its frames, and a worker may still be running @p f when it does. A callable
+		 * left in the frame would then lose its captures from under itself. So @p f is moved,
+		 * before anything can suspend, into the operation block, which the backend co-owns, and
+		 * what is left behind in the frame is a moved-from shell.
+		 *
+		 * What follows from that:
+		 *  - **Cancelled before @p f ran:** it is never invoked, and it is destroyed on the
+		 *    worker, taking its captures with it.
+		 *  - **Cancelled while @p f runs:** it finishes, and its result is destroyed with the
+		 *    block. Cancellation detaches; it does not abort.
+		 *  - **@p f throws:** the exception is rethrown from the `co_await` if the chain is
+		 *    still there, and discarded with the block if it is not. Exceptions rethrow from
+		 *    the await and error codes travel in the `expected`, as in
+		 *    alt::task_completion_source.
+		 *  - **The slot:** it consumes an in-flight slot like any operation, so it cannot be
+		 *    used to route around max_in_flight.
+		 *  - **Where it runs:** always on the thread pool, on every platform, because a
+		 *    submission queue has nowhere to run arbitrary code.
+		 *
+		 * The `expected`'s error carries failure to submit only (std::errc::not_enough_memory
+		 * if the block could not be allocated, or whatever the backend refused with), and
+		 * std::errc::operation_canceled where the chain was released before submission.
+		 * An exception thrown by @p f is never in it.
+		 *
+		 * @p f runs on a worker, concurrently with the caller, so it must not touch state the
+		 * caller's thread also touches without synchronization.
+		 */
+		template<std::invocable F>
+		  requires std::is_nothrow_move_constructible_v<F>
+		[[nodiscard]] task<std::expected<std::invoke_result_t<F>, std::error_code>> run(F f) const;
+
 	private:
 		/** The one door to the engine-internal state; see alt::detail::file_io_access. */
 		friend struct detail::file_io_access;
@@ -254,5 +299,71 @@ namespace alt::detail
 			return io.m_shared;
 		}
 	};
+
+	/**
+	 * @brief The coroutine behind alt::file_io::run(), taking the callable already erased.
+	 *
+	 * Separate from run() so that no coroutine parameter ever holds the callable: a
+	 * coroutine's by-value parameters are copied into its frame, and the frame is exactly
+	 * what cancellation destroys under a running worker. This takes only a shared_ptr to
+	 * the block-side storage.
+	 */
+	template<typename F>
+	task<std::expected<std::invoke_result_t<F>, std::error_code>> run_invocation(std::shared_ptr<io_shared> owner, std::shared_ptr<io_invocation<F>> call)
+	{
+		using result = std::expected<std::invoke_result_t<F>, std::error_code>;
+
+		auto permit = co_await acquire_permit(owner); // non-const: io_permit is move-only
+		if(!permit)
+		{
+			co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
+		}
+		const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::invoke, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = static_cast<io_invocable*>(call.get()), .out = nullptr, .state = call}, nullptr, std::move(*permit)};
+		if(done.error)
+		{
+			co_return std::unexpected(done.error);
+		}
+		call->rethrow_if_failed();
+		if constexpr(std::is_void_v<std::invoke_result_t<F>>)
+		{
+			co_return result{};
+		}
+		else
+		{
+			co_return result{call->take()};
+		}
+	}
+
+	/** @brief The task a run() that could not allocate its block returns. */
+	template<typename Result>
+	task<Result> run_failed_to_allocate()
+	{
+		co_return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+	}
+
+}
+
+namespace alt
+{
+
+	template<std::invocable F>
+	  requires std::is_nothrow_move_constructible_v<F>
+	task<std::expected<std::invoke_result_t<F>, std::error_code>> file_io::run(F f) const
+	{
+		using result = std::expected<std::invoke_result_t<F>, std::error_code>;
+
+		// Not a coroutine, so `f` is never copied into a frame: it goes straight from the
+		// argument into the block-side storage.
+		std::shared_ptr<detail::io_invocation<F>> call;
+		try
+		{
+			call = std::make_shared<detail::io_invocation<F>>(std::move(f));
+		}
+		catch(const std::bad_alloc&)
+		{
+			return detail::run_failed_to_allocate<result>();
+		}
+		return detail::run_invocation<F>(m_shared, std::move(call));
+	}
 
 }

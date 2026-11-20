@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <alt/detail/file_types.hpp>
+#include <alt/detail/io_operation.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/scheduler.hpp>
 #include <alt/thread_pool.hpp>
@@ -412,6 +413,7 @@ namespace alt
 				break;
 			case io_op::rename:
 			case io_op::unlink:
+			case io_op::invoke:
 				assert(request.in != nullptr);
 				break;
 			default:
@@ -458,8 +460,10 @@ namespace alt
 				                                 *static_cast<std::vector<directory_entry>*>(request.out));
 				break;
 			case io_op::invoke:
-				result.error = std::make_error_code(std::errc::function_not_supported);
-				break; // the escape hatch arrives with its type
+				// The callable's own exceptions are caught inside invoke(), for the awaiting
+				// coroutine to rethrow; nothing here can escape from it.
+				const_cast<detail::io_invocable*>(static_cast<const detail::io_invocable*>(request.in))->invoke(); // NOLINT(cppcoreguidelines-pro-type-const-cast): io_request::in is const void* for every operation, and invoke is the one operation whose pointee the backend must mutate; the pointee is a non-const io_invocable the block owns
+				break;
 			}
 			return result;
 		}
@@ -525,6 +529,13 @@ namespace alt
 			io_completion result;
 			if(self.cancelled.load())
 			{
+				if(self.request.op == io_op::invoke)
+				{
+					// Destroy the callable HERE, on this worker, with its captures: dropping it
+					// unrun is a behavior consumers rely on, and left to the block it would die
+					// on whichever thread released the last reference.
+					const_cast<detail::io_invocable*>(static_cast<const detail::io_invocable*>(self.request.in))->discard(); // NOLINT(cppcoreguidelines-pro-type-const-cast): as in perform()
+				}
 				result.error = canceled_error();
 			}
 			else

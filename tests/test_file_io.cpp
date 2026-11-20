@@ -14,12 +14,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -787,4 +790,365 @@ TEST(FileIoDeathTest, DestroyingAFileIoWithAnOperationParkedOnASlotAborts)
 	const alt_test::scoped_death_test_style style{"threadsafe"};
 
 	EXPECT_DEATH(destroy_a_service_with_an_operation_parked(), "parked on a backpressure slot");
+}
+
+namespace
+{
+
+	/** A pool, a completion scheduler and a service over them, sized by the test that needs it. */
+	struct run_rig
+	{
+		run_rig(const std::size_t threads, const std::size_t max_in_flight): pool(alt::thread_pool::create(threads)), io(make_io(max_in_flight))
+		{}
+
+		std::expected<alt::file_io, std::error_code> make_io(const std::size_t max_in_flight)
+		{
+			return alt::file_io::create(*pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::automatic, .max_in_flight = max_in_flight, .queue_depth = 0});
+		}
+
+		std::expected<alt::thread_pool, std::error_code> pool;
+		alt::manual_scheduler                            home;
+		std::expected<alt::file_io, std::error_code>     io;
+	};
+
+	/** Polls @p ready until it holds, failing the test rather than hanging past the deadline. */
+	template<typename Predicate>
+	bool wait_until(Predicate ready)
+	{
+		const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+		while(!ready())
+		{
+			if(std::chrono::steady_clock::now() > limit)
+			{
+				ADD_FAILURE() << "the condition did not hold within 10 seconds";
+				return false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds{1});
+		}
+		return true;
+	}
+
+	/** A latch a worker waits on until the test opens it. */
+	class gate
+	{
+	public:
+		void wait()
+		{
+			m_open.wait();
+		}
+
+		void open()
+		{
+			m_released.set_value();
+		}
+
+	private:
+		std::promise<void>       m_released;
+		std::shared_future<void> m_open = m_released.get_future().share();
+	};
+
+	/** What the sentinel below reports, shared with the test that owns it. */
+	struct sentinel_record
+	{
+		std::atomic<bool> destroyed{false};
+		std::thread::id   destroyed_on;
+	};
+
+	/**
+	 * A move-only capture that notes which thread destroyed it. A moved-from one records
+	 * nothing, so the thread it names is the one that destroyed the LIVE object.
+	 */
+	class thread_sentinel
+	{
+	public:
+		explicit thread_sentinel(std::shared_ptr<sentinel_record> record) noexcept: m_record(std::move(record))
+		{}
+
+		thread_sentinel(thread_sentinel&& other) noexcept: m_record(std::move(other.m_record))
+		{}
+
+		thread_sentinel(const thread_sentinel&)            = delete;
+		thread_sentinel& operator=(const thread_sentinel&) = delete;
+		thread_sentinel& operator=(thread_sentinel&&)      = delete;
+
+		~thread_sentinel()
+		{
+			if(m_record)
+			{
+				m_record->destroyed_on = std::this_thread::get_id();
+				m_record->destroyed.store(true);
+			}
+		}
+
+	private:
+		std::shared_ptr<sentinel_record> m_record;
+	};
+
+	/** A result type that counts its own destruction, to show what happens to a discarded result. */
+	struct counted_result
+	{
+		explicit counted_result(std::shared_ptr<std::atomic<int>> destroyed) noexcept: m_destroyed(std::move(destroyed))
+		{}
+
+		counted_result(counted_result&& other) noexcept: m_destroyed(std::move(other.m_destroyed))
+		{}
+
+		counted_result(const counted_result&)            = delete;
+		counted_result& operator=(const counted_result&) = delete;
+		counted_result& operator=(counted_result&&)      = delete;
+
+		~counted_result()
+		{
+			if(m_destroyed)
+			{
+				m_destroyed->fetch_add(1);
+			}
+		}
+
+	private:
+		std::shared_ptr<std::atomic<int>> m_destroyed;
+	};
+
+	/** Awaits @p work and reports the exception's message, or "none" when it completed. */
+	alt::task<std::string> message_of_the_exception(alt::task<std::expected<int, std::error_code>> work)
+	{
+		try
+		{
+			static_cast<void>(co_await std::move(work));
+		}
+		catch(const std::runtime_error& error)
+		{
+			co_return std::string{error.what()};
+		}
+		co_return std::string{"none"};
+	}
+
+	class FileIoRunTest: public ::testing::Test
+	{
+	protected:
+		void SetUp() override
+		{
+			start_rig(1, 64);
+		}
+
+		void TearDown() override
+		{
+			m_rig->home.drain();
+		}
+
+		void start_rig(const std::size_t threads, const std::size_t max_in_flight)
+		{
+			m_rig = std::make_unique<run_rig>(threads, max_in_flight);
+			ASSERT_TRUE(m_rig->pool.has_value());
+			ASSERT_TRUE(m_rig->io.has_value());
+		}
+
+		alt::file_io& io()
+		{
+			return *m_rig->io;
+		}
+
+		alt::manual_scheduler& home()
+		{
+			return m_rig->home;
+		}
+
+		/** Starts @p work and keeps what it produced for result(); nothing is pumped. */
+		template<typename T>
+		std::shared_ptr<outcome<T>> begin(alt::task<T> work)
+		{
+			auto state = std::make_shared<outcome<T>>();
+			m_chains.push_back(alt::start(capture(std::move(work), state)));
+			return state;
+		}
+
+		/** Runs the completion scheduler until @p state has finished. */
+		template<typename T>
+		T finish(const std::shared_ptr<outcome<T>>& state)
+		{
+			EXPECT_TRUE(wait_until([&] {
+				home().run_one();
+				return state->finished;
+			}));
+			std::optional<T>& produced = state->result;
+			if(!produced.has_value())
+			{
+				ADD_FAILURE() << "the task finished without a result";
+				std::terminate();
+			}
+			return std::move(*produced);
+		}
+
+		template<typename T>
+		T run(alt::task<T> work)
+		{
+			return finish(begin(std::move(work)));
+		}
+
+		/**
+		 * Occupies the only worker with a job that waits on @p hold, and returns once it is
+		 * running. Records the worker's thread id in @p worker.
+		 */
+		std::shared_ptr<outcome<std::expected<int, std::error_code>>> occupy_the_worker(const std::shared_ptr<gate>& hold, const std::shared_ptr<std::atomic<std::thread::id>>& worker, const std::shared_ptr<std::atomic<bool>>& entered)
+		{
+			auto blocker = begin(io().run([hold, worker, entered] {
+				worker->store(std::this_thread::get_id());
+				entered->store(true);
+				hold->wait();
+				return 0;
+			}));
+			wait_until([&] { return entered->load(); });
+			return blocker;
+		}
+
+		/** The chain begun @p index-th (counting from zero), for the test to stop. */
+		alt::cancellation_handle& chain(const std::size_t index)
+		{
+			return m_chains.at(index);
+		}
+
+	private:
+		std::vector<alt::cancellation_handle> m_chains;
+		std::unique_ptr<run_rig>              m_rig;
+	};
+
+}
+
+TEST_F(FileIoRunTest, RunReturnsTheCallablesValue)
+{
+	const auto result = run(io().run([] { return 42; }));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, 42);
+}
+
+TEST_F(FileIoRunTest, RunOfAVoidCallableYieldsAnExpectedVoid)
+{
+	const auto ran = std::make_shared<std::atomic<bool>>(false);
+
+	const std::expected<void, std::error_code> result = run(io().run([ran] { ran->store(true); }));
+
+	EXPECT_TRUE(result.has_value());
+	EXPECT_TRUE(ran->load());
+}
+
+TEST_F(FileIoRunTest, RunExecutesTheCallableOnAWorkerNotTheCallersThread)
+{
+	const auto result = run(io().run([] { return std::this_thread::get_id(); }));
+
+	ASSERT_TRUE(result.has_value());
+	EXPECT_NE(*result, std::this_thread::get_id());
+}
+
+TEST_F(FileIoRunTest, AnExceptionFromTheCallableIsRethrownFromTheCoAwait)
+{
+	const std::string seen = run(message_of_the_exception(io().run([]() -> int { throw std::runtime_error{"thrown by the callable"}; })));
+
+	EXPECT_EQ(seen, "thrown by the callable");
+}
+
+TEST_F(FileIoRunTest, ACallableCancelledBeforeItRanIsNeverInvoked)
+{
+	const auto hold    = std::make_shared<gate>();
+	const auto worker  = std::make_shared<std::atomic<std::thread::id>>();
+	const auto entered = std::make_shared<std::atomic<bool>>(false);
+	const auto invoked = std::make_shared<std::atomic<bool>>(false);
+	const auto behind  = std::make_shared<std::atomic<bool>>(false);
+
+	const auto blocker = occupy_the_worker(hold, worker, entered);
+	begin(io().run([invoked] {
+		invoked->store(true);
+		return 1;
+	}));
+	// Queued behind the job that holds the worker, so it is still waiting to start.
+	begin(io().run([behind] {
+		behind->store(true);
+		return 2;
+	}));
+	EXPECT_TRUE(chain(1).request_stop());
+
+	hold->open();
+	wait_until([&] { return behind->load(); });
+
+	EXPECT_FALSE(invoked->load()) << "a callable cancelled before it started must not run";
+	EXPECT_TRUE(finish(blocker).has_value());
+}
+
+TEST_F(FileIoRunTest, ACallablesCapturesAreDestroyedOnTheWorkerWhenCancelled)
+{
+	const auto hold    = std::make_shared<gate>();
+	const auto worker  = std::make_shared<std::atomic<std::thread::id>>();
+	const auto entered = std::make_shared<std::atomic<bool>>(false);
+	const auto behind  = std::make_shared<std::atomic<bool>>(false);
+	const auto record  = std::make_shared<sentinel_record>();
+
+	const auto blocker = occupy_the_worker(hold, worker, entered);
+	begin(io().run([sentinel = thread_sentinel{record}] { return 1; }));
+	begin(io().run([behind] {
+		behind->store(true);
+		return 2;
+	}));
+	// Stopped, but the completion scheduler is NOT pumped: the teardown this posts holds the
+	// last other reference to the operation block, and would drop it on this thread.
+	EXPECT_TRUE(chain(1).request_stop());
+
+	hold->open();
+	wait_until([&] { return behind->load(); });
+
+	EXPECT_TRUE(record->destroyed.load()) << "the cancelled callable's captures were not destroyed when the worker dropped the job";
+	EXPECT_EQ(record->destroyed_on, worker->load());
+	EXPECT_NE(record->destroyed_on, std::this_thread::get_id());
+	EXPECT_TRUE(finish(blocker).has_value());
+}
+
+TEST_F(FileIoRunTest, ACallableCancelledWhileRunningCompletesAndItsResultIsDiscarded)
+{
+	const auto hold      = std::make_shared<gate>();
+	const auto entered   = std::make_shared<std::atomic<bool>>(false);
+	const auto finished  = std::make_shared<std::atomic<bool>>(false);
+	const auto destroyed = std::make_shared<std::atomic<int>>(0);
+
+	const auto state = begin(io().run([hold, entered, finished, destroyed] {
+		entered->store(true);
+		hold->wait();
+		finished->store(true);
+		return counted_result{destroyed};
+	}));
+	wait_until([&] { return entered->load(); });
+	EXPECT_TRUE(chain(0).request_stop());
+	home().drain();
+
+	hold->open();
+	wait_until([&] { return finished->load(); });
+
+	// The result is destroyed with the block, which the worker releases once the job is done.
+	EXPECT_TRUE(wait_until([&] { return destroyed->load() == 1; }));
+	home().drain();
+	EXPECT_FALSE(state->finished) << "a cancelled chain is abandoned, not resumed";
+}
+
+TEST_F(FileIoRunTest, RunConsumesAnInFlightSlot)
+{
+	start_rig(2, 1);
+	const auto hold    = std::make_shared<gate>();
+	const auto worker  = std::make_shared<std::atomic<std::thread::id>>();
+	const auto entered = std::make_shared<std::atomic<bool>>(false);
+	const auto second  = std::make_shared<std::atomic<bool>>(false);
+
+	const auto first = occupy_the_worker(hold, worker, entered);
+	const auto next  = begin(io().run([second] {
+    second->store(true);
+    return 7;
+  }));
+
+	// A second worker is idle, so only the slot bound can be what holds the second job back.
+	std::this_thread::sleep_for(std::chrono::milliseconds{100});
+	EXPECT_FALSE(second->load()) << "the second operation ran while the first held the only slot";
+
+	hold->open();
+	EXPECT_TRUE(finish(first).has_value());
+	const auto second_result = finish(next);
+	EXPECT_TRUE(second->load());
+	ASSERT_TRUE(second_result.has_value());
+	EXPECT_EQ(*second_result, 7);
 }
