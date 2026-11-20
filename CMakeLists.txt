@@ -112,6 +112,13 @@ if(ALT_CPPCHECK)
             # the base's non-public would change machinery async_event, async_latch and
             # async_semaphore all resume through.
             --suppress=duplInheritedMember:*/alt/async_mutex.hpp
+            # src/io_backend_thread_pool.cpp is the first source whose platform arms
+            # (_WIN32, __APPLE__, __linux__) multiply into enough configurations that
+            # cppcheck stops short of analyzing every branch at the default check level,
+            # and says so as an information message, which --error-exitcode counts. The
+            # message reports a limit on the analysis, not a finding in the code; every
+            # other check still runs on the file.
+            --suppress=normalCheckLevelMaxBranches:*/src/io_backend_thread_pool.cpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

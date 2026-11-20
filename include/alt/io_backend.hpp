@@ -5,12 +5,15 @@
 #include <cstdint>
 #include <deque>
 #include <expected>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <system_error>
 
 namespace alt
 {
+
+	class thread_pool;
 
 	/**
 	 * @brief An operating-system file handle, spelled without a platform header.
@@ -118,10 +121,12 @@ namespace alt
 	 * backend runs them on a helper thread. That is an implementation burden on the
 	 * backend, not a gap in this interface.
 	 *
-	 * The pointee types are declared by later components: `file_status` and
-	 * `directory_entry` by the async file header and the directory listing header
-	 * (tasks 7 and 8 of phase 7a), `io_invocable` by task 9. This header names them
-	 * only in documentation and carries the pointers as `void`.
+	 * What `in` points at, per operation: a `const std::filesystem::path*` for
+	 * stat_path, unlink and list_directory; an `io_open_args*` for open; an
+	 * `io_rename_args*` for rename (both in detail/file_types.hpp, together with
+	 * `file_status` and `directory_entry`, which `out` points at). `io_invocable`
+	 * arrives with the escape hatch. This header names them only in documentation
+	 * and carries the pointers as `void`.
 	 */
 	struct io_request
 	{
@@ -402,5 +407,28 @@ namespace alt
 		std::optional<io_completion>   m_inline_next;
 		std::optional<std::error_code> m_fail_next;
 	};
+
+	/**
+	 * @brief Makes the backend that performs every operation as a blocking syscall on a pool thread.
+	 *
+	 * This is the one backend every platform has, and it stays in use even where
+	 * io_uring or IOCP exists: open, stat, rename, unlink and list_directory have no
+	 * asynchronous form on Windows, and a submission queue has nowhere to run
+	 * arbitrary code.
+	 *
+	 * The pool is BORROWED, never owned. The caller keeps it alive until every
+	 * submitted operation's callback has run, and must not destroy it from one of its
+	 * own workers, which would join itself. Destroying the returned backend while
+	 * operations are queued is safe: each job carries what it needs to finish.
+	 *
+	 * Cancel is a hint with detach semantics. A job that has not started finds itself
+	 * cancelled and completes with std::errc::operation_canceled WITHOUT doing the
+	 * I/O; a job already running runs to completion and reports its real result.
+	 * Either way the callback runs exactly once, on a pool thread, and the job's
+	 * io_buffer copy is held until it returns, then released on the worker.
+	 *
+	 * @param pool The pool whose threads run the syscalls.
+	 */
+	[[nodiscard]] std::unique_ptr<io_backend> make_thread_pool_backend(thread_pool& pool);
 
 } // namespace alt

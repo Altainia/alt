@@ -56,9 +56,11 @@ namespace alt
 		inline constexpr bool is_character_array = false;
 
 		template<std::size_t N>
+		// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): a specialization on the raw array type is the point
 		inline constexpr bool is_character_array<char[N]> = true;
 
 		template<std::size_t N>
+		// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): a specialization on the raw array type is the point
 		inline constexpr bool is_character_array<char8_t[N]> = true;
 
 	} // namespace detail
