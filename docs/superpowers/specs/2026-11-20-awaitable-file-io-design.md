@@ -291,10 +291,23 @@ Three states, and which party may move out of `waiting` is the whole protocol:
 - Whichever party loses the race finds a state other than `waiting`, under the mutex,
   and **does nothing at all**. It does not touch `handle`, `chain` or the frame.
 
-The block is held by a `shared_ptr`. The backend's submission holds a copy, so the
-block — and the `io_buffer` it co-owns — survive the frame's destruction by an
-arbitrary margin. That is what makes "a cancelled await must not resume" and "the
-buffers stay valid until the backend has really finished" simultaneously true.
+The block is held by a `shared_ptr`, and it **holds one to itself across the
+submission**, released when the completion callback runs or when the submission fails.
+That self-reference is what makes the block — and the `io_buffer` and `io_handle` it
+co-owns — survive the frame's destruction by an arbitrary margin, which is what makes
+"a cancelled await must not resume" and "the buffers stay valid until the backend has
+really finished" simultaneously true.
+
+**Corrected 2026-11-20, during phase 7a's implementation.** This paragraph previously
+said the backend's submission holds the copy. It cannot: `io_backend::submit` takes a
+raw `void* state` that owns nothing (see "The `io_backend` contract"), so there is
+nowhere on the backend's side for a reference to live. Keeping the claim would have
+left the single most important lifetime guarantee in this design resting on a
+mechanism that does not exist. The self-reference is the remedy, and because it is a
+deliberate cycle, every exit path must break it — normal completion, detached
+teardown, a `submit` that returns an error, and a `submit` that completes inline
+before returning. A leak on any one of them is a defect, so that enumeration belongs
+in the review checklist for this component rather than in a comment.
 
 This is `cpwf`'s `Handoff` with the buffer added and the result generalized. The
 `keep` member is its trick too: the posting party moves its own `shared_ptr` into the

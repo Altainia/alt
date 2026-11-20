@@ -338,12 +338,28 @@ TEST(IoOperationTest, AThrowingHomePostLeavesTheChainLeakedRatherThanResumedElse
 
 Two of these carry the whole design and must assert more than liveness:
 
-`TheBufferSurvivesTheChainsTeardownAndTheBackendsLateWrite` — an
-`io_buffer::allocate` buffer; submit; request stop so the chain is abandoned and the
-frame destroyed; *then* have `manual_io_backend` write a known pattern into
-`request.buffer.bytes()` and complete; then assert the pattern is readable through a
-copy of the `io_buffer` the test still holds. The assertion is on the *bytes*, not on
-the absence of a crash.
+`TheBufferSurvivesTheChainsTeardownAndTheBackendsLateWrite` — submit; request stop so
+the chain is abandoned and the frame destroyed; *then* have `manual_io_backend` write a
+known pattern into `request.buffer.bytes()` and complete; then assert the pattern is
+readable. The assertion is on the *bytes*, not on the absence of a crash.
+
+**The test must drop every owner the test side holds, and observe through a
+`std::weak_ptr`.** Build the buffer with `io_buffer::borrow(span, storage)` over a
+`std::shared_ptr`, keep a `weak_ptr` to it, then reset both `storage` and the test's
+`io_buffer` before asserting `!watch.expired()`.
+
+**Corrected 2026-11-20, during implementation.** This step originally said to use
+`io_buffer::allocate` and "assert the pattern is readable through a copy of the
+`io_buffer` the test still holds". That test **cannot fail**: the copy the test holds
+is itself a keepalive, so the storage stays alive whether or not the block co-owns it,
+and the mutation this test exists to catch changes nothing observable. It was measured
+passing under that mutation before being replaced. A lifetime test that keeps its own
+owner is testing its own `shared_ptr`, not the code.
+
+One limit to record rather than discover later: the block's co-ownership and
+`manual_io_backend`'s own copy of the request are satisfied by the same `io_buffer`, so
+a mutation strips both at once. Against a real backend that does not retain the
+`io_buffer`, this test does not verify the property — phases 7b and 7c need their own.
 
 `ThePermitIsReleasedOnAHomeThreadSoTheNextOperationSubmitsThere` — `max_in_flight = 1`,
 two operations, a `manual_scheduler` as the completion scheduler pumped by the test
