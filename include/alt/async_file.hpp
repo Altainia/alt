@@ -146,13 +146,11 @@ namespace alt
 		 * A @p size of 0 completes with 0 bytes immediately and submits nothing.
 		 * Anything else is the backend's error, such as std::errc::is_a_directory.
 		 *
-		 * std::errc::operation_canceled is the one error that comes from this layer rather
-		 * than the file: the wait for a backpressure permit ended without one. A
-		 * cancelled chain is abandoned rather than resumed, so nothing is delivered to it;
-		 * a caller sees this error only from a wait released without the chain being
-		 * cancelled, which is the service state being destroyed with the operation parked,
-		 * a violation of the service's own lifetime precondition. It is documented so that
-		 * an error switch is total, and every operation below can report it.
+		 * std::errc::operation_canceled is part of the result type's contract, and is never
+		 * delivered to a caller in the current design: a cancelled chain is abandoned
+		 * rather than resumed, and the service state outlives every operation parked on it.
+		 * It is retained so that an error switch stays total, and every operation below
+		 * shares it.
 		 */
 		[[nodiscard]] task<std::expected<std::size_t, std::error_code>> read_at(io_buffer buffer, std::uint64_t offset, std::size_t size) const;
 
@@ -172,8 +170,8 @@ namespace alt
 		 *             never gives less than it promises.
 		 *
 		 * Reports std::errc::bad_file_descriptor for a closed file before submitting, and
-		 * std::errc::operation_canceled as read_at() describes; anything else is the
-		 * backend's.
+		 * carries std::errc::operation_canceled in its contract as read_at() describes;
+		 * anything else is the backend's.
 		 */
 		[[nodiscard]] task<std::expected<void, std::error_code>> sync(sync_mode mode = sync_mode::full) const;
 
@@ -186,7 +184,7 @@ namespace alt
 		 * inode, size and mtime.
 		 *
 		 * Reports std::errc::bad_file_descriptor for a closed file before submitting, and
-		 * std::errc::operation_canceled as read_at() describes.
+		 * carries std::errc::operation_canceled in its contract as read_at() describes.
 		 */
 		[[nodiscard]] task<std::expected<file_status, std::error_code>> stat() const;
 

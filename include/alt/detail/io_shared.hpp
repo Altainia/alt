@@ -6,8 +6,12 @@
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
+#include <coroutine>
 #include <cstddef>
+#include <expected>
 #include <mutex>
+#include <system_error>
+#include <utility>
 
 namespace alt
 {
@@ -149,12 +153,12 @@ namespace alt::detail
 		 * std::errc::operation_canceled and the operation never reaches the backend at
 		 * all. The interesting cancellation window is only the submitted phase.
 		 *
-		 * The permit the wait comes away with must be put in an alt::detail::io_permit the
-		 * moment the wait is checked, and that permit given to the io_awaiter. A permit held
-		 * any other way is lost if the chain is cancelled between this wait and the
-		 * awaiter's await_suspend: the cancellation check ahead of every suspension point
-		 * destroys the frame without ever calling the awaiter, so nothing the awaiter does
-		 * can release it, and a lost permit never comes back.
+		 * Reserved for the permit machinery's own bookkeeping (parked_waiters() reaches the
+		 * semaphore's queue through it). An operation takes its permit with
+		 * alt::detail::acquire_permit(), which cannot lose it: a permit held in the plain wait
+		 * result this returns is lost for good if the chain is cancelled before the next
+		 * await, because the cancellation check destroys the frame ahead of the awaiter that
+		 * would have released it.
 		 */
 		[[nodiscard]] async_semaphore::semaphore_awaiter acquire_slot() noexcept
 		{
@@ -231,60 +235,61 @@ namespace alt::detail
 	};
 
 	/**
-	 * @brief One backpressure permit, owned by a coroutine frame until it is submitted.
+	 * @brief One backpressure permit, owned by whoever holds this object.
 	 *
-	 * The answer to a window the two-phase contract cannot otherwise close. A caller takes a
-	 * permit with `co_await owner->acquire_slot()` and then awaits an alt::detail::io_awaiter,
-	 * and cancellation lands between the two: alt's cancellation check runs in the NEXT
-	 * await's await_suspend and destroys the frame before calling the awaiter's, so the
-	 * awaiter, which is the party that releases the permit, never runs and is itself only
-	 * destroyed. The permit has to be released by something the frame owns that is still
-	 * alive at that point, which is a local of the frame.
+	 * A permit has exactly one owner at every moment, and the type is what enforces it. It
+	 * can only be obtained by awaiting acquire_permit(), so a permit cannot be held
+	 * without having been waited for, and it can only be spent by moving it into an
+	 * alt::detail::io_awaiter, so a permit cannot be submitted without being owned.
 	 *
-	 * So this is a frame local, and it has two ends. If the frame dies while it still
-	 * holds the permit (an early return, an exception, or the chain being abandoned before
-	 * submission) its destructor puts the permit back. If the operation is submitted, the
-	 * io_awaiter hands it over in start() and from then on the posted resumption releases
-	 * it, exactly once, on the completion scheduler; hand_over() makes the destructor do
-	 * nothing from that point.
+	 * That closes the window the earlier two-phase contract could not. Cancellation checks
+	 * run ahead of every suspension point and destroy the frame before the next awaiter's
+	 * await_suspend is called, so a permit that sat in a plain wait result between the
+	 * permit wait and the awaiter was lost for good when a stop landed there. Now the
+	 * permit is an object: wherever the frame dies, the frame's objects die with it, and
+	 * this one's destructor puts the permit back, whether it sits in the frame's
+	 * std::expected, in the io_awaiter temporary of the pending co_await, or in a
+	 * constructor's argument when a later member throws. Once the awaiter starts the
+	 * operation it calls hand_over(), after which the posted resumption releases the
+	 * permit exactly once, on the completion scheduler.
 	 *
-	 * Construct it empty BEFORE anything that can throw, and call hold() immediately after
-	 * checking the wait's result. Nothing between the end of the wait and hold() may throw
-	 * or return.
-	 *
-	 * Not thread-safe: it is a coroutine-frame local, touched by that frame and by the
-	 * awaiter that frame is awaiting, which are never concurrent.
+	 * Movable, not copyable. Not thread-safe: it is touched by the frame that owns it and
+	 * by the awaiter that frame is awaiting, never concurrently.
 	 */
 	class io_permit
 	{
 	public:
-		/** @brief An empty permit: holds nothing, releases nothing. */
+		/** @brief An empty permit: holds nothing, releases nothing. A moved-from permit is this. */
 		io_permit() noexcept = default;
 
 		io_permit(const io_permit&)            = delete;
 		io_permit& operator=(const io_permit&) = delete;
-		io_permit(io_permit&&)                 = delete;
-		io_permit& operator=(io_permit&&)      = delete;
 
-		/** @brief Puts the permit back if it is still held, which hand_over() prevents. */
+		/** @brief Takes the permit; the source is left empty. */
+		io_permit(io_permit&& other) noexcept: m_owner(std::move(other.m_owner))
+		{}
+
+		/** @brief Puts back the permit this one holds, if any, and takes the other's. */
+		io_permit& operator=(io_permit&& other) noexcept
+		{
+			if(this != &other)
+			{
+				if(m_owner)
+				{
+					m_owner->slots.release();
+				}
+				m_owner = std::move(other.m_owner);
+			}
+			return *this;
+		}
+
+		/** @brief Puts the permit back if it is still held. */
 		~io_permit()
 		{
 			if(m_owner)
 			{
 				m_owner->slots.release();
 			}
-		}
-
-		/**
-		 * @brief Records that the wait on @p owner's slots came away with a permit.
-		 *
-		 * Takes a counted reference, so the state the release touches outlives the frame
-		 * that may be destroyed on any thread. Must be called at most once.
-		 */
-		void hold(const std::shared_ptr<io_shared>& owner) noexcept
-		{
-			assert(!m_owner && "an alt io_permit already holds a permit");
-			m_owner = owner;
 		}
 
 		/** @brief True while the permit is held and this object would release it. */
@@ -305,7 +310,70 @@ namespace alt::detail
 		}
 
 	private:
+		/** Only the awaiter that has just taken a permit from the semaphore may make one. */
+		friend class io_permit_awaiter;
+
+		explicit io_permit(std::shared_ptr<io_shared> owner) noexcept: m_owner(std::move(owner))
+		{}
+
+		/** A counted reference, so the state the release touches outlives a frame destroyed on any thread. */
 		std::shared_ptr<io_shared> m_owner;
 	};
+
+	/**
+	 * @brief What acquire_permit() returns: awaiting it yields a permit, or why none came.
+	 *
+	 * The error is std::errc::operation_canceled, as for every alt wait. It is never
+	 * delivered to a caller in the current design: a stop abandons the awaiting chain
+	 * rather than resuming it, and the state this waits on outlives every operation parked
+	 * on it. A caller still tests it, so its code stays total.
+	 */
+	class io_permit_awaiter
+	{
+	public:
+		/** @brief Waits on @p owner's slots. */
+		explicit io_permit_awaiter(std::shared_ptr<io_shared> owner): m_inner{owner->slots}, m_owner(std::move(owner))
+		{}
+
+		/** @brief Ready when a permit is free. */
+		[[nodiscard]] bool await_ready()
+		{
+			return m_inner.await_ready();
+		}
+
+		/** @brief Parks on the semaphore. Templated over the promise so cancellation reaches it. */
+		template<typename Promise>
+		bool await_suspend(std::coroutine_handle<Promise> h)
+		{
+			return m_inner.await_suspend(h);
+		}
+
+		/** @brief The permit, or std::errc::operation_canceled if the wait ended without one. */
+		[[nodiscard]] std::expected<io_permit, std::error_code> await_resume()
+		{
+			const wait_result waited = m_inner.await_resume();
+			if(!waited)
+			{
+				return std::unexpected(waited.error());
+			}
+			return io_permit{std::move(m_owner)};
+		}
+
+	private:
+		async_semaphore::semaphore_awaiter m_inner;
+		std::shared_ptr<io_shared>         m_owner;
+	};
+
+	/**
+	 * @brief Waits for a backpressure permit on @p owner.
+	 *
+	 * The first of an operation's two suspension points, and the only way to obtain an
+	 * io_permit. `const auto permit = co_await acquire_permit(owner);`, test it, and move
+	 * it into the alt::detail::io_awaiter for the second.
+	 */
+	[[nodiscard]] inline io_permit_awaiter acquire_permit(std::shared_ptr<io_shared> owner)
+	{
+		return io_permit_awaiter{std::move(owner)};
+	}
 
 }

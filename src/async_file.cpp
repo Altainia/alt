@@ -13,16 +13,14 @@
 // by-value parameter is copied into the frame when the member is called instead. The
 // forwarding adds no second frame: the member allocates nothing but the one it returns.
 //
-// Each coroutine that reaches the backend runs the same four steps, in this order:
-//   1. declare an empty io_permit and construct the io_awaiter, which allocates and so
-//      can throw, handing it the permit;
-//   2. co_await the backpressure permit and check it;
-//   3. permit.hold(owner), with nothing between the check and this line;
-//   4. co_await the awaiter, which hands the permit over when it submits.
-// The permit is a local of this frame because cancellation can destroy the frame between
-// steps 2 and 4, before the awaiter runs: the frame's own io_permit is then what puts the
-// permit back. Step 1 precedes the wait so that nothing which can throw runs while a
-// permit is held.
+// Each coroutine that reaches the backend runs the same two awaits:
+//   const auto permit = co_await acquire_permit(owner);   // test it
+//   const io_completion done = co_await io_awaiter{owner, request, file, std::move(*permit)};
+// There is nothing to remember beyond that, because the types leave nothing else to get
+// wrong: the permit is an object that returns itself if the frame dies holding it (an
+// early return, a throw, or cancellation abandoning the chain between the two awaits),
+// and the awaiter cannot be built without one. Validation still comes before the first
+// await, so a rejecting path never takes a permit at all.
 
 namespace alt
 {
@@ -30,9 +28,9 @@ namespace alt
 	namespace
 	{
 
+		using detail::acquire_permit;
 		using detail::io_awaiter;
 		using detail::io_handle;
-		using detail::io_permit;
 		using detail::io_shared;
 
 		std::unexpected<std::error_code> failure(const std::errc code)
@@ -87,16 +85,12 @@ namespace alt
 				co_return std::size_t{0};
 			}
 
-			io_permit  permit;
-			io_awaiter awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = std::move(buffer), .offset = offset, .size = size, .in = nullptr, .out = nullptr, .state = nullptr}, file, permit};
-
-			const wait_result slot = co_await owner->acquire_slot();
-			if(!slot)
+			auto permit = co_await acquire_permit(owner);
+			if(!permit)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			permit.hold(owner);
-			const io_completion done = co_await std::move(awaiter);
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = std::move(buffer), .offset = offset, .size = size, .in = nullptr, .out = nullptr, .state = nullptr}, file, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -111,16 +105,12 @@ namespace alt
 				co_return failure(std::errc::bad_file_descriptor);
 			}
 
-			io_permit  permit;
-			io_awaiter awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, permit};
-
-			const wait_result slot = co_await owner->acquire_slot();
-			if(!slot)
+			auto permit = co_await acquire_permit(owner);
+			if(!permit)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			permit.hold(owner);
-			const io_completion done = co_await std::move(awaiter);
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -136,16 +126,12 @@ namespace alt
 			}
 
 			const std::shared_ptr<file_status> result = std::make_shared<file_status>();
-			io_permit                          permit;
-			io_awaiter                         awaiter{owner, io_request{.op = io_op::stat_handle, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = result.get(), .state = result}, file, permit};
-
-			const wait_result slot = co_await owner->acquire_slot();
-			if(!slot)
+			auto                               permit = co_await acquire_permit(owner);
+			if(!permit)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			permit.hold(owner);
-			const io_completion done = co_await std::move(awaiter);
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::stat_handle, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = result.get(), .state = result}, file, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -157,16 +143,12 @@ namespace alt
 		{
 			const std::shared_ptr<open_state> state = std::make_shared<open_state>(io_open_args{.path = std::move(path), .open_flags = how, .mode = mode});
 
-			io_permit  permit;
-			io_awaiter awaiter{owner, io_request{.op = io_op::open, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &state->args, .out = &state->created, .state = state}, nullptr, permit};
-
-			const wait_result slot = co_await owner->acquire_slot();
-			if(!slot)
+			auto permit = co_await acquire_permit(owner);
+			if(!permit)
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			permit.hold(owner);
-			const io_completion done = co_await std::move(awaiter);
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::open, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &state->args, .out = &state->created, .state = state}, nullptr, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);

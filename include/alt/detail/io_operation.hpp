@@ -307,14 +307,14 @@ namespace alt::detail
 	 * @brief Awaits one file I/O operation, allocating its block and submitting it.
 	 *
 	 * The second half of an operation. The first half is the backpressure permit, which the
-	 * awaiting coroutine takes itself with `co_await owner->acquire_slot()` -- a hand-written
+	 * awaiting coroutine takes itself with `co_await acquire_permit(owner)` -- a hand-written
 	 * awaiter cannot co_await anything, which is why the two phases are two awaits rather
 	 * than one awaiter with a state machine of its own.
 	 *
 	 * THIS AWAITER TAKES THE PERMIT OVER. It releases it exactly once, on a thread the
 	 * completion scheduler runs on, inside the posted resumption and before the frame is
-	 * resumed or abandoned. A caller must therefore hold exactly one permit when it awaits
-	 * this and must not release that permit itself. The one case where the permit is not
+	 * resumed or abandoned. A caller therefore has nothing to release: the permit is an
+	 * argument, and it is moved in. The one case where the permit is not
 	 * released is the deliberately leaked chain of a throwing post, which cannot be
 	 * otherwise: the thread that would have released it is the one there is nowhere to post
 	 * to.
@@ -365,25 +365,17 @@ namespace alt::detail
 		 *                that from a documented hazard into a compile error, at the cost of
 		 *                an explicit nullptr at the handle-less call sites -- which reads
 		 *                better than an invisible omission anyway.
+		 * @param permit  The permit this operation runs under, from `co_await
+		 *                alt::detail::acquire_permit(owner)`. DELIBERATELY NOT OPTIONAL, for the
+		 *                same reason: there is no way to submit without one, and none to hold
+		 *                one without its being released. It is released if this awaiter is
+		 *                destroyed before it starts, which is what happens when cancellation
+		 *                abandons the chain between the permit wait and this await; once
+		 *                start() runs the posted resumption releases it instead. Taking it
+		 *                by value makes a throw while allocating the block harmless too:
+		 *                the argument dies with the unwinding and puts the permit back.
 		 */
-		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file);
-
-		/**
-		 * @brief As above, for a caller whose permit lives in an io_permit on its own frame.
-		 *
-		 * The form a coroutine uses. @p permit must be a local of the awaiting coroutine that
-		 * outlives this awaiter, and must hold the permit by the time the awaiter is awaited.
-		 * This awaiter hands the permit over in await_suspend, which is the point from which
-		 * it is the resumption's to release; until then the frame's own io_permit puts it
-		 * back, which is what makes a chain abandoned between the permit wait and this await
-		 * (the cancellation check destroys the frame before calling await_suspend) lose
-		 * nothing. Construct the awaiter before taking the permit: it allocates, and a throw
-		 * with a permit already held is the second way to leak one.
-		 *
-		 * The three-argument form leaves the permit with the caller and is only correct for
-		 * one that cannot be cancelled in that window.
-		 */
-		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file, io_permit& permit);
+		io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file, io_permit permit);
 
 		~io_awaiter() = default;
 
@@ -452,7 +444,7 @@ namespace alt::detail
 		 */
 		bool start();
 
-		/** Tells the frame's io_permit, if there is one, that this awaiter now owns releasing it. */
+		/** Stops this awaiter's own io_permit releasing: the resumption does from here on. */
 		void hand_over_permit() noexcept;
 
 		/** The stop callback's type, spelled once. */
@@ -460,8 +452,8 @@ namespace alt::detail
 
 		std::shared_ptr<io_operation> m_block;
 
-		/** The frame's permit, handed over in start(), or null for the form that has none. */
-		io_permit* m_permit = nullptr;
+		/** The permit this operation runs under, until start() hands it to the resumption. */
+		io_permit m_permit;
 
 		/**
 		 * Declared after m_block so it is destroyed FIRST: deregistering the callback

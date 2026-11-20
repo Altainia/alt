@@ -53,14 +53,14 @@ namespace
 	/** The two-phase operation: a backpressure permit, then the submitted phase. */
 	alt::cancellable_task awaiting_chain(std::shared_ptr<io_shared> shared, alt::io_request request, std::shared_ptr<op_record> record)
 	{
-		const alt::wait_result slot = co_await shared->acquire_slot();
-		if(!slot)
+		auto permit = co_await alt::detail::acquire_permit(shared);
+		if(!permit)
 		{
 			co_return;
 		}
 		record->slot_acquired = true;
 
-		static_cast<void>(co_await io_awaiter{shared, std::move(request), nullptr});
+		static_cast<void>(co_await io_awaiter{shared, std::move(request), nullptr, std::move(*permit)});
 		record->body_ran = true;
 	}
 

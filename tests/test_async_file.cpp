@@ -89,28 +89,27 @@ namespace
 	};
 
 	/**
-	 * The file layer's own dance, with a stop requested between the permit wait and the
-	 * awaiter. Written out here rather than reached through async_file because nothing in
-	 * the public surface can request a stop at that exact point.
+	 * The file layer's own two awaits, with a stop requested between them. Written out here
+	 * rather than reached through async_file because nothing in the public surface can land
+	 * a stop at that exact point: it needs the request made from inside the chain. The
+	 * four operations in async_file.cpp have no line of their own that this test could
+	 * guard, since the types leave nothing else to get wrong (see io_permit).
 	 */
 	alt::cancellable_task permit_then_stop_then_submit(std::shared_ptr<alt::detail::io_shared> owner, std::shared_ptr<alt::detail::io_handle> file, std::coroutine_handle<>* parked, alt::cancellation_handle* chain, std::shared_ptr<bool> submitted)
 	{
 		co_await park{parked};
 
-		alt::detail::io_permit  permit;
-		alt::detail::io_awaiter awaiter{owner, alt::io_request{.op = alt::io_op::sync_full, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, permit};
-
-		const alt::wait_result slot = co_await owner->acquire_slot();
-		if(!slot)
+		auto permit = co_await alt::detail::acquire_permit(owner);
+		if(!permit)
 		{
 			co_return;
 		}
-		permit.hold(owner);
 
 		co_await stop_this_chain{chain};
 		// The cancellation check ahead of this await destroys the frame before the awaiter
-		// is called, so nothing below runs.
-		static_cast<void>(co_await std::move(awaiter));
+		// is called, so nothing below runs. The permit is in the awaiter's argument, which the
+		// frame destroys with everything else, and that is what returns it.
+		static_cast<void>(co_await alt::detail::io_awaiter{owner, alt::io_request{.op = alt::io_op::sync_full, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, std::move(*permit)});
 		*submitted = true;
 	}
 
@@ -715,4 +714,10 @@ TEST_F(AsyncFileTest, AStopWhileParkedOnTheBackpressureLimitDeliversNothingAndLe
 	complete_by_hand(1, alt::io_completion{.bytes = 4, .error = {}});
 	home().drain();
 	EXPECT_TRUE(later->finished);
+
+	// Exactly one permit exists: the stopped waiter neither kept one nor returned two.
+	const auto shared = alt::detail::file_io_access::shared(*service);
+	EXPECT_TRUE(shared->slots.try_acquire());
+	EXPECT_FALSE(shared->slots.try_acquire());
+	shared->slots.release();
 }

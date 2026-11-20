@@ -152,14 +152,14 @@ namespace
 		const logged_frame tracker{1};
 		co_await capture_self{&record->self};
 
-		const alt::wait_result slot = co_await shared->acquire_slot();
-		if(!slot)
+		auto permit = co_await alt::detail::acquire_permit(shared);
+		if(!permit)
 		{
 			co_return;
 		}
 		record->slot_acquired = true;
 
-		record->result   = co_await io_awaiter{shared, std::move(request), std::move(file)};
+		record->result   = co_await io_awaiter{shared, std::move(request), std::move(file), std::move(*permit)};
 		record->body_ran = true;
 	}
 
@@ -186,14 +186,14 @@ namespace
 		std::optional<std::stop_callback<std::function<void()>>> noop;
 		noop.emplace(view.get_stop_token(), std::function<void()>{[] {}});
 
-		const alt::wait_result slot = co_await shared->acquire_slot();
-		if(!slot)
+		auto permit = co_await alt::detail::acquire_permit(shared);
+		if(!permit)
 		{
 			co_return;
 		}
 		record->slot_acquired = true;
 
-		record->result   = co_await io_awaiter{shared, std::move(request), std::move(file)};
+		record->result   = co_await io_awaiter{shared, std::move(request), std::move(file), std::move(*permit)};
 		record->body_ran = true;
 	}
 
@@ -338,8 +338,8 @@ namespace
 	{
 		const logged_frame tracker{1};
 
-		const alt::wait_result slot = co_await shared->acquire_slot();
-		if(!slot)
+		auto permit = co_await alt::detail::acquire_permit(shared);
+		if(!permit)
 		{
 			co_return;
 		}
@@ -347,7 +347,7 @@ namespace
 
 		try
 		{
-			record->result = co_await io_awaiter{shared, std::move(request), std::move(file)};
+			record->result = co_await io_awaiter{shared, std::move(request), std::move(file), std::move(*permit)};
 		}
 		catch(const std::bad_alloc&)
 		{

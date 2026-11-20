@@ -190,24 +190,16 @@ namespace alt::detail
 		static_cast<void>(chain.resume_or_abandon(handle));
 	}
 
-	io_awaiter::io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file):
-	  m_block(std::make_shared<io_operation>(std::move(owner), std::move(request), std::move(file)))
-	{
-	}
-
-	io_awaiter::io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file, io_permit& permit):
+	io_awaiter::io_awaiter(std::shared_ptr<io_shared> owner, io_request request, std::shared_ptr<io_handle> file, io_permit permit):
 	  m_block(std::make_shared<io_operation>(std::move(owner), std::move(request), std::move(file))),
-	  m_permit(&permit)
+	  m_permit(std::move(permit))
 	{
 	}
 
 	void io_awaiter::hand_over_permit() noexcept
 	{
-		if(m_permit != nullptr)
-		{
-			assert(m_permit->holds() && "awaiting an alt io_awaiter before its io_permit holds a permit");
-			m_permit->hand_over();
-		}
+		assert(m_permit.holds() && "an alt io_awaiter started without a permit");
+		m_permit.hand_over();
 	}
 
 	io_completion io_awaiter::await_resume()
