@@ -1,9 +1,11 @@
 #pragma once
 
+#include <alt/async_file.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/scheduler.hpp>
 #include <cstddef>
 #include <expected>
+#include <filesystem>
 #include <memory>
 #include <system_error>
 
@@ -122,8 +124,10 @@ namespace alt
 		 *
 		 * This is how a test drives the service with a manual_io_backend, which an
 		 * enumerator cannot conjure. @p backend must outlive this object. The same
-		 * argument failures as the overload above, except that options.backend is
-		 * ignored: backend() reports @p backend's own kind().
+		 * argument failures as the overload above, and options.backend must be
+		 * `automatic` or equal to @p backend's kind(): a mismatch fails with
+		 * std::errc::invalid_argument rather than silently using a backend the caller did
+		 * not ask for. backend() reports @p backend's own kind().
 		 */
 		[[nodiscard]] static std::expected<file_io, std::error_code> create(thread_pool& workers, scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
 
@@ -141,6 +145,27 @@ namespace alt
 
 		/** @brief Which backend is actually in use. Never io_backend_kind::automatic. */
 		[[nodiscard]] io_backend_kind backend() const noexcept;
+
+		/**
+		 * @brief Opens a file, resuming on the completion scheduler with an async_file.
+		 *
+		 * @param path  Copied into the operation, so it need not outlive the call.
+		 * @param how   Must name read, write or both; neither is std::errc::invalid_argument.
+		 * @param mode  The permission bits for a file this creates; used only with
+		 *              open_flag::create, and subject to the umask on POSIX.
+		 *
+		 * Fails with the operating system's error: std::errc::no_such_file_or_directory for
+		 * a missing path, file_exists for open_flag::exclusive over an existing one.
+		 *
+		 * **A cancelled open does not leak the descriptor.** The open may still complete
+		 * at the backend after the awaiting frame is gone, and the descriptor it produces
+		 * is owned by the operation's block until the task takes it, so it is closed there
+		 * if nobody does.
+		 *
+		 * The returned file keeps the service's shared state alive but not this object:
+		 * this must outlive every operation, as the class note says.
+		 */
+		[[nodiscard]] task<std::expected<async_file, std::error_code>> open(const std::filesystem::path& path, open_flags how, file_mode mode = {}) const;
 
 	private:
 		/** The one door to the engine-internal state; see alt::detail::file_io_access. */

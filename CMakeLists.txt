@@ -119,6 +119,11 @@ if(ALT_CPPCHECK)
             # message reports a limit on the analysis, not a finding in the code; every
             # other check still runs on the file.
             --suppress=normalCheckLevelMaxBranches:*/src/io_backend_thread_pool.cpp
+            # src/async_file.cpp is the first source to instantiate alt::task coroutines,
+            # and every co_await expands into the cancellation wrapper's branches, which
+            # takes the file past the same default-level limit. Same reasoning as above:
+            # it reports a limit on the analysis, and every other check still runs.
+            --suppress=normalCheckLevelMaxBranches:*/src/async_file.cpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src

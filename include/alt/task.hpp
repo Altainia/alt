@@ -47,7 +47,7 @@ namespace alt
 					// DELICATE, in the same way abandon_chain is: the teardown destroys this
 					// frame, whose await_suspend is on the stack. Read what is needed first
 					// and touch nothing through self afterwards.
-					cancellation_context* const context = self->cancellation_context_pointer();
+					const cancellation_context* const context = self->cancellation_context_pointer();
 
 					if(context != nullptr && context->stop_requested())
 					{
