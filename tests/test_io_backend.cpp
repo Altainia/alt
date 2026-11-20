@@ -8,6 +8,9 @@
 #include <memory>
 #include <system_error>
 #include <thread>
+#include <vector>
+
+#include "coroutine_test_support.hpp"
 
 namespace
 {
@@ -210,19 +213,81 @@ TEST(IoBackendTest, TheBuffersStorageIsStillAliveInsideTheCompletionCallback)
 	EXPECT_TRUE(probe.freed) << "the backend must release its copy once the callback returned";
 }
 
-TEST(IoBackendTest, CompletingFromAnotherThreadRunsTheCallbackExactlyOnce)
+namespace
 {
-	alt::manual_io_backend backend;
-	recorder               rec;
-	ASSERT_TRUE(backend.submit(read_request(), record, &rec).has_value());
-
+	void count_callback(void* state, alt::io_completion) noexcept
 	{
-		std::jthread completer([&backend] { backend.complete(0, done(5)); });
+		static_cast<std::atomic<int>*>(state)->fetch_add(1);
+	}
+} // namespace
+
+// Completers, a submitter and a canceller are all in flight at once: the spin
+// rendezvous releases them within nanoseconds of each other, and each then works
+// through hundreds of operations, so complete(), submit(), pending(), cancel() and
+// was_cancelled() overlap on the same mutex. ThreadSanitizer is the judge of the
+// locking; the exactly-once counts are the judge of the bookkeeping.
+TEST(IoBackendTest, CompletingWhileSubmittingAndCancellingFromOtherThreadsRunsEveryCallbackExactlyOnce)
+{
+	constexpr std::size_t completers    = 3;
+	constexpr std::size_t per_completer = 400;
+	constexpr std::size_t preloaded     = completers * per_completer;
+	constexpr std::size_t late          = 800;
+
+	alt::manual_io_backend backend;
+	const auto             counts = std::make_unique<std::atomic<int>[]>(preloaded + late);
+	for(std::size_t i = 0; i < preloaded; ++i)
+	{
+		ASSERT_TRUE(backend.submit(read_request(), count_callback, &counts[i]).has_value());
 	}
 
-	EXPECT_EQ(rec.calls, 1);
-	EXPECT_EQ(rec.last.bytes, 5U);
+	std::atomic<std::size_t> arrived{0};
+	constexpr std::size_t    parties = completers + 2;
+	{
+		std::vector<std::jthread> threads;
+		for(std::size_t c = 0; c < completers; ++c)
+		{
+			threads.emplace_back(
+			  [&, c] {
+				  alt_test::rendezvous(arrived, parties);
+				  for(std::size_t i = c * per_completer; i < (c + 1) * per_completer; ++i)
+				  {
+					  backend.complete(i, done(i));
+					  (void)backend.was_cancelled(i);
+				  }
+			  });
+		}
+		// Submits while the completers drain, polling pending() as it goes.
+		threads.emplace_back(
+		  [&] {
+			  alt_test::rendezvous(arrived, parties);
+			  for(std::size_t i = preloaded; i < preloaded + late; ++i)
+			  {
+				  const auto token = backend.submit(read_request(), count_callback, &counts[i]);
+				  EXPECT_TRUE(token.has_value());
+				  (void)backend.pending();
+			  }
+		  });
+		// Cancels operations the completers are completing.
+		threads.emplace_back(
+		  [&] {
+			  alt_test::rendezvous(arrived, parties);
+			  for(std::size_t i = 0; i < preloaded; ++i)
+			  {
+				  backend.cancel(alt::io_token(i + 1));
+			  }
+		  });
+	}
+
+	EXPECT_EQ(backend.pending(), late);
+	for(std::size_t i = preloaded; i < preloaded + late; ++i)
+	{
+		backend.complete(i, done(i));
+	}
 	EXPECT_EQ(backend.pending(), 0U);
+	for(std::size_t i = 0; i < preloaded + late; ++i)
+	{
+		EXPECT_EQ(counts[i].load(), 1) << "operation " << i;
+	}
 }
 
 TEST(IoBackendTest, ARejectedSubmissionAlsoConsumesTheInlineArm)

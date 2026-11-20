@@ -380,7 +380,9 @@ namespace alt
 		 *
 		 * Lets a test reach the request's buffer and write into it, which is how a
 		 * test stands in for a backend's late write. After completion the buffer is
-		 * empty; see the class description.
+		 * empty; see the class description. A test that needs the buffer at or after
+		 * completion (inside the callback, say) must take its own io_buffer copy
+		 * BEFORE calling complete().
 		 */
 		[[nodiscard]] const io_request& request(std::size_t index) const;
 
