@@ -121,12 +121,20 @@ namespace alt
 	 * backend runs them on a helper thread. That is an implementation burden on the
 	 * backend, not a gap in this interface.
 	 *
-	 * What `in` points at, per operation: a `const std::filesystem::path*` for
-	 * stat_path, unlink and list_directory; an `io_open_args*` for open; an
-	 * `io_rename_args*` for rename (both in detail/file_types.hpp, together with
-	 * `file_status` and `directory_entry`, which `out` points at). `io_invocable`
-	 * arrives with the escape hatch. This header names them only in documentation
-	 * and carries the pointers as `void`.
+	 * What `in` and `out` point at, per operation. `in` is `const void*` and the types
+	 * below are what it is cast back to: a `const std::filesystem::path*` for stat_path,
+	 * unlink and list_directory; a `const io_open_args*` for open; a
+	 * `const io_rename_args*` for rename. `out` is a `file_status*` for the two stat
+	 * operations, a `native_handle*` for open, and a `std::vector<directory_entry>*`
+	 * (the whole vector, not one entry) for list_directory. All of these types are in
+	 * detail/file_types.hpp. This header names them only in documentation and carries
+	 * the pointers as `void`. `io_invocable` arrives with the escape hatch; until then
+	 * io_op::invoke completes with std::errc::function_not_supported.
+	 *
+	 * A read or write moves at most `min(size, buffer.size())` bytes: a `size` larger
+	 * than the buffer is clamped, and the short transfer is reported as success, which
+	 * is indistinguishable from a real short read. A layer that must refuse that
+	 * request has to do so before submitting.
 	 */
 	struct io_request
 	{

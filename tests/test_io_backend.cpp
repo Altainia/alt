@@ -8,13 +8,16 @@
 #include <alt/thread_pool.hpp>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <semaphore>
 #include <string>
 #include <system_error>
@@ -23,9 +26,10 @@
 
 #include "coroutine_test_support.hpp"
 
-#ifdef __linux__
+#ifndef _WIN32
 #	include <fcntl.h>
 #	include <sys/stat.h>
+#	include <sys/syscall.h>
 #	include <unistd.h>
 #endif
 
@@ -370,24 +374,23 @@ namespace
 		void SetUp() override
 		{
 			static std::atomic<int> counter{0};
-			m_dir = std::filesystem::temp_directory_path() /
-			        ("alt_io_backend_" + std::to_string(counter.fetch_add(1)) + "_" +
-			         std::to_string(reinterpret_cast<std::uintptr_t>(this)));
-			std::filesystem::create_directories(m_dir);
-			// Constructed in place: the expected holding an immovable pool cannot be moved.
+			m_dir.path = std::filesystem::temp_directory_path() /
+			             ("alt_io_backend_" + std::to_string(counter.fetch_add(1)) + "_" +
+			              std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+			std::filesystem::create_directories(m_dir.path);
 			ASSERT_TRUE(m_pool.has_value());
 		}
 
 		void TearDown() override
 		{
+			// The directory is removed by m_dir's destructor, which runs after the pool has
+			// been joined: no worker can still be touching a file in it.
 			m_backend.reset();
-			std::error_code ignored;
-			std::filesystem::remove_all(m_dir, ignored);
 		}
 
 		[[nodiscard]] const std::filesystem::path& dir() const
 		{
-			return m_dir;
+			return m_dir.path;
 		}
 
 		alt::thread_pool& pool()
@@ -439,7 +442,7 @@ namespace
 
 		std::filesystem::path write_file(const std::string& name, const std::string& content) const
 		{
-			const auto path = m_dir / name;
+			const auto path = m_dir.path / name;
 			std::ofstream(path, std::ios::binary) << content;
 			return path;
 		}
@@ -460,8 +463,20 @@ namespace
 
 	private:
 		// The pool is declared first so it is destroyed last: the backend borrows it.
+		// m_dir is declared before the pool so it is removed after the pool has joined.
+		struct scratch_dir
+		{
+			std::filesystem::path path;
+
+			~scratch_dir()
+			{
+				std::error_code ignored;
+				std::filesystem::remove_all(path, ignored);
+			}
+		};
+
+		scratch_dir                                      m_dir;
 		std::expected<alt::thread_pool, std::error_code> m_pool = alt::thread_pool::create(1);
-		std::filesystem::path                            m_dir;
 		std::unique_ptr<alt::io_backend>                 m_backend;
 	};
 
@@ -561,53 +576,156 @@ TEST_F(ThreadPoolBackendTest, AJobCancelledBeforeItStartedNeverTouchesTheFile)
 	EXPECT_EQ(read_whole(path), "") << "the cancelled write reached the file";
 }
 
-#ifdef __linux__
+#ifndef _WIN32
 namespace
 {
-	/// True once some thread of this process is blocked inside open() waiting for a FIFO's other end.
-	bool a_thread_waits_for_a_fifo_partner()
+	constexpr auto fifo_wait_budget = std::chrono::seconds(10);
+
+	/// Retries @p ready every millisecond until it holds or the budget is spent.
+	template<typename Ready>
+	bool wait_until(Ready ready)
 	{
-		std::error_code ignored;
-		for(const auto& task: std::filesystem::directory_iterator("/proc/self/task", ignored))
+		const auto give_up = std::chrono::steady_clock::now() + fifo_wait_budget;
+		while(!ready())
 		{
-			std::ifstream wchan(task.path() / "wchan");
-			std::string   where;
-			wchan >> where;
-			if(where == "wait_for_partner")
+			if(std::chrono::steady_clock::now() >= give_up)
 			{
-				return true;
+				return false;
 			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
-		return false;
+		return true;
 	}
 
-	/// Polls until a worker is blocked in open(), or ten seconds pass.
-	bool wait_for_a_worker_blocked_on_a_fifo()
+	/// Frees a reader still blocked in open() when a failed assertion returns early, so the
+	/// fixture's pool join cannot hang on it. Does nothing once the test saw the completion.
+	struct fifo_releaser
 	{
-		const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-		while(std::chrono::steady_clock::now() < give_up)
+		std::filesystem::path path;
+		waiter&               job;
+		bool                  completed = false;
+
+		fifo_releaser(std::filesystem::path fifo_path, waiter& pending): path(std::move(fifo_path)), job(pending)
+		{}
+
+		fifo_releaser(const fifo_releaser&)            = delete;
+		fifo_releaser& operator=(const fifo_releaser&) = delete;
+
+		~fifo_releaser()
 		{
-			if(a_thread_waits_for_a_fifo_partner())
+			while(!completed && !job.done.try_acquire_for(std::chrono::milliseconds(1)))
 			{
-				return true;
+				const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+				if(writer >= 0)
+				{
+					static_cast<void>(::close(writer));
+				}
 			}
-			std::this_thread::yield();
 		}
-		return false;
+	};
+
+#	ifdef __linux__
+	struct tid_probe
+	{
+		std::binary_semaphore done{0};
+		pid_t                 tid = 0;
+	};
+
+	/// The kernel thread id of the pool's only worker, learned by running a job on it.
+	pid_t worker_tid(alt::thread_pool& pool)
+	{
+		tid_probe probe;
+		pool.post(alt::work_item{.invoke = +[](void* state) noexcept {
+			                         auto& p = *static_cast<tid_probe*>(state);
+			                         p.tid   = static_cast<pid_t>(::syscall(SYS_gettid));
+			                         p.done.release();
+		                         },
+		                         .state = &probe});
+		probe.done.acquire();
+		return probe.tid;
+	}
+
+	/// Where the kernel says @p tid is sleeping; empty when the file cannot be opened.
+	std::optional<std::string> wchan_of(pid_t tid)
+	{
+		std::ifstream wchan("/proc/self/task/" + std::to_string(tid) + "/wchan");
+		if(!wchan)
+		{
+			return std::nullopt;
+		}
+		std::string where;
+		wchan >> where;
+		return where;
+	}
+
+	/// A readable wchan names a kernel symbol. Hardened /proc and CONFIG_KALLSYMS=n give "0" or an address.
+	bool names_a_symbol(const std::string& where)
+	{
+		return std::ranges::any_of(where, [](unsigned char c) { return std::isalpha(c) != 0 && c != 'x'; });
+	}
+#	endif
+
+	/// The pool worker's thread id when this environment reports where it sleeps, else empty.
+	std::optional<pid_t> worker_to_watch([[maybe_unused]] alt::thread_pool& pool)
+	{
+#	ifdef __linux__
+		const pid_t worker = worker_tid(pool);
+		const auto  idle   = wchan_of(worker);
+		if(idle.has_value() && names_a_symbol(*idle))
+		{
+			return worker;
+		}
+#	endif
+		std::cout << "[  NOTE  ] this environment does not report the worker's wchan; using the non-blocking-writer probe\n";
+		return std::nullopt;
+	}
+
+	/// Cancels @p token once the job is provably past its start, then returns the FIFO's write end
+	/// (which releases the blocked open). With a @p worker it waits for that thread to sleep inside
+	/// open(); without one it probes with a non-blocking writer open, which fails with ENXIO until
+	/// a reader exists. A failure is reported through EXPECT and returns -1.
+	int cancel_once_started(alt::io_backend& backend, alt::io_token token, const std::filesystem::path& fifo, std::optional<pid_t> worker)
+	{
+		int writer = -1;
+#	ifdef __linux__
+		if(worker)
+		{
+			const bool inside_open = wait_until([&] { return wchan_of(*worker).value_or("") == "wait_for_partner"; });
+			EXPECT_TRUE(inside_open) << "wchan is readable but the worker never reached wait_for_partner inside open(); the cancel would not be mid-job";
+			backend.cancel(token);
+			return ::open(fifo.c_str(), O_WRONLY | (inside_open ? 0 : O_NONBLOCK)); // releases the blocked reader
+		}
+#	endif
+		static_cast<void>(worker);
+		const bool reader_appeared = wait_until(
+		  [&] {
+			  writer = ::open(fifo.c_str(), O_WRONLY | O_NONBLOCK);
+			  return writer >= 0;
+		  });
+		EXPECT_TRUE(reader_appeared) << "no reader ever appeared on the FIFO; the job never started";
+		backend.cancel(token);
+		return writer;
 	}
 } // namespace
 #endif
 
 TEST_F(ThreadPoolBackendTest, AJobCancelledAfterItStartedStillCompletesAndReportsItsResult)
 {
-#ifndef __linux__
-	GTEST_SKIP() << "needs a syscall that blocks mid-job and a way to see it block; only /proc on Linux offers both";
+#ifdef _WIN32
+	GTEST_SKIP() << "needs a call that blocks mid-job (a FIFO open); Windows has no equivalent this test can drive without a Windows host";
 #else
 	// Opening a FIFO for reading blocks inside the syscall until a writer appears. That
 	// holds the job in the middle of its I/O, which no regular-file operation can do, so
 	// the cancel lands strictly after the job started and strictly before it finished.
 	const auto fifo = dir() / "gate";
 	ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+
+	// Where the kernel can say what the worker is waiting in (Linux, readable wchan), the
+	// test watches for it to be inside open(). Elsewhere the fallback is a non-blocking
+	// writer open, which fails with ENXIO until a reader exists: it proves the job started,
+	// but it releases the reader, so the cancel then races the completion. That is a weaker
+	// window, not a wrong one; a correct backend reports success either way.
+	const auto watched = worker_to_watch(pool());
 
 	alt::io_open_args  args{.path = fifo, .open_flags = alt::flags(alt::open_flag::read), .mode = {}};
 	alt::native_handle handle = alt::invalid_native_handle;
@@ -619,22 +737,43 @@ TEST_F(ThreadPoolBackendTest, AJobCancelledAfterItStartedStillCompletesAndReport
 	waiter     w;
 	const auto token = backend().submit(request, deliver, &w);
 	ASSERT_TRUE(token.has_value());
+	fifo_releaser releaser(fifo, w);
 
-	// Wait until the worker is provably inside open(): then the job has started.
-	ASSERT_TRUE(wait_for_a_worker_blocked_on_a_fifo()) << "the worker never blocked in open(); the cancel would not be mid-job";
-
-	backend().cancel(*token);
-
-	const int writer = ::open(fifo.c_str(), O_WRONLY); // releases the blocked reader
+	const int writer = cancel_once_started(backend(), *token, fifo, watched);
 	ASSERT_GE(writer, 0);
 	w.done.acquire();
-	const auto reader = alt::detail::io_handle::adopt(handle);
+	releaser.completed = true;
+	const auto reader  = alt::detail::io_handle::adopt(handle);
 	static_cast<void>(::close(writer));
 
 	EXPECT_EQ(w.calls.load(), 1);
 	EXPECT_FALSE(w.result.error) << "a cancel after the job started changed its outcome";
 	EXPECT_TRUE(reader->has_handle()) << "the open completed but its handle was discarded";
 #endif
+}
+
+TEST_F(ThreadPoolBackendTest, AReadOrWriteOnAClosedDescriptorReportsTheOperatingSystemsError)
+{
+	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value());
+	const auto stale = (*file)->native();
+	file->reset(); // closes the descriptor; the number now names nothing
+
+	for(const auto op: {alt::io_op::read, alt::io_op::write})
+	{
+		alt::io_request request;
+		request.op      = op;
+		request.handle  = stale;
+		request.buffer  = buffer_of(1);
+		request.size    = 1;
+		const auto done = run(request);
+		EXPECT_EQ(done.bytes, 0U);
+#ifdef _WIN32
+		EXPECT_TRUE(done.error) << "a transfer on a closed handle must fail";
+#else
+		EXPECT_EQ(done.error, std::errc::bad_file_descriptor);
+#endif
+	}
 }
 
 // The remaining operations are exercised end to end by the file layer's own tests; these

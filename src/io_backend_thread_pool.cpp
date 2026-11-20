@@ -4,6 +4,7 @@
 #include <alt/scheduler.hpp>
 #include <alt/thread_pool.hpp>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <cstdint>
 #include <filesystem>
@@ -187,7 +188,7 @@ namespace alt
 			SECURITY_ATTRIBUTES security{};
 			security.nLength        = sizeof(security);
 			security.bInheritHandle = how.has_any(flags(open_flag::close_on_exec)) ? FALSE : TRUE;
-			// FILE_FLAG_BACKUP_SEMANTICS lets a directory be opened, so stat_path can reuse this.
+			// FILE_FLAG_BACKUP_SEMANTICS is what lets CreateFileW open a directory at all.
 			const HANDLE handle = ::CreateFileW(args.path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, disposition, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
 			if(handle == INVALID_HANDLE_VALUE)
 			{
@@ -385,7 +386,7 @@ namespace alt
 			{
 				std::error_code type_error;
 				const auto      type = it->symlink_status(type_error).type();
-				found.push_back({it->path().filename().string(), type_error ? file_kind::unknown : kind_of(type)});
+				found.push_back(alt::directory_entry{.name = it->path().filename().string(), .kind = type_error ? file_kind::unknown : kind_of(type)});
 			}
 			if(error)
 			{
@@ -398,6 +399,24 @@ namespace alt
 		/// Performs one request synchronously on the calling (worker) thread.
 		io_completion perform(const io_request& request)
 		{
+			// A request missing the pointer its operation reads would otherwise be a segfault on a worker.
+			switch(request.op)
+			{
+			case io_op::stat_handle:
+				assert(request.out != nullptr);
+				break;
+			case io_op::stat_path:
+			case io_op::list_directory:
+			case io_op::open:
+				assert(request.in != nullptr && request.out != nullptr);
+				break;
+			case io_op::rename:
+			case io_op::unlink:
+				assert(request.in != nullptr);
+				break;
+			default:
+				break;
+			}
 			io_completion result;
 			switch(request.op)
 			{
@@ -517,6 +536,14 @@ namespace alt
 				catch(const std::bad_alloc&)
 				{
 					result.error = bad_alloc_error();
+				}
+				catch(...)
+				{
+					// This function is noexcept and a worker has nobody to hand an exception to,
+					// so one would abort the process. The reachable source is a directory entry
+					// whose name cannot be converted to a narrow string (Windows), which is
+					// filesystem content the caller does not control. Report it instead.
+					result.error = std::make_error_code(std::errc::io_error);
 				}
 			}
 			self.on_done(self.state, result);
