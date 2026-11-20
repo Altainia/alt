@@ -16,6 +16,11 @@
 // Each coroutine that reaches the backend runs the same two awaits:
 //   auto permit = co_await acquire_permit(owner);   // test it; non-const, it is moved from below
 //   const io_completion done = co_await io_awaiter{owner, request, file, std::move(*permit)};
+// They stay written out in each operation: the awaits cannot leave a coroutine, and a coroutine
+// helper returning task<io_completion> would be a second frame per operation, which the
+// one-frame-per-operation cost model of docs/superpowers/specs/2026-11-20-awaitable-file-io-design.md
+// rules out. What needs no
+// coroutine is factored: stateful_request builds the request and failure() the verdict.
 // There is nothing to remember beyond that, because the types leave nothing else to get
 // wrong: the permit is an object that returns itself if the frame dies holding it (an
 // early return, a throw, or cancellation abandoning the chain between the two awaits),
@@ -36,6 +41,15 @@ namespace alt
 		std::unexpected<std::error_code> failure(const std::errc code)
 		{
 			return std::unexpected(std::make_error_code(code));
+		}
+
+		/**
+		 * The request for an operation that moves no bytes: only `in` and `out` into `state`,
+		 * which the operation's block co-owns for as long as a worker can touch them.
+		 */
+		io_request stateful_request(const io_op op, const native_handle handle, const void* const in, void* const out, std::shared_ptr<void> state)
+		{
+			return io_request{.op = op, .handle = handle, .buffer = {}, .offset = 0, .size = 0, .in = in, .out = out, .state = std::move(state)};
 		}
 
 		/** True if an operation may be started on this descriptor. */
@@ -110,7 +124,7 @@ namespace alt
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = op, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = nullptr, .state = nullptr}, file, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, stateful_request(op, file->native(), nullptr, nullptr, nullptr), file, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -131,7 +145,7 @@ namespace alt
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::stat_handle, .handle = file->native(), .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = result.get(), .state = result}, file, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, stateful_request(io_op::stat_handle, file->native(), nullptr, result.get(), result), file, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -148,7 +162,7 @@ namespace alt
 			{
 				co_return failure(std::errc::operation_canceled);
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::open, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &state->args, .out = &state->created, .state = state}, nullptr, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, stateful_request(io_op::open, invalid_native_handle, &state->args, &state->created, state), nullptr, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
