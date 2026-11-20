@@ -2,8 +2,12 @@
 
 #include <alt/io_backend.hpp>
 #include <alt/io_buffer.hpp>
+#include <array>
+#include <atomic>
 #include <cstddef>
+#include <memory>
 #include <system_error>
+#include <thread>
 
 namespace
 {
@@ -165,4 +169,72 @@ TEST(IoBackendTest, ASubmissionConfiguredToFailReturnsAnErrorAndNeverRunsTheCall
 	EXPECT_EQ(backend.pending(), 1U);
 	backend.complete(0, {});
 	EXPECT_EQ(rec.calls, 1);
+}
+
+namespace
+{
+	/// Observes, from inside a completion callback, whether the buffer's owner is still alive.
+	struct liveness_probe
+	{
+		std::atomic<bool> freed{false};
+		int               calls                 = 0;
+		bool              freed_during_callback = true;
+	};
+
+	void probe_callback(void* state, alt::io_completion) noexcept
+	{
+		auto& probe = *static_cast<liveness_probe*>(state);
+		++probe.calls;
+		probe.freed_during_callback = probe.freed.load();
+	}
+} // namespace
+
+TEST(IoBackendTest, TheBuffersStorageIsStillAliveInsideTheCompletionCallback)
+{
+	alt::manual_io_backend    backend;
+	liveness_probe            probe;
+	std::array<std::byte, 16> storage{};
+	{
+		const std::shared_ptr<void> owner(storage.data(), [&probe](void*) { probe.freed = true; });
+		alt::io_request             request = read_request();
+		request.buffer                      = alt::io_buffer::borrow(storage, owner);
+		ASSERT_TRUE(backend.submit(request, probe_callback, &probe).has_value());
+	}
+	// The caller's own copies are gone; only the backend's entry keeps the owner alive.
+	EXPECT_FALSE(probe.freed);
+
+	backend.complete(0, done(16));
+
+	EXPECT_EQ(probe.calls, 1);
+	EXPECT_FALSE(probe.freed_during_callback);
+	EXPECT_TRUE(probe.freed) << "the backend must release its copy once the callback returned";
+}
+
+TEST(IoBackendTest, CompletingFromAnotherThreadRunsTheCallbackExactlyOnce)
+{
+	alt::manual_io_backend backend;
+	recorder               rec;
+	ASSERT_TRUE(backend.submit(read_request(), record, &rec).has_value());
+
+	{
+		std::jthread completer([&backend] { backend.complete(0, done(5)); });
+	}
+
+	EXPECT_EQ(rec.calls, 1);
+	EXPECT_EQ(rec.last.bytes, 5U);
+	EXPECT_EQ(backend.pending(), 0U);
+}
+
+TEST(IoBackendTest, ARejectedSubmissionAlsoConsumesTheInlineArm)
+{
+	alt::manual_io_backend backend;
+	recorder               rec;
+
+	backend.complete_inline_next(done(1));
+	backend.fail_next_submission(std::make_error_code(std::errc::io_error));
+	EXPECT_FALSE(backend.submit(read_request(), record, &rec).has_value());
+
+	ASSERT_TRUE(backend.submit(read_request(), record, &rec).has_value());
+	EXPECT_EQ(rec.calls, 0);
+	EXPECT_EQ(backend.pending(), 1U);
 }

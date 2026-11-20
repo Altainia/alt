@@ -49,7 +49,7 @@ namespace alt
 	/**
 	 * @brief The operation an io_request asks a backend to perform.
 	 *
-	 * Which request fields each operation reads is documented on io_request.
+	 * The per-operation field table is on io_request.
 	 */
 	enum class io_op : std::uint8_t
 	{
@@ -78,7 +78,9 @@ namespace alt
 	 * `buffer` is held BY VALUE on purpose. A copy of the refcounted io_buffer is
 	 * what keeps the bytes alive after the coroutine that asked for the read has
 	 * been destroyed but before the kernel has finished writing into them. A
-	 * backend keeps its copy until the completion callback has run.
+	 * backend keeps its copy alive until the completion callback has RETURNED, not
+	 * merely until it starts. (manual_io_backend drops its stored request's copy
+	 * before the callback but holds a private one across it; see its description.)
 	 *
 	 * `in` and `out` carry what the struct does not model. `in` is operation-specific
 	 * input (a path pair for rename, an `io_invocable*` for invoke); `out` is
@@ -88,6 +90,38 @@ namespace alt
 	 * completion can land after the frame is gone, and a write through `out` into a
 	 * destroyed frame is a use-after-free no sanitizer reliably reports. This layer
 	 * cannot check it; it is a precondition on the layer that builds requests.
+	 *
+	 * Fields each operation reads (`handle` is the target handle unless stated),
+	 * and where its result goes. Every operation reports success or failure through
+	 * io_completion::error; only read and write also set io_completion::bytes.
+	 *
+	 *  | op             | reads                          | result                           |
+	 *  |----------------|--------------------------------|----------------------------------|
+	 *  | read           | handle, buffer, offset, size   | bytes read                       |
+	 *  | write          | handle, buffer, offset, size   | bytes written                    |
+	 *  | sync_full      | handle                         | error only                       |
+	 *  | sync_data      | handle                         | error only                       |
+	 *  | stat_handle    | handle, out                    | `file_status` written to `out`   |
+	 *  | stat_path      | in (path), out                 | `file_status` written to `out`   |
+	 *  | open           | in (path and open flags), out  | `native_handle` written to `out` |
+	 *  | rename         | in (path pair)                 | error only                       |
+	 *  | unlink         | in (path)                      | error only                       |
+	 *  | list_directory | in (path), out                 | `std::vector<directory_entry>`   |
+	 *  | invoke         | in (`io_invocable*`)           | error only                       |
+	 *
+	 * `open` stores the new handle through `out`, which is a `native_handle*`;
+	 * io_completion has no field for it and the seam does not grow one. On error
+	 * the pointee is left untouched.
+	 *
+	 * list_directory and invoke have no kernel equivalent on any platform (neither
+	 * io_uring nor IOCP can enumerate a directory or run arbitrary code). EVERY
+	 * backend runs them on a helper thread. That is an implementation burden on the
+	 * backend, not a gap in this interface.
+	 *
+	 * The pointee types are declared by later components: `file_status` and
+	 * `directory_entry` by the async file header and the directory listing header
+	 * (tasks 7 and 8 of phase 7a), `io_invocable` by task 9. This header names them
+	 * only in documentation and carries the pointers as `void`.
 	 */
 	struct io_request
 	{
@@ -259,10 +293,18 @@ namespace alt
 	 * backend does, so a test can observe that the storage outlives or does not
 	 * outlive the owners it expects. request(index).buffer is empty afterwards.
 	 *
-	 * Thread safety: every member may be called from any thread. Callbacks run
-	 * outside the internal lock, so a callback may call back into the backend.
-	 * A reference from request() is stable (storage never relocates) but reading it
-	 * races with complete() of the same index; read it before completing.
+	 * Thread safety: submit(), cancel(), complete(), complete_inline_next(),
+	 * fail_next_submission(), pending(), was_cancelled() and kind() are safe to call
+	 * concurrently from any threads. Callbacks run outside the internal lock, so a
+	 * callback may call back into the backend. request() returns a reference that
+	 * stays valid for the life of the backend, but the request it names is NOT
+	 * synchronized: complete() of that same index modifies it, so a test reads it
+	 * (or copies its buffer) before the operation can complete on another thread.
+	 *
+	 * Buffer lifetime: complete() takes the stored request's buffer out of the
+	 * entry before running the callback and releases that copy only after the
+	 * callback returns. So the storage is alive throughout the callback even though
+	 * request(index).buffer is already empty during it.
 	 *
 	 * Operations still pending when the backend is destroyed never run their
 	 * callbacks. A test that cares completes everything first.
@@ -285,7 +327,8 @@ namespace alt
 		 * If fail_next_submission() armed an error, returns it and records nothing.
 		 * Otherwise, if complete_inline_next() armed a result, the callback runs
 		 * before this returns, as a real backend's inline path does. The failure arm
-		 * wins when both are armed and leaves the inline arm for the next call.
+		 * wins when both are armed and consumes both, so the inline arm cannot fire on
+		 * a later, unrelated submission.
 		 *
 		 * @return The token for the operation, whose value is its index plus one.
 		 */

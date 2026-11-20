@@ -17,6 +17,7 @@ namespace alt
 			{
 				const std::error_code error = *m_fail_next;
 				m_fail_next.reset();
+				m_inline_next.reset(); // a rejected submission consumes both arms
 				return std::unexpected(error);
 			}
 
