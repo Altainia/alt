@@ -121,7 +121,9 @@ namespace alt
 		 *               completes and releases its buffer while the kernel may still
 		 *               be writing into it. A POSIX descriptor must be seekable,
 		 *               because positional transfers need that: a non-seekable one (a
-		 *               FIFO, socket or tty) reports std::errc::illegal_seek. Handles
+		 *               FIFO, socket or tty) reports std::errc::illegal_seek. Windows
+		 *               has no equivalent: a pipe handle ignores the offset rather than
+		 *               failing, so it is the caller's to avoid there. Handles
 		 *               opened by file_io::open satisfy both.
 		 */
 		[[nodiscard]] static async_file adopt(const file_io& io, native_handle handle);

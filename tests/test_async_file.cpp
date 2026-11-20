@@ -645,6 +645,18 @@ TEST_F(AsyncFileTest, OpenOfAMissingPathReportsNoSuchFileOrDirectory)
 	EXPECT_EQ(opened.error(), std::errc::no_such_file_or_directory);
 }
 
+TEST_F(AsyncFileTest, ReadAtOnADirectoryReportsIsADirectory)
+{
+	// Opening a directory for reading succeeds on both platforms; it is the transfer that fails.
+	auto opened = run(real_io().open(dir(), alt::flags(alt::open_flag::read)));
+	ASSERT_TRUE(opened.has_value());
+
+	const auto read = run(opened->read_at(buffer_of(4), 0, 4));
+
+	ASSERT_FALSE(read.has_value());
+	EXPECT_EQ(read.error(), std::errc::is_a_directory);
+}
+
 TEST_F(AsyncFileTest, OpenWithExclusiveOverAnExistingFileReportsFileExists)
 {
 	const auto path   = write_file("data.txt", "x");

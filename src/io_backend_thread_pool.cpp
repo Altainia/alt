@@ -61,9 +61,41 @@ namespace alt
 		}
 
 #ifdef _WIN32
+		/**
+		 * Translates the Win32 errors whose standard mapping differs from the POSIX error the
+		 * documented contract promises, and leaves every other error as the system reports it.
+		 *
+		 * The contract names POSIX conditions (std::errc::not_a_directory, for one), and the
+		 * Windows standard library does not map every Win32 equivalent to the same condition:
+		 * it maps ERROR_DIRECTORY to std::errc::invalid_argument, where ENOTDIR is
+		 * std::errc::not_a_directory. Left alone, a caller comparing against the documented
+		 * condition would pass on Linux and fail on Windows. A code not listed here is not
+		 * flattened: it arrives faithfully as {code, system_category()}.
+		 *
+		 * Translated: ERROR_DIRECTORY (a directory operation given a file) to not_a_directory,
+		 * and ERROR_NOT_SAME_DEVICE (MoveFileExW without MOVEFILE_COPY_ALLOWED, across volumes)
+		 * to cross_device_link.
+		 */
+		std::error_code normalize_windows_error(std::error_code error) noexcept
+		{
+			if(error.category() != std::system_category())
+			{
+				return error;
+			}
+			switch(static_cast<DWORD>(error.value()))
+			{
+			case ERROR_DIRECTORY:
+				return std::make_error_code(std::errc::not_a_directory);
+			case ERROR_NOT_SAME_DEVICE:
+				return std::make_error_code(std::errc::cross_device_link);
+			default:
+				return error;
+			}
+		}
+
 		std::error_code last_error() noexcept
 		{
-			return {static_cast<int>(::GetLastError()), std::system_category()};
+			return normalize_windows_error({static_cast<int>(::GetLastError()), std::system_category()});
 		}
 
 		HANDLE to_handle(native_handle handle) noexcept
@@ -102,6 +134,13 @@ namespace alt
 		// ---------------------------------------------------------------------
 
 #ifdef _WIN32
+		/// Whether @p handle names a directory. A transfer on one fails with a code the standard library does not map to is_a_directory, which is what POSIX reports (EISDIR).
+		bool is_directory_handle(native_handle handle) noexcept
+		{
+			BY_HANDLE_FILE_INFORMATION info{};
+			return ::GetFileInformationByHandle(to_handle(handle), &info) != FALSE && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+		}
+
 		io_completion do_transfer(const io_request& request, bool is_write) noexcept
 		{
 			io_completion result;
@@ -120,7 +159,9 @@ namespace alt
 				{
 					return result;
 				}
-				result.error = last_error();
+				// The error must be read before anything else can overwrite it.
+				const std::error_code error = last_error();
+				result.error                = is_directory_handle(request.handle) ? std::make_error_code(std::errc::is_a_directory) : error;
 				return result;
 			}
 			result.bytes = moved;
@@ -392,7 +433,12 @@ namespace alt
 			const std::filesystem::directory_iterator end;
 			if(error)
 			{
+#ifdef _WIN32
+				// std::filesystem reports the raw Win32 code; see normalize_windows_error().
+				return normalize_windows_error(error);
+#else
 				return error;
+#endif
 			}
 			std::vector<directory_entry> found;
 			for(; it != end; it.increment(error))
