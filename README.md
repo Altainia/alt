@@ -208,3 +208,7 @@ Then include headers as needed:
 | `<alt/task_group.hpp>` | The owner's teardown point for spawned tasks: `task_group` | [docs/task_group.md](docs/task_group.md) |
 | `<alt/when_all.hpp>` | Awaits several awaitables concurrently and yields every result: `when_all` | [docs/when_all.md](docs/when_all.md) |
 | `<alt/when_any.hpp>` | Races several awaitables and yields the first to complete: `when_any` | [docs/when_any.md](docs/when_any.md) |
+| `<alt/io_buffer.hpp>` | Refcounted byte buffer that outlives an abandoned operation: `io_buffer` | [docs/io_buffer.md](docs/io_buffer.md) |
+| `<alt/io_backend.hpp>` | The seam between the file layer and an I/O engine, with a hand-driven test backend and a thread-pool backend: `io_backend`, `io_request`, `io_completion`, `io_token`, `manual_io_backend`, `make_thread_pool_backend` | [docs/io_backend.md](docs/io_backend.md) |
+| `<alt/file_io.hpp>` | Service for awaitable file I/O with backpressure: `file_io`, `file_io_options`; `open`, `stat`, `rename`, `unlink`, `list_directory` and the `run` escape hatch | [docs/file_io.md](docs/file_io.md) |
+| `<alt/async_file.hpp>` | An open file with awaitable positional operations: `async_file`, `open_flags`, `sync_mode` | [docs/async_file.md](docs/async_file.md) |
