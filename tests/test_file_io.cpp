@@ -151,6 +151,118 @@ namespace
 	}
 
 	/**
+	 * A backend that behaves like a worker thread that is late: it keeps the raw `in` and
+	 * `out` pointers it was handed, deliberately WITHOUT the request's `state`, and only
+	 * dereferences them in finish(), which a test calls after the awaiting chain has been
+	 * cancelled and destroyed. Whatever keeps those pointers valid then is the operation
+	 * block's co-ownership and nothing else, which is the property under test; under
+	 * AddressSanitizer a pointer into a destroyed frame is a heap-use-after-free here.
+	 */
+	class late_worker_backend final: public alt::io_backend
+	{
+	public:
+		[[nodiscard]] std::expected<alt::io_token, std::error_code> submit(const alt::io_request& request, const alt::io_completion_fn on_done, void* const state) override
+		{
+			m_op      = request.op;
+			m_in      = request.in;
+			m_out     = request.out;
+			m_on_done = on_done;
+			m_state   = state;
+			return alt::io_token{1};
+		}
+
+		void cancel(const alt::io_token /*token*/) noexcept override
+		{
+			m_cancel_requested = true;
+		}
+
+		[[nodiscard]] alt::io_backend_kind kind() const noexcept override
+		{
+			return alt::io_backend_kind::manual;
+		}
+
+		[[nodiscard]] bool submitted() const noexcept
+		{
+			return m_on_done != nullptr;
+		}
+
+		[[nodiscard]] bool cancel_requested() const noexcept
+		{
+			return m_cancel_requested;
+		}
+
+		/** What finish() read through `in`, as text, so a test can check it was intact. */
+		[[nodiscard]] const std::string& observed() const noexcept
+		{
+			return m_observed;
+		}
+
+		/** Does the work the real backend would, through the raw pointers, then reports success. */
+		void finish()
+		{
+			switch(m_op)
+			{
+			case alt::io_op::stat_path:
+				m_observed                             = static_cast<const std::filesystem::path*>(m_in)->string();
+				*static_cast<alt::file_status*>(m_out) = alt::file_status{.size = 42, .mtime_ns = 0, .kind = alt::file_kind::regular, .identity = {}};
+				break;
+			case alt::io_op::list_directory:
+				m_observed = static_cast<const std::filesystem::path*>(m_in)->string();
+				static_cast<std::vector<alt::directory_entry>*>(m_out)->push_back(alt::directory_entry{.name = "late", .kind = alt::file_kind::regular});
+				break;
+			case alt::io_op::unlink:
+				m_observed = static_cast<const std::filesystem::path*>(m_in)->string();
+				break;
+			case alt::io_op::rename:
+				m_observed = static_cast<const alt::io_rename_args*>(m_in)->from.string() + ">" + static_cast<const alt::io_rename_args*>(m_in)->to.string();
+				break;
+			default:
+				ADD_FAILURE() << "an operation this backend does not model was submitted";
+				break;
+			}
+			m_on_done(m_state, alt::io_completion{});
+		}
+
+	private:
+		alt::io_op            m_op               = alt::io_op::stat_path;
+		const void*           m_in               = nullptr;
+		void*                 m_out              = nullptr;
+		alt::io_completion_fn m_on_done          = nullptr;
+		void*                 m_state            = nullptr;
+		bool                  m_cancel_requested = false;
+		std::string           m_observed;
+	};
+
+	/**
+	 * Starts @p work against a late_worker_backend, cancels the chain once the operation
+	 * has reached the backend, lets the destroyed frame go, and only then runs the
+	 * backend's work. Returns what the backend read through `in`.
+	 */
+	template<typename T, typename MakeTask>
+	std::string finish_after_the_chain_is_cancelled(MakeTask make_task)
+	{
+		auto                  created = alt::thread_pool::create(1);
+		alt::thread_pool&     pool    = pool_of(created);
+		alt::manual_scheduler home;
+		late_worker_backend   backend;
+		const auto            io = alt::file_io::create(pool, alt::scheduler_ref{home}, backend);
+		EXPECT_TRUE(io.has_value());
+
+		const auto               state = std::make_shared<outcome<T>>();
+		alt::cancellation_handle chain = alt::start(capture(make_task(*io), state));
+		EXPECT_TRUE(backend.submitted()) << "the operation never reached the backend";
+
+		EXPECT_TRUE(chain.request_stop());
+		home.drain();
+		EXPECT_TRUE(backend.cancel_requested());
+		EXPECT_FALSE(state->finished) << "a cancelled chain is abandoned, not resumed";
+
+		backend.finish();
+		home.drain();
+		return backend.observed();
+	}
+
+	/**
 	 * A real service on the thread-pool backend, completing onto a scheduler the test
 	 * drives itself, plus a scratch directory removed afterwards.
 	 */
@@ -363,6 +475,123 @@ TEST_F(FileIoPathTest, ListDirectoryOfAFileReportsNotADirectory)
 
 	ASSERT_FALSE(listed.has_value());
 	EXPECT_EQ(listed.error().default_error_condition(), std::make_error_condition(std::errc::not_a_directory));
+}
+
+TEST_F(FileIoPathTest, StatOfAMissingPathReportsNoSuchFileOrDirectory)
+{
+	const auto status = run(io().stat(dir() / "never_existed.txt"));
+
+	ASSERT_FALSE(status.has_value());
+	EXPECT_EQ(status.error().default_error_condition(), std::make_error_condition(std::errc::no_such_file_or_directory));
+}
+
+TEST_F(FileIoPathTest, RenameOfAMissingSourceReportsNoSuchFileOrDirectoryAndCreatesNothing)
+{
+	const auto to = dir() / "target.txt";
+
+	const auto renamed = run(io().rename(dir() / "never_existed.txt", to));
+
+	ASSERT_FALSE(renamed.has_value());
+	EXPECT_EQ(renamed.error().default_error_condition(), std::make_error_condition(std::errc::no_such_file_or_directory));
+	EXPECT_FALSE(std::filesystem::exists(to));
+}
+
+TEST_F(FileIoPathTest, AFailedRenameLeavesAnExistingTargetUntouched)
+{
+	const auto target = write_file("target.txt", "keep me");
+
+	const auto renamed = run(io().rename(dir() / "never_existed.txt", target));
+
+	ASSERT_FALSE(renamed.has_value());
+	EXPECT_EQ(read_whole(target), "keep me");
+}
+
+TEST_F(FileIoPathTest, ListDirectoryReportsALinkAsALinkAndNotAsItsTarget)
+{
+#ifdef _WIN32
+	GTEST_SKIP() << "Creating a symbolic link on Windows needs a privilege a test runner may not hold.";
+#else
+	write_file("target.txt", "12345");
+	std::filesystem::create_symlink("target.txt", dir() / "link");
+	std::filesystem::create_symlink("nowhere", dir() / "dangling");
+
+	auto listed = run(io().list_directory(dir()));
+
+	ASSERT_TRUE(listed.has_value());
+	std::ranges::sort(*listed, {}, &alt::directory_entry::name);
+	ASSERT_EQ(listed->size(), 3U);
+	EXPECT_EQ((*listed)[0].name, "dangling");
+	EXPECT_EQ((*listed)[0].kind, alt::file_kind::symlink);
+	EXPECT_EQ((*listed)[1].name, "link");
+	EXPECT_EQ((*listed)[1].kind, alt::file_kind::symlink);
+	EXPECT_EQ((*listed)[2].name, "target.txt");
+	EXPECT_EQ((*listed)[2].kind, alt::file_kind::regular);
+#endif
+}
+
+TEST_F(FileIoPathTest, StatFollowsALinkAndADanglingLinkIsAnError)
+{
+#ifdef _WIN32
+	GTEST_SKIP() << "Creating a symbolic link on Windows needs a privilege a test runner may not hold.";
+#else
+	write_file("target.txt", "12345");
+	std::filesystem::create_symlink("target.txt", dir() / "link");
+	std::filesystem::create_symlink("nowhere", dir() / "dangling");
+
+	const auto followed = run(io().stat(dir() / "link"));
+	const auto dangling = run(io().stat(dir() / "dangling"));
+
+	ASSERT_TRUE(followed.has_value());
+	EXPECT_EQ(followed->kind, alt::file_kind::regular);
+	EXPECT_EQ(followed->size, 5U);
+	ASSERT_FALSE(dangling.has_value());
+	EXPECT_EQ(dangling.error().default_error_condition(), std::make_error_condition(std::errc::no_such_file_or_directory));
+#endif
+}
+
+TEST_F(FileIoPathTest, UnlinkOfALinkRemovesTheLinkAndLeavesItsTarget)
+{
+#ifdef _WIN32
+	GTEST_SKIP() << "Creating a symbolic link on Windows needs a privilege a test runner may not hold.";
+#else
+	const auto target = write_file("target.txt", "12345");
+	const auto link   = dir() / "link";
+	std::filesystem::create_symlink("target.txt", link);
+
+	const auto removed = run(io().unlink(link));
+
+	ASSERT_TRUE(removed.has_value());
+	EXPECT_FALSE(std::filesystem::is_symlink(std::filesystem::symlink_status(link)));
+	EXPECT_EQ(read_whole(target), "12345");
+#endif
+}
+
+TEST(FileIoPathLifetimeTest, ACancelledStatStillHasItsPathAndResultSlotWhenTheBackendFinishesLate)
+{
+	const std::string seen = finish_after_the_chain_is_cancelled<std::expected<alt::file_status, std::error_code>>([](const alt::file_io& io) { return io.stat("/stat/path/that/outlives/the/frame"); });
+
+	EXPECT_EQ(seen, "/stat/path/that/outlives/the/frame");
+}
+
+TEST(FileIoPathLifetimeTest, ACancelledListDirectoryStillHasItsPathAndResultSlotWhenTheBackendFinishesLate)
+{
+	const std::string seen = finish_after_the_chain_is_cancelled<std::expected<std::vector<alt::directory_entry>, std::error_code>>([](const alt::file_io& io) { return io.list_directory("/list/path/that/outlives/the/frame"); });
+
+	EXPECT_EQ(seen, "/list/path/that/outlives/the/frame");
+}
+
+TEST(FileIoPathLifetimeTest, ACancelledUnlinkStillHasItsPathWhenTheBackendFinishesLate)
+{
+	const std::string seen = finish_after_the_chain_is_cancelled<std::expected<void, std::error_code>>([](const alt::file_io& io) { return io.unlink("/unlink/path/that/outlives/the/frame"); });
+
+	EXPECT_EQ(seen, "/unlink/path/that/outlives/the/frame");
+}
+
+TEST(FileIoPathLifetimeTest, ACancelledRenameStillHasBothPathsWhenTheBackendFinishesLate)
+{
+	const std::string seen = finish_after_the_chain_is_cancelled<std::expected<void, std::error_code>>([](const alt::file_io& io) { return io.rename("/rename/from/that/outlives/the/frame", "/rename/to/that/outlives/the/frame"); });
+
+	EXPECT_EQ(seen, "/rename/from/that/outlives/the/frame>/rename/to/that/outlives/the/frame");
 }
 
 TEST(FileIoTest, CreateSucceedsAndReportsTheThreadPoolBackend)

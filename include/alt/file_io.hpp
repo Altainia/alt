@@ -213,11 +213,11 @@ namespace alt
 		 * whole directory is read before the task completes, so a listing is all or an
 		 * error and never a partial result.
 		 *
-		 * Each entry's kind is what the directory itself says, which is file_kind::unknown
-		 * where the filesystem does not record it. That is deliberate: filling those in
-		 * would hide a stat per entry behind a call that looks like one operation, so a
-		 * caller that must know stats the entry. A symbolic link is reported as a link
-		 * (file_kind::symlink) rather than as its target.
+		 * Each entry's kind describes the entry itself, so a symbolic link is reported as a
+		 * link (file_kind::symlink) rather than as its target. An entry whose kind could
+		 * not be determined, for example because it was removed while the listing ran, is
+		 * reported as file_kind::unknown instead of failing the whole listing; a caller
+		 * that must know stats the entry. No test forces that case on a real filesystem.
 		 *
 		 * Fails with std::errc::not_a_directory for a path that is a file, and with the
 		 * operating system's error otherwise.
