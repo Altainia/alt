@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "coroutine_test_support.hpp"
+#include "death_test_support.hpp"
 
 #ifndef _WIN32
 #	include <fcntl.h>
@@ -870,4 +872,70 @@ TEST_F(ThreadPoolBackendTest, BothSyncModesSucceedOnAnOpenFile)
 		request.handle = (*file)->native();
 		EXPECT_FALSE(run(request).error);
 	}
+}
+
+// The driver's preconditions terminate in every build type, NDEBUG included, so these tests do not
+// skip without asserts: they are what proves a release-tests run still stops a mis-driven test.
+namespace
+{
+	/// Runs @p misuse in a forked child under the threadsafe style, or skips where death tests cannot fork.
+	template<typename Misuse>
+	// NOLINTNEXTLINE(readability-function-cognitive-complexity): EXPECT_DEATH's own expansion is what measures over the threshold, not this body, which holds one skip guard and one expectation. Measured with the pinned clang-tidy-19 against the default threshold of 25: the body reports 38.
+	void expect_driver_terminates(Misuse&& misuse, const char* message)
+	{
+		if(alt_test::thread_sanitizer_is_active)
+		{
+			GTEST_SKIP() << alt_test::thread_sanitizer_forks_death_tests << ' ' << alt_test::debug_and_asan_presets_run_it;
+		}
+
+		const alt_test::scoped_death_test_style style{"threadsafe"};
+		EXPECT_DEATH(misuse(), message);
+	}
+} // namespace
+
+TEST(IoBackendDeathTest, CompletingAnOperationTwiceTerminatesInsteadOfRunningItsCallbackAgain)
+{
+	expect_driver_terminates(
+	  [] {
+		  alt::manual_io_backend backend;
+		  recorder               rec;
+		  const auto             token = backend.submit(read_request(), record, &rec);
+		  if(!token)
+		  {
+			  std::abort(); // not the termination under test: the second complete() must be what ends the child
+		  }
+		  backend.complete(0, done(1));
+		  backend.complete(0, done(1));
+	  },
+	  "complete\\(\\) of an operation already completed");
+}
+
+TEST(IoBackendDeathTest, CompletingAnIndexNeverSubmittedTerminates)
+{
+	expect_driver_terminates(
+	  [] {
+		  alt::manual_io_backend backend;
+		  backend.complete(0, done(1));
+	  },
+	  "complete\\(\\) of an index never submitted");
+}
+
+TEST(IoBackendDeathTest, AskingWhetherAnIndexNeverSubmittedWasCancelledTerminates)
+{
+	expect_driver_terminates(
+	  [] {
+		  const alt::manual_io_backend backend;
+		  static_cast<void>(backend.was_cancelled(0));
+	  },
+	  "was_cancelled\\(\\) of an index never submitted");
+}
+
+TEST(IoBackendDeathTest, ReadingTheRequestOfAnIndexNeverSubmittedTerminates)
+{
+	expect_driver_terminates(
+	  [] {
+		  const alt::manual_io_backend backend;
+		  static_cast<void>(backend.request(0));
+	  },
+	  "request\\(\\) of an index never submitted");
 }

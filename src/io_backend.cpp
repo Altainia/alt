@@ -1,9 +1,30 @@
 #include <alt/io_backend.hpp>
-#include <cassert>
+#include <cstdio>
+#include <exception>
 #include <utility>
 
 namespace alt
 {
+
+	namespace
+	{
+		/**
+		 * Reports a misused test driver and terminates, in every build type.
+		 *
+		 * These are programming errors in a test, not conditions to recover from, so
+		 * std::expected would be wrong; but an assert vanishes under NDEBUG, and then a
+		 * double complete() re-runs the callback and underflows the pending count while a
+		 * bad index reads past the deque. A mis-driven test is not a state to continue
+		 * from, so the driver stops it rather than let it report on corrupted state.
+		 */
+		[[noreturn]] void misuse(const char* message) noexcept
+		{
+			std::fputs("alt::manual_io_backend misused: ", stderr); // not std::print: GCC 13 has no <print>
+			std::fputs(message, stderr);
+			std::fputs("\n", stderr);
+			std::terminate();
+		}
+	} // namespace
 
 	std::expected<io_token, std::error_code> manual_io_backend::submit(const io_request& request,
 	                                                                   io_completion_fn  on_done,
@@ -62,8 +83,14 @@ namespace alt
 		io_buffer        released;
 		{
 			const std::lock_guard lock(m_mutex);
-			assert(index < m_entries.size() && "complete() of an index never submitted");
-			assert(!m_entries[index].completed && "complete() of an operation already completed");
+			if(index >= m_entries.size())
+			{
+				misuse("complete() of an index never submitted");
+			}
+			if(m_entries[index].completed)
+			{
+				misuse("complete() of an operation already completed");
+			}
 			entry& target    = m_entries[index];
 			on_done          = target.on_done;
 			state            = target.state;
@@ -91,14 +118,20 @@ namespace alt
 	bool manual_io_backend::was_cancelled(std::size_t index) const
 	{
 		const std::lock_guard lock(m_mutex);
-		assert(index < m_entries.size() && "was_cancelled() of an index never submitted");
+		if(index >= m_entries.size())
+		{
+			misuse("was_cancelled() of an index never submitted");
+		}
 		return m_entries[index].cancelled;
 	}
 
 	const io_request& manual_io_backend::request(std::size_t index) const
 	{
 		const std::lock_guard lock(m_mutex);
-		assert(index < m_entries.size() && "request() of an index never submitted");
+		if(index >= m_entries.size())
+		{
+			misuse("request() of an index never submitted");
+		}
 		return m_entries[index].request;
 	}
 

@@ -395,7 +395,8 @@ namespace alt
 		 * @brief Completes operation @p index, running its callback on this thread.
 		 *
 		 * The callback runs outside the internal lock. Completing an index twice, or
-		 * one never submitted, is a test bug and asserts.
+		 * one never submitted, is a test bug and terminates the process in every build type,
+		 * NDEBUG included: continuing would run the callback twice or read past the entries.
 		 *
 		 * @param index  Submission index of a pending operation.
 		 * @param result What the callback is given. Delivered as is, whether or not the
