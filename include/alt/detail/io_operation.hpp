@@ -337,7 +337,7 @@ namespace alt::detail
 	 *
 	 * Preconditions, all three of which the layer above keeps:
 	 *
-	 *  - the caller holds one permit from `owner->slots`;
+	 *  - the caller holds one permit, taken through alt::detail::acquire_permit();
 	 *  - `owner->accepting_submissions()` is still true, the service being required to
 	 *    outlive every operation started on it;
 	 *  - the request's `in` and `out`, if any, point at storage that outlives the block
