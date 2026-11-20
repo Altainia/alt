@@ -155,8 +155,8 @@ the caller's responsibility to arrange:
   transfer arm passes an `OVERLAPPED` only to carry the offset and treats
   `ERROR_IO_PENDING` as a failure, after which the operation completes and releases its
   buffer while the kernel may still be writing into it.
-- A POSIX descriptor must **not** be in `O_NONBLOCK` mode, as a FIFO or character device
-  opened that way would be: every `read_at` on it fails with `EAGAIN`.
+- A POSIX descriptor must be **seekable**, because positional transfers need that: a
+  non-seekable one (a FIFO, socket or tty) reports `std::errc::illegal_seek`.
 
 Handles opened by `file_io::open` satisfy both.
 

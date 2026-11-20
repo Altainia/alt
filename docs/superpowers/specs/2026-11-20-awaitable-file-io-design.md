@@ -422,13 +422,13 @@ that. A future IOCP backend can prepare a handle it opened itself, because `open
 through `submit`. It cannot prepare one that arrived through `async_file::adopt()`: all it
 ever receives is an integer it has never seen. 7a's resolution is a stated precondition,
 not a mechanism: `adopt()` documents that the handle must be one on which a transfer
-blocks until it is done (on Windows, not opened with `FILE_FLAG_OVERLAPPED`; on POSIX, not
-`O_NONBLOCK`), because the thread-pool transfer arm passes an `OVERLAPPED` only to carry
+blocks until it is done (on Windows, not opened with `FILE_FLAG_OVERLAPPED`; on POSIX, seekable, so
+a FIFO, socket or tty reports `std::errc::illegal_seek`), because the thread-pool transfer arm passes an `OVERLAPPED` only to carry
 the offset and would otherwise report `ERROR_IO_PENDING` as a failure and release a buffer
 the kernel still owns. A more robust arm (a per-transfer event in `position.hEvent`, then
 `GetOverlappedResult` waiting on `ERROR_IO_PENDING`) is the right eventual answer and is
-tracked separately; it is untested here because no Windows host was available to run it.
-**7c must choose among three options, each with a cost:**
+tracked as issue #52; it is untested here because no Windows host was available to run it.
+**7c must choose among three options, each with a cost (issue #53):**
 
 1. *Add a registration call to the seam.* Honest, and gives an IOCP backend its hook, but
    it is the widening this phase exists to prevent, and it lands on every backend,

@@ -119,10 +119,10 @@ namespace alt
 		 *               OVERLAPPED only to carry the offset and treats
 		 *               ERROR_IO_PENDING as a failure, after which the operation
 		 *               completes and releases its buffer while the kernel may still
-		 *               be writing into it; a POSIX descriptor must NOT be in
-		 *               O_NONBLOCK mode (a FIFO or character device opened that way),
-		 *               on which every read_at fails with EAGAIN. Handles opened by
-		 *               file_io::open satisfy both.
+		 *               be writing into it. A POSIX descriptor must be seekable,
+		 *               because positional transfers need that: a non-seekable one (a
+		 *               FIFO, socket or tty) reports std::errc::illegal_seek. Handles
+		 *               opened by file_io::open satisfy both.
 		 */
 		[[nodiscard]] static async_file adopt(const file_io& io, native_handle handle);
 
