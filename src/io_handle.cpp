@@ -1,6 +1,10 @@
 #include <alt/detail/io_handle.hpp>
 
 #ifdef _WIN32
+// Keep windows.h from defining min and max as macros; see io_backend_thread_pool.cpp.
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
 #	include <windows.h>
 #else
 #	include <unistd.h>

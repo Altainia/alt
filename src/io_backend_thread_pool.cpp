@@ -18,6 +18,11 @@
 #include <vector>
 
 #ifdef _WIN32
+// windows.h defines min and max as function-like macros, which break std::min and
+// std::numeric_limits<>::max(). NOMINMAX is its documented switch to leave them out.
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
 #	include <windows.h>
 #else
 #	include <fcntl.h>
@@ -33,10 +38,12 @@ namespace alt
 		// Error mapping
 		// ---------------------------------------------------------------------
 
+#ifndef _WIN32
 		std::error_code errno_error() noexcept
 		{
 			return {errno, std::system_category()};
 		}
+#endif
 
 		std::error_code canceled_error() noexcept
 		{
@@ -70,6 +77,7 @@ namespace alt
 		}
 #endif
 
+#ifndef _WIN32
 		/// Runs @p call until it stops failing with EINTR: a signal is not a failure, only a reason to try again.
 		template<typename Call>
 		auto retry_on_eintr(Call call) noexcept
@@ -81,6 +89,7 @@ namespace alt
 			}
 			return result;
 		}
+#endif
 
 		/// The byte count a positional transfer may move: never more than the buffer holds.
 		std::size_t transfer_size(const io_request& request) noexcept
@@ -165,11 +174,14 @@ namespace alt
 				return invalid_argument_error();
 			}
 			DWORD access = 0;
-			access |= reads ? GENERIC_READ : 0;
+			if(reads)
+			{
+				access |= GENERIC_READ;
+			}
 			if(writes)
 			{
 				// Append-only access is what makes every write land at the end.
-				access |= how.has_any(flags(open_flag::append)) ? FILE_APPEND_DATA : GENERIC_WRITE;
+				access |= how.has_any(flags(open_flag::append)) ? static_cast<DWORD>(FILE_APPEND_DATA) : static_cast<DWORD>(GENERIC_WRITE);
 			}
 			const bool creates     = how.has_any(flags(open_flag::create));
 			const bool truncates   = how.has_any(flags(open_flag::truncate));
@@ -187,7 +199,7 @@ namespace alt
 				disposition = TRUNCATE_EXISTING;
 			}
 			SECURITY_ATTRIBUTES security{};
-			security.nLength        = sizeof(security);
+			security.nLength        = static_cast<DWORD>(sizeof(security));
 			security.bInheritHandle = how.has_any(flags(open_flag::close_on_exec)) ? FALSE : TRUE;
 			// FILE_FLAG_BACKUP_SEMANTICS is what lets CreateFileW open a directory at all.
 			const HANDLE handle = ::CreateFileW(args.path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, disposition, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
