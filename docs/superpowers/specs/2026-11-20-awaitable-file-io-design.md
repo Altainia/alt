@@ -731,11 +731,13 @@ Layout:
 
 ```
 include/alt/file_io.hpp        file_io, file_io_options, io_backend_kind
-include/alt/async_file.hpp     async_file, open_flags, sync_mode, file_status,
-                               directory_entry, native_handle
+include/alt/async_file.hpp     async_file, sync_mode, open_flags alias
 include/alt/io_buffer.hpp      io_buffer
 include/alt/io_backend.hpp     io_backend, io_request, io_completion, io_token,
-                               manual_io_backend
+                               native_handle, manual_io_backend
+include/alt/detail/file_types.hpp     file_kind, file_identity, file_status,
+                                      directory_entry, open_flag, file_mode,
+                                      io_open_args, io_rename_args
 include/alt/detail/io_operation.hpp   the control block and its awaiter
 include/alt/detail/io_handle.hpp      the refcounted descriptor
 include/alt/detail/io_shared.hpp      slots, backend pointer, completion scheduler
@@ -748,6 +750,21 @@ src/io_backend_iocp.cpp        #ifdef _WIN32
 
 `include/alt/detail/` is right for `io_operation.hpp` by the convention's own test: no
 caller would include it without `async_file.hpp`.
+
+**`detail/file_types.hpp` is a correction to this map, made during implementation, and
+the reason is layering rather than visibility.** The first draft put `file_status`,
+`directory_entry`, `open_flag` and `file_mode` in `async_file.hpp`. They cannot live
+there: the thread-pool backend implements `stat_path` and `list_directory`, so it needs
+those types, and it sits *below* the file layer — it cannot include `async_file.hpp`
+without inverting the dependency. Leaving them in `async_file.hpp` would have forced
+every later phase's backend to be edited by the task that defines the types, which the
+plan explicitly forbids.
+
+They are nonetheless **public API in `namespace alt`**, not `alt::detail`. That is
+exactly what the convention anticipates: the subdirectory describes includability, not
+visibility, and no caller would include `file_types.hpp` without also including
+`async_file.hpp` or `file_io.hpp`. `native_handle` moves to `io_backend.hpp` for the
+same reason — `io_request` names it.
 
 ## What is left to the builder
 
