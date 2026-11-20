@@ -64,6 +64,7 @@ add_executable(alt_tests
     test_io_backend.cpp
     test_io_handle.cpp
     test_io_operation.cpp
+    test_file_io.cpp
     test_cancellation.cpp
     test_cancellation_ref.cpp
     test_task.cpp

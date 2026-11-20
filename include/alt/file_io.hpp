@@ -1,0 +1,160 @@
+#pragma once
+
+#include <alt/io_backend.hpp>
+#include <alt/scheduler.hpp>
+#include <cstddef>
+#include <expected>
+#include <memory>
+#include <system_error>
+
+namespace alt
+{
+
+	class thread_pool;
+
+	namespace detail
+	{
+		struct io_shared;
+	}
+
+	/**
+	 * @brief How an alt::file_io is configured.
+	 *
+	 * Plain data with usable defaults, so the common case is `create(pool, home)`.
+	 */
+	struct file_io_options
+	{
+		/**
+		 * Which built-in backend to use. `automatic` probes the platform and settles on
+		 * the best one it can run; in this release that is always
+		 * io_backend_kind::thread_pool, and file_io::backend() reports what was chosen.
+		 * Naming a kind this build does not provide, or `manual`, which cannot be
+		 * selected by value, fails create() rather than silently substituting another.
+		 * Ignored by the overload that is handed a backend, whose own kind() is reported.
+		 */
+		io_backend_kind backend = io_backend_kind::automatic;
+
+		/**
+		 * The backpressure limit: how many operations may be at the backend at once.
+		 * Further operations suspend until one finishes. Must be positive, because a
+		 * zero bound would park the first operation on a permit that can never exist.
+		 */
+		std::size_t max_in_flight = 64;
+
+		/**
+		 * The submission ring size for a backend that has one; 0 derives it from
+		 * max_in_flight. Unused by the thread-pool backend.
+		 */
+		std::size_t queue_depth = 0;
+	};
+
+	/**
+	 * @brief The service object for awaitable file I/O.
+	 *
+	 * Owns the backend choice, the backpressure limit and the scheduler every
+	 * operation's completion is posted to. Operations hang off it.
+	 *
+	 * **Construction goes through create(), and the type is immovable**, for the reason
+	 * alt::thread_pool gives: references to it live inside suspended coroutine frames,
+	 * so the caller binds a reference into the returned std::expected, whose address is
+	 * stable because the object was built in place.
+	 *
+	 * **This is a handle, not the state.** The accounting an in-flight operation still
+	 * touches when its resumption runs (the backpressure permits) lives in a refcounted
+	 * block that every operation co-owns. That is what lets the destructor below return
+	 * while resumptions are still queued.
+	 *
+	 * **Destruction waits for the backend, not for the resumptions.** Every completion
+	 * ends in a post to the completion scheduler, and for a single-threaded event loop
+	 * that is the thread destroying this object, so waiting for those posts to run would
+	 * deadlock with nothing pumping the loop. The destructor stops admitting submissions
+	 * and blocks until no operation is outstanding at the backend. When it returns, no
+	 * backend callback will fire again and the kernel holds none of this object's
+	 * memory. Resumptions already posted may still be queued; they release their permit
+	 * against state that outlives this handle.
+	 *
+	 * **Two preconditions, stated rather than enforced** (both have precedent in
+	 * alt::scheduler_ref and alt::thread_pool):
+	 *  - this object must outlive every operation started on it. An operation still
+	 *    parked on a backpressure permit at destruction is a violation, and asserts in
+	 *    builds with asserts enabled;
+	 *  - the destructor must not run on a thread of the borrowed alt::thread_pool, where
+	 *    it would wait for jobs queued behind itself. That is why the pool is borrowed
+	 *    rather than owned: a precondition can be stated, an owned pool's last
+	 *    reference dying on its own worker cannot be.
+	 *
+	 * There is deliberately no separate stop-accepting/drain API: one documented
+	 * obligation beats a second shutdown protocol with different ergonomics from
+	 * alt::thread_pool's.
+	 */
+	class file_io
+	{
+	private:
+		/** Makes the constructor unreachable except through create(). */
+		struct passkey
+		{
+			explicit passkey() = default;
+		};
+
+	public:
+		/**
+		 * @brief Creates a service on a built-in backend, or reports why it could not.
+		 *
+		 * @param workers    The pool the thread-pool arm runs on. Borrowed: it must
+		 *                   outlive this object, and this object must not be destroyed
+		 *                   on one of its threads.
+		 * @param completion Where every operation's awaiting coroutine is resumed. Must
+		 *                   not be empty, and must outlive every operation.
+		 * @param options    See file_io_options.
+		 *
+		 * Fails with std::errc::invalid_argument for a zero max_in_flight, an empty
+		 * @p completion (reported here, because posting to an empty scheduler_ref
+		 * asserts on whichever I/O thread finishes first, far from the mistake), or
+		 * io_backend_kind::manual; with std::errc::not_supported for a kind this build
+		 * does not provide.
+		 */
+		[[nodiscard]] static std::expected<file_io, std::error_code> create(thread_pool& workers, scheduler_ref completion, const file_io_options& options = {});
+
+		/**
+		 * @brief Creates a service over a backend the caller owns.
+		 *
+		 * This is how a test drives the service with a manual_io_backend, which an
+		 * enumerator cannot conjure. @p backend must outlive this object. The same
+		 * argument failures as the overload above, except that options.backend is
+		 * ignored: backend() reports @p backend's own kind().
+		 */
+		[[nodiscard]] static std::expected<file_io, std::error_code> create(thread_pool& workers, scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
+
+		/** Called only by create(). The passkey is private, so nothing else can. */
+		file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, thread_pool& workers, scheduler_ref completion, std::size_t max_in_flight);
+
+		file_io()                          = delete;
+		file_io(const file_io&)            = delete;
+		file_io& operator=(const file_io&) = delete;
+		file_io(file_io&&)                 = delete;
+		file_io& operator=(file_io&&)      = delete;
+
+		/** Blocks until the backend is quiet. See the class note for what that excludes. */
+		~file_io();
+
+		/** @brief Which backend is actually in use. Never io_backend_kind::automatic. */
+		[[nodiscard]] io_backend_kind backend() const noexcept;
+
+		/**
+		 * @brief The refcounted state every operation on this service co-owns.
+		 *
+		 * Engine-internal, like everything in alt::detail: the operations built on this
+		 * class, and the tests that drive the shutdown contract through
+		 * alt::detail::io_awaiter, take their co-ownership from here. Not part of the
+		 * surface a consumer programs against.
+		 */
+		[[nodiscard]] const std::shared_ptr<detail::io_shared>& shared_state() const noexcept;
+
+	private:
+		/** The backend this object built, or null when the caller supplied one. */
+		std::unique_ptr<io_backend>        m_owned_backend;
+		std::shared_ptr<detail::io_shared> m_shared;
+		io_backend_kind                    m_kind;
+	};
+
+}

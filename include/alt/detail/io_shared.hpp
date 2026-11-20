@@ -151,6 +151,18 @@ namespace alt::detail
 			return async_semaphore::semaphore_awaiter{slots};
 		}
 
+		/**
+		 * @brief How many operations are parked waiting for a permit.
+		 *
+		 * An upper bound, like waiter_list::size(): an operation already claimed by a
+		 * cancel but not yet unlinked still counts. Reached through the awaiter's list
+		 * because the semaphore keeps its queue private; ~file_io asserts this is zero.
+		 */
+		[[nodiscard]] std::size_t parked_waiters()
+		{
+			return acquire_slot().list().size();
+		}
+
 		/** @brief Counts one more operation at the backend. Called before each submission. */
 		void enter_backend() noexcept
 		{
