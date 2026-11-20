@@ -414,6 +414,41 @@ unreachable through the stated API. `create` gets an overload:
 `io_backend_kind::manual` stays, as what `manual_io_backend::kind()` reports, so
 `file_io::backend()` never lies about what it is driving.
 
+**Corrected 2026-11-20, found by the whole-branch review of phase 7a rather than designed
+in: the seam has a hole for handle preparation, and `adopt()` is it.** Overlapped I/O
+needs a handle that was opened with `FILE_FLAG_OVERLAPPED` and associated with the
+completion port before its first read or write. Nothing in the seam's drawing considered
+that. A future IOCP backend can prepare a handle it opened itself, because `open` goes
+through `submit`. It cannot prepare one that arrived through `async_file::adopt()`: all it
+ever receives is an integer it has never seen. 7a's resolution is a stated precondition,
+not a mechanism: `adopt()` documents that the handle must be one on which a transfer
+blocks until it is done (on Windows, not opened with `FILE_FLAG_OVERLAPPED`; on POSIX, not
+`O_NONBLOCK`), because the thread-pool transfer arm passes an `OVERLAPPED` only to carry
+the offset and would otherwise report `ERROR_IO_PENDING` as a failure and release a buffer
+the kernel still owns. A more robust arm (a per-transfer event in `position.hEvent`, then
+`GetOverlappedResult` waiting on `ERROR_IO_PENDING`) is the right eventual answer and is
+tracked separately; it is untested here because no Windows host was available to run it.
+**7c must choose among three options, each with a cost:**
+
+1. *Add a registration call to the seam.* Honest, and gives an IOCP backend its hook, but
+   it is the widening this phase exists to prevent, and it lands on every backend,
+   including ones with nothing to register.
+2. *Route adopted handles to the thread-pool arm.* Keeps the seam as it is, but it is the
+   silent backend fallback the anti-goals forbid: a consumer who asked for IOCP would get
+   the pool for exactly the files they brought in themselves, with nothing saying so.
+3. *Require that adopted handles be prepared for the backend in use.* Cheapest to build,
+   but it changes a published public API's requirements in a later minor release, for
+   consumers who adopted under the synchronous-handle rule above.
+
+**Batching is a trade the seam made, seen and accepted.** The seam has no batch or flush
+point, and `submit` gives a backend no way to know whether more submissions are coming.
+An io_uring backend therefore has three choices: enter the kernel once per submission,
+use `IORING_SETUP_SQPOLL`, or run a submitter thread. Each works, and each forfeits the
+batching that is io_uring's main advantage; adding a `flush()` in 7b would be a widening
+of the seam. The home-thread submission invariant (see "Backpressure, and where the
+permit is released") already serializes submissions on one thread, so batching has a
+natural place to happen later.
+
 ### Buffers
 
 `alt::io_buffer`: a refcounted handle to a byte range, so the operation block can
