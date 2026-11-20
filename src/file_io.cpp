@@ -19,11 +19,16 @@ namespace alt
 		using detail::io_awaiter;
 		using detail::io_shared;
 
-		// The shape every path operation shares (written out in each, as async_file.cpp does, rather
-		// than behind a helper task: awaiting a task<io_completion> trips modernize-use-nodiscard
-		// on task.hpp's await_resume):
+		// The shape every path operation shares, written out in each rather than behind a helper:
 		//   auto permit = co_await acquire_permit(owner);    // non-const: it is moved from below
 		//   co_await io_awaiter{owner, request, nullptr, std::move(*permit)};
+		// The two awaits cannot move into a function without that function being a coroutine,
+		// and a coroutine helper returning task<io_completion> is a second frame per operation,
+		// which the one-frame-per-operation cost model of
+		// docs/superpowers/specs/2026-11-20-awaitable-file-io-design.md rules out. What does
+		// not need a coroutine is factored: path_request builds the request and cancelled()
+		// the verdict. The sequence is also written out once more, in file_io.hpp's
+		// run_invocation, a header template that cannot reach these helpers.
 		// `in` and `out` point into `state`, which the request carries, so the operation's
 		// block co-owns them. A coroutine frame would not do: the backend reads and writes
 		// them on a worker thread, possibly after a cancelled frame is gone.
@@ -32,6 +37,15 @@ namespace alt
 		std::unexpected<std::error_code> cancelled()
 		{
 			return std::unexpected(std::make_error_code(std::errc::operation_canceled));
+		}
+
+		/**
+		 * The request for a path operation: no descriptor and no buffer, `in` and `out` pointing
+		 * into `state`, which the operation's block co-owns for as long as a worker can touch them.
+		 */
+		io_request path_request(const io_op op, const void* const in, void* const out, std::shared_ptr<void> state)
+		{
+			return io_request{.op = op, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = in, .out = out, .state = std::move(state)};
 		}
 
 		/** The result slot and the argument of a path operation that reports one value. */
@@ -50,7 +64,7 @@ namespace alt
 			{
 				co_return cancelled();
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::stat_path, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &query->path, .out = &query->result, .state = query}, nullptr, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, path_request(io_op::stat_path, &query->path, &query->result, query), nullptr, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -66,7 +80,7 @@ namespace alt
 			{
 				co_return cancelled();
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::list_directory, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &query->path, .out = &query->result, .state = query}, nullptr, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, path_request(io_op::list_directory, &query->path, &query->result, query), nullptr, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -82,7 +96,7 @@ namespace alt
 			{
 				co_return cancelled();
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::unlink, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = target.get(), .out = nullptr, .state = target}, nullptr, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, path_request(io_op::unlink, target.get(), nullptr, target), nullptr, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
@@ -98,7 +112,7 @@ namespace alt
 			{
 				co_return cancelled();
 			}
-			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::rename, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = args.get(), .out = nullptr, .state = args}, nullptr, std::move(*permit)};
+			const io_completion done = co_await io_awaiter{owner, path_request(io_op::rename, args.get(), nullptr, args), nullptr, std::move(*permit)};
 			if(done.error)
 			{
 				co_return std::unexpected(done.error);
