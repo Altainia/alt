@@ -146,7 +146,11 @@ git commit -m "Add alt::io_buffer, the refcounted I/O buffer"
   - `class alt::io_backend` with the three pure virtuals from the spec's contract.
   - `class alt::manual_io_backend : public io_backend` adding
     `std::size_t pending() const`, `void complete(std::size_t index, io_completion)`,
-    `void complete_inline_next(io_completion)`, `bool was_cancelled(std::size_t index) const`.
+    `void complete_inline_next(io_completion)`, `bool was_cancelled(std::size_t index) const`,
+    `void fail_next_submission(std::error_code)`, and
+    `const io_request& request(std::size_t index) const` — the last so a test can reach
+    the submitted request's `buffer` and write into it, which is how the
+    buffer-survives-teardown test stands in for a backend's late write.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -579,6 +583,8 @@ git commit -m "Add the thread-pool I/O backend"
 **Files:**
 - Create: `include/alt/async_file.hpp`, `src/async_file.cpp`
 - Create: `tests/test_async_file.cpp`
+- Modify: `include/alt/file_io.hpp`, `src/file_io.cpp` (this task adds `file_io::open`,
+  which returns an `async_file` and so could not be declared before this header existed)
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces:**
