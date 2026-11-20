@@ -14,7 +14,7 @@
 // forwarding adds no second frame: the member allocates nothing but the one it returns.
 //
 // Each coroutine that reaches the backend runs the same two awaits:
-//   const auto permit = co_await acquire_permit(owner);   // test it
+//   auto permit = co_await acquire_permit(owner);   // test it; non-const, it is moved from below
 //   const io_completion done = co_await io_awaiter{owner, request, file, std::move(*permit)};
 // There is nothing to remember beyond that, because the types leave nothing else to get
 // wrong: the permit is an object that returns itself if the frame dies holding it (an

@@ -368,7 +368,7 @@ namespace alt::detail
 	 * @brief Waits for a backpressure permit on @p owner.
 	 *
 	 * The first of an operation's two suspension points, and the only way to obtain an
-	 * io_permit. `const auto permit = co_await acquire_permit(owner);`, test it, and move
+	 * io_permit. `auto permit = co_await acquire_permit(owner);` (not const: it is moved from), test it, and move
 	 * it into the alt::detail::io_awaiter for the second.
 	 */
 	[[nodiscard]] inline io_permit_awaiter acquire_permit(std::shared_ptr<io_shared> owner)

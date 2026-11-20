@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <alt/cancellable_task.hpp>
 #include <alt/detail/io_handle.hpp>
 #include <alt/detail/io_operation.hpp>
@@ -12,9 +13,20 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
+#include <optional>
+#include <string>
 #include <system_error>
+#include <vector>
+#ifndef _WIN32
+#	include <sys/stat.h>
+#	include <unistd.h>
+#endif
 #include <thread>
 #include <utility>
 
@@ -117,6 +129,240 @@ namespace
 		}
 	}
 
+}
+
+namespace
+{
+
+	/** What a started task produced, and whether it has produced it yet. */
+	template<typename T>
+	struct outcome
+	{
+		bool             finished = false;
+		std::optional<T> result;
+	};
+
+	/** Starts @p work and stores what it produced in @p out, so a test can run it without blocking. */
+	template<typename T>
+	alt::cancellable_task capture(alt::task<T> work, std::shared_ptr<outcome<T>> out)
+	{
+		out->result.emplace(co_await std::move(work));
+		out->finished = true;
+	}
+
+	/**
+	 * A real service on the thread-pool backend, completing onto a scheduler the test
+	 * drives itself, plus a scratch directory removed afterwards.
+	 */
+	class FileIoPathTest: public ::testing::Test
+	{
+	protected:
+		void SetUp() override
+		{
+			static std::atomic<int> counter{0};
+			m_dir.path = std::filesystem::temp_directory_path() / ("alt_file_io_path_" + std::to_string(counter.fetch_add(1)) + "_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+			std::filesystem::create_directories(m_dir.path);
+			ASSERT_TRUE(m_pool.has_value());
+			ASSERT_TRUE(m_io.has_value());
+		}
+
+		[[nodiscard]] const std::filesystem::path& dir() const
+		{
+			return m_dir.path;
+		}
+
+		alt::file_io& io()
+		{
+			return *m_io;
+		}
+
+		/** Runs @p work to completion on the test's scheduler, failing rather than hanging past the deadline. */
+		template<typename T>
+		T run(alt::task<T> work)
+		{
+			const auto                     state = std::make_shared<outcome<T>>();
+			const alt::cancellation_handle chain = alt::start(capture(std::move(work), state));
+			const auto                     limit = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+			while(!state->finished)
+			{
+				if(!m_home.run_one())
+				{
+					if(std::chrono::steady_clock::now() > limit)
+					{
+						ADD_FAILURE() << "the operation did not finish within 10 seconds";
+						return std::unexpected(std::make_error_code(std::errc::timed_out));
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds{1});
+				}
+			}
+			std::optional<T>& produced = state->result;
+			if(produced.has_value())
+			{
+				return std::move(*produced);
+			}
+			return std::unexpected(std::make_error_code(std::errc::timed_out));
+		}
+
+		std::filesystem::path write_file(const std::string& name, const std::string& content) const
+		{
+			const std::filesystem::path path = m_dir.path / name;
+			std::ofstream(path, std::ios::binary) << content;
+			return path;
+		}
+
+		static std::string read_whole(const std::filesystem::path& path)
+		{
+			std::ifstream in(path, std::ios::binary);
+			return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+		}
+
+	private:
+		struct scratch_dir
+		{
+			std::filesystem::path path;
+
+			~scratch_dir()
+			{
+				std::error_code ignored;
+				std::filesystem::remove_all(path, ignored);
+			}
+		};
+
+		scratch_dir                                      m_dir;
+		std::expected<alt::thread_pool, std::error_code> m_pool = alt::thread_pool::create(1);
+		alt::manual_scheduler                            m_home;
+		std::expected<alt::file_io, std::error_code>     m_io = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home});
+	};
+
+}
+
+TEST_F(FileIoPathTest, StatOfAPathReportsItsSizeAndKind)
+{
+	const auto path = write_file("data.txt", "0123456789");
+
+	const auto status = run(io().stat(path));
+
+	ASSERT_TRUE(status.has_value());
+	EXPECT_EQ(status->size, 10U);
+	EXPECT_EQ(status->kind, alt::file_kind::regular);
+}
+
+TEST_F(FileIoPathTest, StatOfADirectoryReportsKindDirectory)
+{
+	const auto status = run(io().stat(dir()));
+
+	ASSERT_TRUE(status.has_value());
+	EXPECT_EQ(status->kind, alt::file_kind::directory);
+}
+
+TEST_F(FileIoPathTest, RenameMovesAFileAndTheOldPathIsGone)
+{
+	const auto from = write_file("old.txt", "payload");
+	const auto to   = dir() / "new.txt";
+
+	const auto renamed = run(io().rename(from, to));
+
+	ASSERT_TRUE(renamed.has_value());
+	EXPECT_FALSE(std::filesystem::exists(from));
+	EXPECT_EQ(read_whole(to), "payload");
+}
+
+TEST_F(FileIoPathTest, RenameOverAnExistingFileReplacesIt)
+{
+	const auto from   = write_file("from.txt", "new contents");
+	const auto target = write_file("target.txt", "old contents");
+
+	const auto renamed = run(io().rename(from, target));
+
+	ASSERT_TRUE(renamed.has_value());
+	EXPECT_EQ(read_whole(target), "new contents");
+	EXPECT_FALSE(std::filesystem::exists(from));
+}
+
+TEST_F(FileIoPathTest, RenameAcrossDevicesReportsCrossDeviceLink)
+{
+#ifdef _WIN32
+	GTEST_SKIP() << "Windows moves a file across volumes (MOVEFILE_COPY_ALLOWED), so there is no cross-device error to observe.";
+#else
+	const std::filesystem::path other{"/dev/shm"};
+	std::error_code             ignored;
+	if(!std::filesystem::is_directory(other, ignored))
+	{
+		GTEST_SKIP() << "/dev/shm is not available, so there is no second filesystem to rename across.";
+	}
+	// Same device means the rename would succeed, and asserting an error would be wrong.
+	struct stat on_dir{};
+	struct stat on_other{};
+	if(::stat(dir().c_str(), &on_dir) != 0 || ::stat(other.c_str(), &on_other) != 0 || on_dir.st_dev == on_other.st_dev)
+	{
+		GTEST_SKIP() << "the scratch directory and /dev/shm are on the same filesystem, so a rename between them does not cross a device.";
+	}
+
+	const auto                  from = write_file("crossing.txt", "x");
+	const std::filesystem::path to   = other / ("alt_cross_" + std::to_string(::getpid()) + ".txt");
+
+	const auto renamed = run(io().rename(from, to));
+
+	std::filesystem::remove(to, ignored);
+	ASSERT_FALSE(renamed.has_value());
+	EXPECT_EQ(renamed.error().default_error_condition(), std::make_error_condition(std::errc::cross_device_link));
+	EXPECT_TRUE(std::filesystem::exists(from)) << "a failed rename must leave the source in place";
+#endif
+}
+
+TEST_F(FileIoPathTest, UnlinkRemovesAFile)
+{
+	const auto path = write_file("doomed.txt", "x");
+
+	const auto removed = run(io().unlink(path));
+
+	ASSERT_TRUE(removed.has_value());
+	EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST_F(FileIoPathTest, UnlinkOfAMissingPathReportsNoSuchFileOrDirectory)
+{
+	const auto removed = run(io().unlink(dir() / "never_existed.txt"));
+
+	ASSERT_FALSE(removed.has_value());
+	EXPECT_EQ(removed.error().default_error_condition(), std::make_error_condition(std::errc::no_such_file_or_directory));
+}
+
+TEST_F(FileIoPathTest, ListDirectoryReturnsEveryEntryWithoutDotOrDotDot)
+{
+	write_file("a.txt", "a");
+	write_file("b.txt", "b");
+	std::filesystem::create_directory(dir() / "sub");
+
+	auto listed = run(io().list_directory(dir()));
+
+	ASSERT_TRUE(listed.has_value());
+	std::ranges::sort(*listed, {}, &alt::directory_entry::name);
+	ASSERT_EQ(listed->size(), 3U);
+	EXPECT_EQ((*listed)[0].name, "a.txt");
+	EXPECT_EQ((*listed)[0].kind, alt::file_kind::regular);
+	EXPECT_EQ((*listed)[1].name, "b.txt");
+	EXPECT_EQ((*listed)[1].kind, alt::file_kind::regular);
+	EXPECT_EQ((*listed)[2].name, "sub");
+	EXPECT_EQ((*listed)[2].kind, alt::file_kind::directory);
+}
+
+TEST_F(FileIoPathTest, ListDirectoryOfAnEmptyDirectoryReturnsNoEntries)
+{
+	const auto listed = run(io().list_directory(dir()));
+
+	ASSERT_TRUE(listed.has_value());
+	EXPECT_TRUE(listed->empty());
+}
+
+TEST_F(FileIoPathTest, ListDirectoryOfAFileReportsNotADirectory)
+{
+	const auto path = write_file("plain.txt", "x");
+
+	const auto listed = run(io().list_directory(path));
+
+	ASSERT_FALSE(listed.has_value());
+	EXPECT_EQ(listed.error().default_error_condition(), std::make_error_condition(std::errc::not_a_directory));
 }
 
 TEST(FileIoTest, CreateSucceedsAndReportsTheThreadPoolBackend)

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <memory>
 #include <system_error>
+#include <vector>
 
 namespace alt
 {
@@ -168,6 +169,60 @@ namespace alt
 		 * this must outlive every operation, as the class note says.
 		 */
 		[[nodiscard]] task<std::expected<async_file, std::error_code>> open(const std::filesystem::path& path, open_flags how, file_mode mode = {}) const;
+
+		/**
+		 * @brief Describes the file at @p path, following symbolic links.
+		 *
+		 * @param path Copied into the operation, so it need not outlive the call.
+		 *
+		 * The path counterpart of async_file::stat(), for when there is no descriptor to
+		 * ask. The kind is never file_kind::symlink, because the target is described, and
+		 * a dangling link is an error. Fails with the operating system's error, for
+		 * example std::errc::no_such_file_or_directory.
+		 */
+		[[nodiscard]] task<std::expected<file_status, std::error_code>> stat(const std::filesystem::path& path) const;
+
+		/**
+		 * @brief Renames @p from to @p to, replacing @p to if it is an existing file.
+		 *
+		 * Both paths are copied into the operation. Replacement is the behavior on every
+		 * platform (POSIX rename(2) does it natively; Windows is asked for it explicitly),
+		 * so a caller can use this for an atomic "write a temporary, then move it into
+		 * place" without a platform branch.
+		 *
+		 * Fails with std::errc::cross_device_link when the two paths are on different
+		 * filesystems on POSIX: this is a rename, never a copy, and a caller that wants a
+		 * move across filesystems must copy and unlink itself. A failed rename leaves
+		 * @p from where it was.
+		 */
+		[[nodiscard]] task<std::expected<void, std::error_code>> rename(const std::filesystem::path& from, const std::filesystem::path& to) const;
+
+		/**
+		 * @brief Removes the file or symbolic link at @p path.
+		 *
+		 * @p path is copied into the operation. A link is removed, not followed. Not for
+		 * directories. Fails with the operating system's error:
+		 * std::errc::no_such_file_or_directory for a missing path.
+		 */
+		[[nodiscard]] task<std::expected<void, std::error_code>> unlink(const std::filesystem::path& path) const;
+
+		/**
+		 * @brief Lists the entries of the directory at @p path, in no particular order.
+		 *
+		 * @p path is copied into the operation. `.` and `..` are never reported, and the
+		 * whole directory is read before the task completes, so a listing is all or an
+		 * error and never a partial result.
+		 *
+		 * Each entry's kind is what the directory itself says, which is file_kind::unknown
+		 * where the filesystem does not record it. That is deliberate: filling those in
+		 * would hide a stat per entry behind a call that looks like one operation, so a
+		 * caller that must know stats the entry. A symbolic link is reported as a link
+		 * (file_kind::symlink) rather than as its target.
+		 *
+		 * Fails with std::errc::not_a_directory for a path that is a file, and with the
+		 * operating system's error otherwise.
+		 */
+		[[nodiscard]] task<std::expected<std::vector<directory_entry>, std::error_code>> list_directory(const std::filesystem::path& path) const;
 
 	private:
 		/** The one door to the engine-internal state; see alt::detail::file_io_access. */

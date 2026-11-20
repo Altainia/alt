@@ -1,16 +1,110 @@
+#include <alt/detail/io_operation.hpp>
 #include <alt/detail/io_shared.hpp>
 #include <alt/file_io.hpp>
 #include <alt/thread_pool.hpp>
 #include <cassert>
+#include <filesystem>
 #include <memory>
 #include <new>
 #include <utility> // std::in_place
+#include <vector>
 
 namespace alt
 {
 
 	namespace
 	{
+
+		using detail::acquire_permit;
+		using detail::io_awaiter;
+		using detail::io_shared;
+
+		// The shape every path operation shares (written out in each, as async_file.cpp does, rather
+		// than behind a helper task: awaiting a task<io_completion> trips modernize-use-nodiscard
+		// on task.hpp's await_resume):
+		//   auto permit = co_await acquire_permit(owner);    // non-const: it is moved from below
+		//   co_await io_awaiter{owner, request, nullptr, std::move(*permit)};
+		// `in` and `out` point into `state`, which the request carries, so the operation's
+		// block co-owns them. A coroutine frame would not do: the backend reads and writes
+		// them on a worker thread, possibly after a cancelled frame is gone.
+
+		/** The verdict for an operation whose chain was released before it could be submitted. */
+		std::unexpected<std::error_code> cancelled()
+		{
+			return std::unexpected(std::make_error_code(std::errc::operation_canceled));
+		}
+
+		/** The result slot and the argument of a path operation that reports one value. */
+		template<typename Result>
+		struct path_query
+		{
+			std::filesystem::path path;
+			Result                result;
+		};
+
+		task<std::expected<file_status, std::error_code>> stat_path(std::shared_ptr<io_shared> owner, std::filesystem::path path)
+		{
+			const auto query  = std::make_shared<path_query<file_status>>(path_query<file_status>{.path = std::move(path), .result = {}});
+			auto       permit = co_await acquire_permit(owner);
+			if(!permit)
+			{
+				co_return cancelled();
+			}
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::stat_path, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &query->path, .out = &query->result, .state = query}, nullptr, std::move(*permit)};
+			if(done.error)
+			{
+				co_return std::unexpected(done.error);
+			}
+			co_return query->result;
+		}
+
+		task<std::expected<std::vector<directory_entry>, std::error_code>> list_path(std::shared_ptr<io_shared> owner, std::filesystem::path path)
+		{
+			const auto query  = std::make_shared<path_query<std::vector<directory_entry>>>(path_query<std::vector<directory_entry>>{.path = std::move(path), .result = {}});
+			auto       permit = co_await acquire_permit(owner);
+			if(!permit)
+			{
+				co_return cancelled();
+			}
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::list_directory, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = &query->path, .out = &query->result, .state = query}, nullptr, std::move(*permit)};
+			if(done.error)
+			{
+				co_return std::unexpected(done.error);
+			}
+			co_return std::move(query->result);
+		}
+
+		task<std::expected<void, std::error_code>> unlink_path(std::shared_ptr<io_shared> owner, std::filesystem::path path)
+		{
+			const auto target = std::make_shared<std::filesystem::path>(std::move(path));
+			auto       permit = co_await acquire_permit(owner);
+			if(!permit)
+			{
+				co_return cancelled();
+			}
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::unlink, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = target.get(), .out = nullptr, .state = target}, nullptr, std::move(*permit)};
+			if(done.error)
+			{
+				co_return std::unexpected(done.error);
+			}
+			co_return std::expected<void, std::error_code>{};
+		}
+
+		task<std::expected<void, std::error_code>> rename_path(std::shared_ptr<io_shared> owner, std::filesystem::path from, std::filesystem::path to)
+		{
+			const auto args   = std::make_shared<io_rename_args>(io_rename_args{.from = std::move(from), .to = std::move(to)});
+			auto       permit = co_await acquire_permit(owner);
+			if(!permit)
+			{
+				co_return cancelled();
+			}
+			const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::rename, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = args.get(), .out = nullptr, .state = args}, nullptr, std::move(*permit)};
+			if(done.error)
+			{
+				co_return std::unexpected(done.error);
+			}
+			co_return std::expected<void, std::error_code>{};
+		}
 
 		/**
 		 * Resolves a requested kind to one this build provides.
@@ -128,6 +222,26 @@ namespace alt
 	io_backend_kind file_io::backend() const noexcept
 	{
 		return m_kind;
+	}
+
+	task<std::expected<file_status, std::error_code>> file_io::stat(const std::filesystem::path& path) const
+	{
+		return stat_path(m_shared, path);
+	}
+
+	task<std::expected<void, std::error_code>> file_io::rename(const std::filesystem::path& from, const std::filesystem::path& to) const
+	{
+		return rename_path(m_shared, from, to);
+	}
+
+	task<std::expected<void, std::error_code>> file_io::unlink(const std::filesystem::path& path) const
+	{
+		return unlink_path(m_shared, path);
+	}
+
+	task<std::expected<std::vector<directory_entry>, std::error_code>> file_io::list_directory(const std::filesystem::path& path) const
+	{
+		return list_path(m_shared, path);
 	}
 
 }
