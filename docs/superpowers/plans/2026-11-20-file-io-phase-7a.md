@@ -641,7 +641,7 @@ TEST(AsyncFileTest, ASizeLargerThanTheBufferIsRejectedBeforeSubmission)
 TEST(AsyncFileTest, ReadAtOnAClosedFileReportsBadFileDescriptor)
 TEST(AsyncFileTest, StatReportsSizeKindAndAStableIdentity)
 TEST(AsyncFileTest, SyncDataSucceedsOnThisPlatform)
-TEST(AsyncFileTest, TwoPositionalReadsEachGetTheirOwnOffsetsBytes)
+TEST(AsyncFileTest, TwoPositionalReadsOnOneFileEachGetTheirOwnOffsetsBytes)
 TEST(AsyncFileTest, TheDestructorWithAnOutstandingOperationClosesNothing)
 TEST(AsyncFileTest, OpenOfAMissingPathReportsNoSuchFileOrDirectory)
 ```
