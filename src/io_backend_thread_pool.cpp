@@ -413,8 +413,10 @@ namespace alt
 				break;
 			case io_op::rename:
 			case io_op::unlink:
-			case io_op::invoke:
 				assert(request.in != nullptr);
+				break;
+			case io_op::invoke:
+				assert(request.out != nullptr);
 				break;
 			default:
 				break;
@@ -462,7 +464,7 @@ namespace alt
 			case io_op::invoke:
 				// The callable's own exceptions are caught inside invoke(), for the awaiting
 				// coroutine to rethrow; nothing here can escape from it.
-				const_cast<detail::io_invocable*>(static_cast<const detail::io_invocable*>(request.in))->invoke(); // NOLINT(cppcoreguidelines-pro-type-const-cast): io_request::in is const void* for every operation, and invoke is the one operation whose pointee the backend must mutate; the pointee is a non-const io_invocable the block owns
+				static_cast<detail::io_invocable*>(request.out)->invoke();
 				break;
 			}
 			return result;
@@ -534,7 +536,7 @@ namespace alt
 					// Destroy the callable HERE, on this worker, with its captures: dropping it
 					// unrun is a behavior consumers rely on, and left to the block it would die
 					// on whichever thread released the last reference.
-					const_cast<detail::io_invocable*>(static_cast<const detail::io_invocable*>(self.request.in))->discard(); // NOLINT(cppcoreguidelines-pro-type-const-cast): as in perform()
+					static_cast<detail::io_invocable*>(self.request.out)->discard();
 				}
 				result.error = canceled_error();
 			}

@@ -23,7 +23,6 @@ namespace alt
 
 	namespace detail
 	{
-		struct io_shared;
 		struct file_io_access;
 	}
 
@@ -241,11 +240,19 @@ namespace alt
 		 * destroying its frames, and a worker may still be running @p f when it does. A callable
 		 * left in the frame would then lose its captures from under itself. So @p f is moved,
 		 * before anything can suspend, into the operation block, which the backend co-owns, and
-		 * what is left behind in the frame is a moved-from shell.
+		 * what is left behind in the frame is a moved-from shell. That shell dies at the end of
+		 * the full-expression containing the `co_await`, that is after the resumption on the
+		 * completion scheduler or during teardown on whichever thread abandons the chain, so
+		 * a callable's move constructor must leave a source that is inert to destroy.
 		 *
 		 * What follows from that:
-		 *  - **Cancelled before @p f ran:** it is never invoked, and it is destroyed on the
-		 *    worker, taking its captures with it.
+		 *  - **Cancelled after submission but before @p f ran:** it is never invoked, and it is
+		 *    destroyed on the worker, taking its captures with it.
+		 *  - **Cancelled before submission:** while the operation is parked on an in-flight
+		 *    slot, or if the backend refused the submission. It is still never invoked and
+		 *    still destroyed, but on the thread that tears the chain down, which may be the
+		 *    completion thread. This window is exactly what max_in_flight creates, so a
+		 *    caller that needs its captures destroyed on a worker cannot rely on it there.
 		 *  - **Cancelled while @p f runs:** it finishes, and its result is destroyed with the
 		 *    block. Cancellation detaches; it does not abort.
 		 *  - **@p f throws:** the exception is rethrown from the `co_await` if the chain is
@@ -266,7 +273,7 @@ namespace alt
 		 * caller's thread also touches without synchronization.
 		 */
 		template<std::invocable F>
-		  requires std::is_nothrow_move_constructible_v<F>
+		  requires std::is_nothrow_move_constructible_v<F> && (!std::is_reference_v<std::invoke_result_t<F>>) && (!std::is_array_v<std::invoke_result_t<F>>)
 		[[nodiscard]] task<std::expected<std::invoke_result_t<F>, std::error_code>> run(F f) const;
 
 	private:
@@ -318,7 +325,7 @@ namespace alt::detail
 		{
 			co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
 		}
-		const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::invoke, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = static_cast<io_invocable*>(call.get()), .out = nullptr, .state = call}, nullptr, std::move(*permit)};
+		const io_completion done = co_await io_awaiter{owner, io_request{.op = io_op::invoke, .handle = invalid_native_handle, .buffer = {}, .offset = 0, .size = 0, .in = nullptr, .out = static_cast<io_invocable*>(call.get()), .state = call}, nullptr, std::move(*permit)};
 		if(done.error)
 		{
 			co_return std::unexpected(done.error);
@@ -347,7 +354,7 @@ namespace alt
 {
 
 	template<std::invocable F>
-	  requires std::is_nothrow_move_constructible_v<F>
+	  requires std::is_nothrow_move_constructible_v<F> && (!std::is_reference_v<std::invoke_result_t<F>>) && (!std::is_array_v<std::invoke_result_t<F>>)
 	task<std::expected<std::invoke_result_t<F>, std::error_code>> file_io::run(F f) const
 	{
 		using result = std::expected<std::invoke_result_t<F>, std::error_code>;

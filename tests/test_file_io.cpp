@@ -803,6 +803,10 @@ namespace
 
 		std::expected<alt::file_io, std::error_code> make_io(const std::size_t max_in_flight)
 		{
+			if(!pool.has_value())
+			{
+				return std::unexpected(pool.error()); // the fixture's ASSERT on the pool reports it; do not dereference
+			}
 			return alt::file_io::create(*pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::automatic, .max_in_flight = max_in_flight, .queue_depth = 0});
 		}
 
@@ -884,14 +888,26 @@ namespace
 		std::shared_ptr<sentinel_record> m_record;
 	};
 
-	/** A result type that counts its own destruction, to show what happens to a discarded result. */
+	/** What counted_result reports, shared with the test that owns it. */
+	struct result_counters
+	{
+		std::atomic<int> destroyed{0};
+		std::atomic<int> moves{0};
+	};
+
+	/**
+	 * A result type that counts its moves and its live destructions. A moved-from one counts
+	 * nothing, so `destroyed` is the number of LIVE objects that died.
+	 */
 	struct counted_result
 	{
-		explicit counted_result(std::shared_ptr<std::atomic<int>> destroyed) noexcept: m_destroyed(std::move(destroyed))
+		explicit counted_result(std::shared_ptr<result_counters> counters) noexcept: m_counters(std::move(counters))
 		{}
 
-		counted_result(counted_result&& other) noexcept: m_destroyed(std::move(other.m_destroyed))
-		{}
+		counted_result(counted_result&& other) noexcept: m_counters(std::move(other.m_counters))
+		{
+			m_counters->moves.fetch_add(1);
+		}
 
 		counted_result(const counted_result&)            = delete;
 		counted_result& operator=(const counted_result&) = delete;
@@ -899,14 +915,14 @@ namespace
 
 		~counted_result()
 		{
-			if(m_destroyed)
+			if(m_counters)
 			{
-				m_destroyed->fetch_add(1);
+				m_counters->destroyed.fetch_add(1);
 			}
 		}
 
 	private:
-		std::shared_ptr<std::atomic<int>> m_destroyed;
+		std::shared_ptr<result_counters> m_counters;
 	};
 
 	/** Awaits @p work and reports the exception's message, or "none" when it completed. */
@@ -946,6 +962,11 @@ namespace
 		alt::file_io& io()
 		{
 			return *m_rig->io;
+		}
+
+		alt::thread_pool& pool()
+		{
+			return *m_rig->pool;
 		}
 
 		alt::manual_scheduler& home()
@@ -1008,8 +1029,9 @@ namespace
 		}
 
 	private:
-		std::vector<alt::cancellation_handle> m_chains;
+		// Declared rig first so the chains, destroyed first, never outlive the service they hold.
 		std::unique_ptr<run_rig>              m_rig;
+		std::vector<alt::cancellation_handle> m_chains;
 	};
 
 }
@@ -1034,9 +1056,26 @@ TEST_F(FileIoRunTest, RunOfAVoidCallableYieldsAnExpectedVoid)
 
 TEST_F(FileIoRunTest, RunExecutesTheCallableOnAWorkerNotTheCallersThread)
 {
+	// The pool's own worker, identified by posting to the pool directly rather than through run().
+	std::atomic<std::thread::id> pool_worker{};
+	std::atomic<bool>            posted{false};
+	struct probe
+	{
+		std::atomic<std::thread::id>* id;
+		std::atomic<bool>*            done;
+	} const where{.id = &pool_worker, .done = &posted};
+	pool().post(alt::work_item{.invoke = [](void* raw) noexcept {
+		                           const auto& target = *static_cast<const probe*>(raw);
+		                           target.id->store(std::this_thread::get_id());
+		                           target.done->store(true);
+	                           },
+	                           .state = const_cast<probe*>(&where)}); // NOLINT(cppcoreguidelines-pro-type-const-cast): work_item::state is void* and the probe is only read
+	ASSERT_TRUE(wait_until([&] { return posted.load(); }));
+
 	const auto result = run(io().run([] { return std::this_thread::get_id(); }));
 
 	ASSERT_TRUE(result.has_value());
+	EXPECT_EQ(*result, pool_worker.load());
 	EXPECT_NE(*result, std::this_thread::get_id());
 }
 
@@ -1056,6 +1095,9 @@ TEST_F(FileIoRunTest, ACallableCancelledBeforeItRanIsNeverInvoked)
 	const auto behind  = std::make_shared<std::atomic<bool>>(false);
 
 	const auto blocker = occupy_the_worker(hold, worker, entered);
+	// Load-bearing: the one-thread pool runs its queue in FIFO order, so `behind` starting
+	// means the cancelled job's turn has passed. A LIFO or work-stealing pool would turn this
+	// into a race that can pass with the defect present.
 	begin(io().run([invoked] {
 		invoked->store(true);
 		return 1;
@@ -1103,16 +1145,16 @@ TEST_F(FileIoRunTest, ACallablesCapturesAreDestroyedOnTheWorkerWhenCancelled)
 
 TEST_F(FileIoRunTest, ACallableCancelledWhileRunningCompletesAndItsResultIsDiscarded)
 {
-	const auto hold      = std::make_shared<gate>();
-	const auto entered   = std::make_shared<std::atomic<bool>>(false);
-	const auto finished  = std::make_shared<std::atomic<bool>>(false);
-	const auto destroyed = std::make_shared<std::atomic<int>>(0);
+	const auto hold     = std::make_shared<gate>();
+	const auto entered  = std::make_shared<std::atomic<bool>>(false);
+	const auto finished = std::make_shared<std::atomic<bool>>(false);
+	const auto counters = std::make_shared<result_counters>();
 
-	const auto state = begin(io().run([hold, entered, finished, destroyed] {
+	const auto state = begin(io().run([hold, entered, finished, counters] {
 		entered->store(true);
 		hold->wait();
 		finished->store(true);
-		return counted_result{destroyed};
+		return counted_result{counters};
 	}));
 	wait_until([&] { return entered->load(); });
 	EXPECT_TRUE(chain(0).request_stop());
@@ -1121,9 +1163,13 @@ TEST_F(FileIoRunTest, ACallableCancelledWhileRunningCompletesAndItsResultIsDisca
 	hold->open();
 	wait_until([&] { return finished->load(); });
 
-	// The result is destroyed with the block, which the worker releases once the job is done.
-	EXPECT_TRUE(wait_until([&] { return destroyed->load() == 1; }));
+	// The result was moved into the block's storage exactly once (a callable whose result
+	// were dropped instead of stored would move it zero times), and that stored object dies
+	// with the block once the worker is done with the job.
+	EXPECT_TRUE(wait_until([&] { return counters->destroyed.load() == 1; }));
+	EXPECT_EQ(counters->moves.load(), 1);
 	home().drain();
+	EXPECT_EQ(counters->destroyed.load(), 1);
 	EXPECT_FALSE(state->finished) << "a cancelled chain is abandoned, not resumed";
 }
 

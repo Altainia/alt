@@ -477,12 +477,13 @@ namespace alt::detail
 	 *
 	 * alt::file_io::run() takes an arbitrary callable. Making the operation block a template
 	 * over it would turn one type into a family and put the callable in the block's layout;
-	 * this is the small virtual that avoids both. The request's `in` is a pointer to one of
+	 * this is the small virtual that avoids both. The request's `out` is a pointer to one of
 	 * these, and its `state` is the shared_ptr that keeps it alive, so the callable and its
 	 * captures live in storage the operation block co-owns and NEVER in the coroutine frame
 	 * that cancellation destroys while a worker may still be running them.
 	 *
-	 * Exactly one of invoke() and discard() is called, once, on a worker thread: invoke()
+	 * At most one of invoke() and discard() is called, once, on a worker thread (neither when the
+	 * submission itself failed): invoke()
 	 * when the job runs, discard() when the job was cancelled before it started. Both end
 	 * with the callable destroyed, so its captures die on the worker in either case rather
 	 * than on whichever thread happens to drop the block's last reference. That is a
@@ -576,7 +577,10 @@ namespace alt::detail
 		[[nodiscard]] result_type take()
 		  requires(!std::is_void_v<result_type>)
 		{
-			// Present whenever the callable returned, which the caller has established by finding no exception.
+			// Unreachable under the contract: take() is called only after the completion reported
+			// success and rethrow_if_failed() found no exception, and then the callable returned
+			// a value. This is a guard on a broken invariant, not a live path, and it is why
+			// skipping rethrow_if_failed() aborts a test instead of failing an assertion.
 			if(!m_result)
 			{
 				std::terminate();

@@ -86,7 +86,7 @@ namespace alt
 	 * before the callback but holds a private one across it; see its description.)
 	 *
 	 * `in` and `out` carry what the struct does not model. `in` is operation-specific
-	 * input (a path pair for rename, an `io_invocable*` for invoke); `out` is
+	 * input (a path pair for rename); `out` is
 	 * storage for a result that is not a byte count (a `file_status` for the two
 	 * stat operations, a `std::vector<directory_entry>` for list_directory). BOTH
 	 * MUST POINT INTO STORAGE THE OPERATION BLOCK CO-OWNS (see `state`) AND NEVER INTO A
@@ -111,7 +111,7 @@ namespace alt
 	 *  | rename         | in (path pair)                 | error only                       |
 	 *  | unlink         | in (path)                      | error only                       |
 	 *  | list_directory | in (path), out                 | `std::vector<directory_entry>`   |
-	 *  | invoke         | in (`io_invocable*`)           | error only                       |
+	 *  | invoke         | out (`io_invocable*`)          | error only                       |
 	 *
 	 * `open` stores the new handle through `out`, which is a `native_handle*`;
 	 * io_completion has no field for it and the seam does not grow one. On error
@@ -122,6 +122,19 @@ namespace alt
 	 * backend runs them on a helper thread. That is an implementation burden on the
 	 * backend, not a gap in this interface.
 	 *
+	 * **An invoke job carries an obligation the other operations do not.** Its `out` is a
+	 * `detail::io_invocable*` (declared in detail/io_operation.hpp), and a backend MUST, on
+	 * the same helper thread that would have run it:
+	 *  - call `io_invocable::invoke()` when the job runs, which runs the callable and destroys
+	 *    it; and
+	 *  - call `io_invocable::discard()` INSTEAD, for a job cancelled before it started, and
+	 *    complete it with std::errc::operation_canceled. `discard()` is what destroys the
+	 *    callable and its captures on the helper thread. A backend that simply skips a
+	 *    cancelled job leaves the callable to die on whichever thread drops the operation
+	 *    block's last reference, which may be the completion thread, and silently loses the
+	 *    guarantee alt::file_io::run() documents.
+	 * Neither is called for a job whose submit() failed. Both are noexcept.
+	 *
 	 * What `in` and `out` point at, per operation. `in` is `const void*` and the types
 	 * below are what it is cast back to: a `const std::filesystem::path*` for stat_path,
 	 * unlink and list_directory; a `const io_open_args*` for open; a
@@ -129,8 +142,8 @@ namespace alt
 	 * operations, a `native_handle*` for open, and a `std::vector<directory_entry>*`
 	 * (the whole vector, not one entry) for list_directory. All of these types are in
 	 * detail/file_types.hpp. This header names them only in documentation and carries
-	 * the pointers as `void`. `io_invocable` arrives with the escape hatch; until then
-	 * io_op::invoke completes with std::errc::function_not_supported.
+	 * the pointers as `void`. `out` is a `detail::io_invocable*` for invoke, stored as the
+	 * already-adjusted base pointer, so casting it back is exact.
 	 *
 	 * A read or write moves at most `min(size, buffer.size())` bytes: a `size` larger
 	 * than the buffer is clamped, and the short transfer is reported as success, which
