@@ -86,7 +86,7 @@ TEST(IoHandleTest, TheDescriptorIsClosedWhenTheLastReferenceGoes)
 	const auto fd     = file.release();
 	auto       handle = alt::detail::io_handle::adopt(fd);
 	ASSERT_TRUE(is_live(fd));
-	EXPECT_TRUE(handle->is_open());
+	EXPECT_TRUE(handle->has_handle());
 	handle.reset();
 	EXPECT_FALSE(is_live(fd));
 }
@@ -99,7 +99,7 @@ TEST(IoHandleTest, TheDescriptorStaysOpenWhileASecondReferenceIsHeld)
 	auto       second = first;
 	first.reset();
 	EXPECT_TRUE(is_live(fd));
-	EXPECT_TRUE(second->is_open());
+	EXPECT_TRUE(second->has_handle());
 	second.reset();
 	EXPECT_FALSE(is_live(fd));
 }
@@ -112,7 +112,7 @@ TEST(IoHandleTest, RequestCloseMarksTheHandleWithoutClosingTheDescriptor)
 	EXPECT_FALSE(handle->close_requested());
 	handle->request_close();
 	EXPECT_TRUE(handle->close_requested());
-	EXPECT_TRUE(handle->is_open());
+	EXPECT_TRUE(handle->has_handle());
 	EXPECT_EQ(handle->native(), fd);
 	EXPECT_TRUE(is_live(fd));
 	handle.reset();
@@ -126,19 +126,34 @@ TEST(IoHandleTest, ADescriptorIsNotReusedUnderAHeldReference)
 #else
 	// A merely-closed descriptor reports EBADF, which is benign. The dangerous case is the number being
 	// handed to the next open(), so a stale read succeeds against someone else's file. POSIX gives out
-	// the lowest free number, so if the held reference had let go, the second open would receive it.
-	temp_file  first_file;
-	const auto held_fd = first_file.release();
-	auto       held    = alt::detail::io_handle::adopt(held_fd);
-	held->request_close();
+	// the lowest free number, so a closed descriptor's number comes back from the next open() -- but only
+	// if nothing lower is free. Positive control: open and close a probe, then open the held file. If it
+	// lands on the probe's number, it was the lowest free number, and closing it would hand it straight
+	// to the next open. Otherwise a pass below would carry no information, so skip.
+	temp_file  probe_file;
+	const auto probe_fd = probe_file.release();
+	ASSERT_NE(probe_fd, alt::invalid_native_handle);
+	::close(static_cast<int>(probe_fd));
+
+	temp_file  held_file;
+	const auto held_fd = held_file.release();
+	if(held_fd != probe_fd)
+	{
+		::close(static_cast<int>(held_fd));
+		GTEST_SKIP() << "Reuse is not observable here: a descriptor was free below the one just opened, so a second open() would not receive a closed descriptor's number.";
+	}
+
+	// Two owners; the one that asks to close then goes away. The reference that outlives it is the in-flight operation.
+	auto owner     = alt::detail::io_handle::adopt(held_fd);
+	auto operation = owner;
+	owner->request_close();
+	owner.reset();
 
 	temp_file  second_file;
-	const auto second_fd = second_file.release();
-	ASSERT_NE(second_fd, alt::invalid_native_handle);
-	EXPECT_NE(second_fd, held_fd);
-	EXPECT_EQ(held->native(), held_fd);
+	const auto second = alt::detail::io_handle::adopt(second_file.release());
+	ASSERT_TRUE(second->has_handle());
+	EXPECT_NE(second->native(), held_fd);
 	EXPECT_TRUE(is_live(held_fd));
-
-	::close(static_cast<int>(second_fd));
+	EXPECT_EQ(operation->native(), held_fd);
 #endif
 }

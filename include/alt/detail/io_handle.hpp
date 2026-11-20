@@ -29,7 +29,7 @@ namespace alt::detail
 	 * asked, so new operations can be refused while old ones drain. The actual
 	 * close is deferred to the last reference.
 	 *
-	 * is_open() is therefore true for the whole life of a handle that adopted a valid
+	 * has_handle() is therefore true for the whole life of a handle that adopted a valid
 	 * descriptor, and a handle never closes before it is destroyed. It exists so a
 	 * caller can tell an adopted handle from one adopted with invalid_native_handle.
 	 *
@@ -47,8 +47,10 @@ namespace alt::detail
 		/**
 		 * @brief Takes ownership of a handle.
 		 *
-		 * The caller must not close it afterwards. Adopting invalid_native_handle is
-		 * allowed and yields a handle for which is_open() is false and the destructor
+		 * The caller must not close it afterwards, and must not adopt the same
+		 * descriptor twice: two owners mean a double close, which can close a recycled
+		 * descriptor, the very hazard this class exists to prevent. Adopting invalid_native_handle is
+		 * allowed and yields a handle for which has_handle() is false and the destructor
 		 * closes nothing.
 		 *
 		 * @param handle A descriptor on POSIX, a HANDLE on Windows.
@@ -58,7 +60,12 @@ namespace alt::detail
 		/** @brief Constructor reserved for adopt(); the token makes it uncallable elsewhere. */
 		io_handle(private_token /*token*/, native_handle handle) noexcept;
 
-		/** @brief Closes the descriptor if one was adopted. The only place it is closed. */
+		/**
+		 * @brief Closes the descriptor if one was adopted. The only place it is closed.
+		 *
+		 * The result of close()/CloseHandle() is discarded on purpose: a destructor cannot
+		 * recover, and Linux releases the descriptor even when close() fails with EINTR.
+		 */
 		~io_handle();
 
 		io_handle(const io_handle&)            = delete;
@@ -72,8 +79,8 @@ namespace alt::detail
 			return m_handle;
 		}
 
-		/** @brief True if a valid handle was adopted. Never becomes false before destruction. */
-		[[nodiscard]] bool is_open() const noexcept
+		/** @brief True if a valid handle was adopted. A constant after construction: it does not track close_requested(). */
+		[[nodiscard]] bool has_handle() const noexcept
 		{
 			return m_handle != invalid_native_handle;
 		}
