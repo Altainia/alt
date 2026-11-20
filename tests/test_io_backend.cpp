@@ -221,6 +221,45 @@ namespace
 	}
 } // namespace
 
+namespace
+{
+	constexpr std::size_t completers             = 3;
+	constexpr std::size_t per_completer          = 400;
+	constexpr std::size_t preloaded              = completers * per_completer;
+	constexpr std::size_t late                   = 800;
+	constexpr std::size_t contending_party_count = completers + 2;
+
+	void complete_slice(alt::manual_io_backend& backend, std::atomic<std::size_t>& arrived, std::size_t slice)
+	{
+		alt_test::rendezvous(arrived, contending_party_count);
+		for(std::size_t i = slice * per_completer; i < (slice + 1) * per_completer; ++i)
+		{
+			backend.complete(i, done(i));
+			(void)backend.was_cancelled(i);
+		}
+	}
+
+	void submit_late(alt::manual_io_backend& backend, std::atomic<std::size_t>& arrived, std::atomic<int>* counts)
+	{
+		alt_test::rendezvous(arrived, contending_party_count);
+		for(std::size_t i = preloaded; i < preloaded + late; ++i)
+		{
+			const auto token = backend.submit(read_request(), count_callback, &counts[i]);
+			EXPECT_TRUE(token.has_value());
+			(void)backend.pending();
+		}
+	}
+
+	void cancel_preloaded(alt::manual_io_backend& backend, std::atomic<std::size_t>& arrived)
+	{
+		alt_test::rendezvous(arrived, contending_party_count);
+		for(std::size_t i = 0; i < preloaded; ++i)
+		{
+			backend.cancel(alt::io_token(i + 1));
+		}
+	}
+} // namespace
+
 // Completers, a submitter and a canceller are all in flight at once: the spin
 // rendezvous releases them within nanoseconds of each other, and each then works
 // through hundreds of operations, so complete(), submit(), pending(), cancel() and
@@ -228,11 +267,6 @@ namespace
 // locking; the exactly-once counts are the judge of the bookkeeping.
 TEST(IoBackendTest, CompletingWhileSubmittingAndCancellingFromOtherThreadsRunsEveryCallbackExactlyOnce)
 {
-	constexpr std::size_t completers    = 3;
-	constexpr std::size_t per_completer = 400;
-	constexpr std::size_t preloaded     = completers * per_completer;
-	constexpr std::size_t late          = 800;
-
 	alt::manual_io_backend backend;
 	const auto             counts = std::make_unique<std::atomic<int>[]>(preloaded + late);
 	for(std::size_t i = 0; i < preloaded; ++i)
@@ -241,41 +275,14 @@ TEST(IoBackendTest, CompletingWhileSubmittingAndCancellingFromOtherThreadsRunsEv
 	}
 
 	std::atomic<std::size_t> arrived{0};
-	constexpr std::size_t    parties = completers + 2;
 	{
-		std::vector<std::jthread> threads;
+		std::vector<std::jthread> threads(contending_party_count);
 		for(std::size_t c = 0; c < completers; ++c)
 		{
-			threads.emplace_back(
-			  [&, c] {
-				  alt_test::rendezvous(arrived, parties);
-				  for(std::size_t i = c * per_completer; i < (c + 1) * per_completer; ++i)
-				  {
-					  backend.complete(i, done(i));
-					  (void)backend.was_cancelled(i);
-				  }
-			  });
+			threads[c] = std::jthread(complete_slice, std::ref(backend), std::ref(arrived), c);
 		}
-		// Submits while the completers drain, polling pending() as it goes.
-		threads.emplace_back(
-		  [&] {
-			  alt_test::rendezvous(arrived, parties);
-			  for(std::size_t i = preloaded; i < preloaded + late; ++i)
-			  {
-				  const auto token = backend.submit(read_request(), count_callback, &counts[i]);
-				  EXPECT_TRUE(token.has_value());
-				  (void)backend.pending();
-			  }
-		  });
-		// Cancels operations the completers are completing.
-		threads.emplace_back(
-		  [&] {
-			  alt_test::rendezvous(arrived, parties);
-			  for(std::size_t i = 0; i < preloaded; ++i)
-			  {
-				  backend.cancel(alt::io_token(i + 1));
-			  }
-		  });
+		threads[completers]     = std::jthread(submit_late, std::ref(backend), std::ref(arrived), counts.get());
+		threads[completers + 1] = std::jthread(cancel_preloaded, std::ref(backend), std::ref(arrived));
 	}
 
 	EXPECT_EQ(backend.pending(), late);
