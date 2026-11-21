@@ -174,10 +174,29 @@ include(GoogleTest)
 # longest deliberate sleep in the suite is 50ms. 60s is roughly 75x the slowest
 # legitimate test, so it cannot fire on a slow machine, and it is short enough to
 # report a hang while the build is still being watched.
+#
+# On Windows the file layer has two real backends, so the suite runs over both. The
+# discovered tests name the thread pool explicitly through ALT_TEST_IO_BACKEND (which
+# tests/file_io_test_support.hpp reads), and file_layer_on_iocp below runs every FileIo*
+# and AsyncFile* test once more on IOCP. Elsewhere the variable is unset and the fixtures
+# take `automatic`, which is the thread pool there.
+if(WIN32)
+    set(_alt_discovered_test_properties TIMEOUT 60 ENVIRONMENT "ALT_TEST_IO_BACKEND=thread_pool")
+else()
+    set(_alt_discovered_test_properties TIMEOUT 60)
+endif()
 gtest_discover_tests(alt_tests
     DISCOVERY_MODE PRE_TEST
-    PROPERTIES TIMEOUT 60
+    PROPERTIES ${_alt_discovered_test_properties}
 )
+
+# One ctest entry for the whole file layer on IOCP, a plain add_test rather than a second
+# gtest_discover_tests so nothing new depends on discovery (issue #68). Its TIMEOUT covers
+# the whole filtered run rather than one test.
+if(WIN32)
+    add_test(NAME file_layer_on_iocp COMMAND alt_tests "--gtest_filter=FileIo*:AsyncFile*")
+    set_tests_properties(file_layer_on_iocp PROPERTIES ENVIRONMENT "ALT_TEST_IO_BACKEND=iocp" TIMEOUT 300)
+endif()
 
 # Compile checks for alt::task's [[nodiscard]] await_resume (issue #61). A diagnostic is
 # not observable from a running test, so these build a probe and judge the build: the

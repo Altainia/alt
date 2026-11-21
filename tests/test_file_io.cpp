@@ -35,6 +35,7 @@
 
 #include "coroutine_test_support.hpp"
 #include "death_test_support.hpp"
+#include "file_io_test_support.hpp"
 
 namespace
 {
@@ -343,7 +344,7 @@ namespace
 		scratch_dir                                      m_dir;
 		std::expected<alt::thread_pool, std::error_code> m_pool = alt::thread_pool::create(1);
 		alt::manual_scheduler                            m_home;
-		std::expected<alt::file_io, std::error_code>     m_io = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home});
+		std::expected<alt::file_io, std::error_code>     m_io = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home}, alt_test::file_io_options_under_test());
 	};
 
 }
@@ -849,7 +850,7 @@ namespace
 			{
 				return std::unexpected(pool.error()); // the fixture's ASSERT on the pool reports it; do not dereference
 			}
-			return alt::file_io::create(*pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::automatic, .max_in_flight = max_in_flight, .queue_depth = 0});
+			return alt::file_io::create(*pool, alt::scheduler_ref{home}, alt_test::file_io_options_under_test(alt::file_io_options{.backend = alt::io_backend_kind::automatic, .max_in_flight = max_in_flight, .queue_depth = 0}));
 		}
 
 		std::expected<alt::thread_pool, std::error_code> pool;

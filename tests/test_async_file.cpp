@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <alt/async_file.hpp>
 #include <alt/cancellable_task.hpp>
 #include <alt/detail/io_handle.hpp>
@@ -30,6 +31,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 #ifdef _WIN32
 // windows.h defines min and max as macros otherwise; see src/io_windows.hpp.
 #	ifndef NOMINMAX
@@ -37,6 +39,8 @@
 #	endif
 #	include <windows.h>
 #endif
+
+#include "file_io_test_support.hpp"
 
 namespace
 {
@@ -371,7 +375,7 @@ namespace
 		std::expected<alt::thread_pool, std::error_code> m_pool = alt::thread_pool::create(1);
 		alt::manual_scheduler                            m_home;
 		alt::manual_io_backend                           m_manual_backend;
-		std::expected<alt::file_io, std::error_code>     m_real   = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home});
+		std::expected<alt::file_io, std::error_code>     m_real   = alt::file_io::create(*m_pool, alt::scheduler_ref{m_home}, alt_test::file_io_options_under_test());
 		std::expected<alt::file_io, std::error_code>     m_manual = alt::file_io::create(alt::scheduler_ref{m_home}, m_manual_backend);
 	};
 
@@ -558,6 +562,43 @@ TEST_F(AsyncFileTest, TwoPositionalReadsOnOneFileEachGetTheirOwnOffsetsBytes)
 	ASSERT_TRUE(second->result.has_value());
 	EXPECT_EQ(text_of(first_buffer, 4), "CCCC");
 	EXPECT_EQ(text_of(second_buffer, 4), "AAAA");
+}
+
+TEST_F(AsyncFileTest, ManyConcurrentReadsAllComplete)
+{
+	// More reads than the fixture's max_in_flight of 64, so most of them wait for a permit
+	// and are submitted as earlier ones complete: every completion must reach its own read,
+	// and none may be lost while the backend has a full complement in flight.
+	constexpr std::size_t count = 200;
+	std::string           content;
+	for(std::size_t index = 0; index < count; ++index)
+	{
+		content.push_back(static_cast<char>(index));
+	}
+	const auto path = write_file("many.bin", content);
+	auto       file = run(real_io().open(path, alt::flags(alt::open_flag::read)));
+	ASSERT_TRUE(file.has_value());
+
+	using result_type = std::expected<std::size_t, std::error_code>;
+	std::vector<alt::io_buffer>                        buffers;
+	std::vector<std::shared_ptr<outcome<result_type>>> results;
+	std::vector<alt::cancellation_handle>              chains;
+	for(std::size_t index = 0; index < count; ++index)
+	{
+		buffers.push_back(buffer_of(1));
+		results.push_back(std::make_shared<outcome<result_type>>());
+		chains.push_back(alt::start(capture(file->read_at(buffers.back(), index, 1), results.back())));
+	}
+	ASSERT_TRUE(pump_until([&] { return std::ranges::all_of(results, [](const auto& result) { return result->finished; }); }));
+
+	for(std::size_t index = 0; index < count; ++index)
+	{
+		const std::optional<result_type>& read = results[index]->result;
+		ASSERT_TRUE(read.has_value()) << "read " << index;
+		ASSERT_TRUE(read->has_value()) << "read " << index << ": " << read->error().message();
+		EXPECT_EQ(**read, 1U) << "read " << index;
+		EXPECT_EQ(text_of(buffers[index], 1), std::string(1, static_cast<char>(index))) << "read " << index;
+	}
 }
 
 TEST_F(AsyncFileTest, TwoReadsOnOneFileAreBothAtTheBackendTogetherWithTheirOwnOffsets)
