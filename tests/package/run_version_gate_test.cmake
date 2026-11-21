@@ -150,9 +150,12 @@ endif()
 # the export references (on Linux, $<LINK_ONLY:PkgConfig::LIBURING>): CMake resolves it
 # only at generate time, when something links alt::alt. These cases build such a consumer.
 #
-# Both run only when the installed export actually names liburing, so they exist on
-# exactly the platforms that have the dependency. There is no Linux block to strip on
-# Windows, and no reason to link there.
+# Both run on Linux (CMAKE_HOST_SYSTEM_NAME: this is a -P script, where CMAKE_SYSTEM_NAME
+# is empty and a test on it would skip the cases everywhere), keyed on the platform and not on anything read from the install:
+# a gate derived from the installed export would skip itself in exactly the case it
+# exists to catch, an export that stopped naming the dependency. On Linux the export
+# must name it, and its absence is a failure. Elsewhere there is no Linux block to
+# strip and no liburing, so the cases are skipped.
 file(GLOB_RECURSE _targets_file "${prefix}/*/AltTargets.cmake")
 file(GLOB_RECURSE _config_file "${prefix}/*/AltConfig.cmake")
 list(GET _targets_file 0 _targets_file)
@@ -184,7 +187,11 @@ function(run_link_case _slug _prefix)
     set(CASE_OUT "${_so}${_se}" PARENT_SCOPE)
 endfunction()
 
-if(_targets MATCHES "PkgConfig::LIBURING")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    if(NOT _targets MATCHES "PkgConfig::LIBURING")
+        record_failure("link"
+            "the installed AltTargets.cmake does not name PkgConfig::LIBURING, so the link cases below prove nothing about the dependency")
+    endif()
     run_link_case(link_installed "${prefix}")
     if(NOT CASE_RC EQUAL 0)
         record_failure("link" "a consumer linking alt::alt did not configure and build:\n${CASE_OUT}")
@@ -207,10 +214,13 @@ if(_targets MATCHES "PkgConfig::LIBURING")
         if(CASE_RC EQUAL 0)
             record_failure("link without block"
                 "a consumer linked although the Linux dependency block was stripped, so the link case cannot detect a missing target")
+        elseif(NOT CASE_OUT MATCHES "LIBURING")
+            record_failure("link without block"
+                "the control failed, but not over LIBURING, so it proved nothing about the stripped block:\n${CASE_OUT}")
         endif()
     endif()
 else()
-    message(STATUS "package_version_gate: the export names no liburing, so the link cases are skipped")
+    message(STATUS "package_version_gate: this is not Linux, so the link cases are skipped")
 endif()
 
 if(failures)
