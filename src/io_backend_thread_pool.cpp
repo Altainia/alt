@@ -20,13 +20,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "io_backend_internal.hpp"
+
 #ifdef _WIN32
-// windows.h defines min and max as function-like macros, which break std::min and
-// std::numeric_limits<>::max(). NOMINMAX is its documented switch to leave them out.
-#	ifndef NOMINMAX
-#		define NOMINMAX
-#	endif
-#	include <windows.h>
+#	include "io_windows.hpp"
 #else
 #	include <fcntl.h>
 #	include <sys/stat.h>
@@ -64,47 +61,10 @@ namespace alt
 		}
 
 #ifdef _WIN32
-		/**
-		 * Translates the Win32 errors whose standard mapping differs from the POSIX error the
-		 * documented contract promises, and leaves every other error as the system reports it.
-		 *
-		 * The contract names POSIX conditions (std::errc::not_a_directory, for one), and the
-		 * Windows standard library does not map every Win32 equivalent to the same condition:
-		 * it maps ERROR_DIRECTORY to std::errc::invalid_argument, where ENOTDIR is
-		 * std::errc::not_a_directory. Left alone, a caller comparing against the documented
-		 * condition would pass on Linux and fail on Windows. A code not listed here is not
-		 * flattened: it arrives faithfully as {code, system_category()}.
-		 *
-		 * Translated: ERROR_DIRECTORY (a directory operation given a file) to not_a_directory,
-		 * and ERROR_NOT_SAME_DEVICE (MoveFileExW without MOVEFILE_COPY_ALLOWED, across volumes)
-		 * to cross_device_link.
-		 */
-		std::error_code normalize_windows_error(std::error_code error) noexcept
-		{
-			if(error.category() != std::system_category())
-			{
-				return error;
-			}
-			switch(static_cast<DWORD>(error.value()))
-			{
-			case ERROR_DIRECTORY:
-				return std::make_error_code(std::errc::not_a_directory);
-			case ERROR_NOT_SAME_DEVICE:
-				return std::make_error_code(std::errc::cross_device_link);
-			default:
-				return error;
-			}
-		}
-
-		std::error_code last_error() noexcept
-		{
-			return normalize_windows_error({static_cast<int>(::GetLastError()), std::system_category()});
-		}
-
-		HANDLE to_handle(native_handle handle) noexcept
-		{
-			return reinterpret_cast<HANDLE>(handle);
-		}
+		using detail::windows_io::is_directory_handle;
+		using detail::windows_io::last_error;
+		using detail::windows_io::normalize_error;
+		using detail::windows_io::to_handle;
 #else
 		int to_fd(native_handle handle) noexcept
 		{
@@ -143,13 +103,6 @@ namespace alt
 		// ---------------------------------------------------------------------
 
 #ifdef _WIN32
-		/// Whether @p handle names a directory. A transfer on one fails with a code the standard library does not map to is_a_directory, which is what POSIX reports (EISDIR).
-		bool is_directory_handle(native_handle handle) noexcept
-		{
-			BY_HANDLE_FILE_INFORMATION info{};
-			return ::GetFileInformationByHandle(to_handle(handle), &info) != FALSE && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-		}
-
 		/// A manual-reset event owned by one transfer, closed when the transfer is done with it.
 		class transfer_event
 		{
@@ -284,49 +237,6 @@ namespace alt
 			out.kind                                     = kind_of(info.dwFileAttributes);
 			out.identity.device                          = info.dwVolumeSerialNumber;
 			out.identity.serial                          = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
-			return {};
-		}
-
-		std::error_code do_open(const io_open_args& args, native_handle& out) noexcept
-		{
-			const auto how    = args.open_flags;
-			const bool reads  = how.has_any(flags(open_flag::read));
-			const bool writes = how.has_any(flags(open_flag::write));
-			DWORD      access = 0;
-			if(reads)
-			{
-				access |= GENERIC_READ;
-			}
-			if(writes)
-			{
-				// Append-only access is what makes every write land at the end.
-				access |= how.has_any(flags(open_flag::append)) ? static_cast<DWORD>(FILE_APPEND_DATA) : static_cast<DWORD>(GENERIC_WRITE);
-			}
-			const bool creates     = how.has_any(flags(open_flag::create));
-			const bool truncates   = how.has_any(flags(open_flag::truncate));
-			DWORD      disposition = OPEN_EXISTING;
-			if(creates && how.has_any(flags(open_flag::exclusive)))
-			{
-				disposition = CREATE_NEW;
-			}
-			else if(creates)
-			{
-				disposition = truncates ? CREATE_ALWAYS : OPEN_ALWAYS;
-			}
-			else if(truncates)
-			{
-				disposition = TRUNCATE_EXISTING;
-			}
-			SECURITY_ATTRIBUTES security{};
-			security.nLength        = static_cast<DWORD>(sizeof(security));
-			security.bInheritHandle = how.has_any(flags(open_flag::close_on_exec)) ? FALSE : TRUE;
-			// FILE_FLAG_BACKUP_SEMANTICS is what lets CreateFileW open a directory at all.
-			const HANDLE handle = ::CreateFileW(args.path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, disposition, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-			if(handle == INVALID_HANDLE_VALUE)
-			{
-				return last_error();
-			}
-			out = reinterpret_cast<native_handle>(handle);
 			return {};
 		}
 
@@ -480,6 +390,38 @@ namespace alt
 		// Portable pieces
 		// ---------------------------------------------------------------------
 
+		/// Opens through the platform primitive, then runs the policy's prepare hook on the new handle.
+		std::error_code open_with_policy(const detail::pool_open_policy& policy, const io_open_args& args, native_handle& out) noexcept
+		{
+#ifdef _WIN32
+			native_handle opened = invalid_native_handle;
+			if(const auto error = detail::windows_io::open_file(args, opened, static_cast<DWORD>(policy.extra_flags)))
+			{
+				return error;
+			}
+#else
+			native_handle opened = invalid_native_handle;
+			if(const auto error = do_open(args, opened))
+			{
+				return error;
+			}
+#endif
+			if(policy.prepare != nullptr)
+			{
+				if(const auto error = policy.prepare(policy.context, opened))
+				{
+#ifdef _WIN32
+					static_cast<void>(::CloseHandle(to_handle(opened)));
+#else
+					static_cast<void>(::close(to_fd(opened)));
+#endif
+					return error;
+				}
+			}
+			out = opened;
+			return {};
+		}
+
 		file_kind kind_of(std::filesystem::file_type type) noexcept
 		{
 			switch(type)
@@ -561,8 +503,8 @@ namespace alt
 			if(error)
 			{
 #ifdef _WIN32
-				// std::filesystem reports the raw Win32 code; see normalize_windows_error().
-				return normalize_windows_error(error);
+				// std::filesystem reports the raw Win32 code; see windows_io::normalize_error().
+				return normalize_error(error);
 #else
 				return error;
 #endif
@@ -588,7 +530,7 @@ namespace alt
 		}
 
 		/// Performs one request synchronously on the calling (worker) thread.
-		io_completion perform(const io_request& request)
+		io_completion perform(const io_request& request, const detail::pool_open_policy& policy)
 		{
 			// A request missing the pointer its operation reads would otherwise be a segfault on a worker.
 			switch(request.op)
@@ -646,7 +588,7 @@ namespace alt
 					result.error = invalid_argument_error();
 					break;
 				}
-				result.error = do_open(*static_cast<const io_open_args*>(request.in), *static_cast<native_handle*>(request.out));
+				result.error = open_with_policy(policy, *static_cast<const io_open_args*>(request.in), *static_cast<native_handle*>(request.out));
 				break;
 			case io_op::rename:
 				result.error = do_rename(*static_cast<const io_rename_args*>(request.in));
@@ -711,6 +653,7 @@ namespace alt
 			void*                         state   = nullptr;
 			std::uint64_t                 id      = 0;
 			std::atomic<bool>             cancelled{false};
+			detail::pool_open_policy      policy;
 			std::shared_ptr<job_registry> registry;
 			std::shared_ptr<job>          self; ///< The job's hold on itself while queued; see run_job().
 		};
@@ -741,7 +684,7 @@ namespace alt
 			{
 				try
 				{
-					result = perform(self.request);
+					result = perform(self.request, self.policy);
 				}
 				catch(const std::bad_alloc&)
 				{
@@ -764,7 +707,7 @@ namespace alt
 		class thread_pool_backend final: public io_backend
 		{
 		public:
-			explicit thread_pool_backend(thread_pool& pool): m_pool(pool), m_registry(std::make_shared<job_registry>())
+			thread_pool_backend(thread_pool& pool, const detail::pool_open_policy& policy): m_pool(pool), m_policy(policy), m_registry(std::make_shared<job_registry>())
 			{}
 
 			[[nodiscard]] std::expected<io_token, std::error_code> submit(const io_request& request, io_completion_fn on_done, void* state) override
@@ -777,6 +720,7 @@ namespace alt
 					record->on_done  = on_done;
 					record->state    = state;
 					record->id       = m_next_id.fetch_add(1);
+					record->policy   = m_policy;
 					record->registry = m_registry;
 					record->self     = record;
 				}
@@ -815,15 +759,24 @@ namespace alt
 
 		private:
 			thread_pool&                  m_pool;
+			detail::pool_open_policy      m_policy;
 			std::shared_ptr<job_registry> m_registry;
 			std::atomic<std::uint64_t>    m_next_id{1};
 		};
 
 	} // namespace
 
+	namespace detail
+	{
+		std::unique_ptr<io_backend> make_thread_pool_backend(thread_pool& pool, const pool_open_policy& policy)
+		{
+			return std::make_unique<thread_pool_backend>(pool, policy);
+		}
+	} // namespace detail
+
 	std::unique_ptr<io_backend> make_thread_pool_backend(thread_pool& pool)
 	{
-		return std::make_unique<thread_pool_backend>(pool);
+		return detail::make_thread_pool_backend(pool, {});
 	}
 
 } // namespace alt

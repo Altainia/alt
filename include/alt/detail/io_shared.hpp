@@ -1,6 +1,7 @@
 #pragma once
 
 #include <alt/async_semaphore.hpp>
+#include <alt/detail/io_handle.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/scheduler.hpp>
 #include <atomic>
@@ -120,19 +121,28 @@ namespace alt::detail
 		/**
 		 * @brief Builds the shared state of one file I/O service.
 		 *
-		 * @param seam          The backend every operation is submitted through. Must
-		 *                      outlive this object, which for alt::file_io means it owns it.
+		 * @param seam          The backend every operation is submitted through, except those
+		 *                      on an adopted file. Must outlive every submission and cancel
+		 *                      made through this object, which for alt::file_io means it owns
+		 *                      it and destroys it only after wait_until_quiet().
+		 * @param adopted_seam  The backend an adopted file's operations are submitted through:
+		 *                      a thread-pool backend when @p seam is IOCP, which can transfer
+		 *                      only on handles it opened, and the same object as @p seam for
+		 *                      every other backend. The same lifetime requirement.
 		 * @param home          Where every operation's awaiting coroutine is resumed and
 		 *                      where every permit is released. Must not be empty, and must
 		 *                      outlive every operation; alt::file_io::create is where that
 		 *                      is checked rather than asserted on an I/O thread.
-		 * @param max_in_flight How many operations may be at the backend at once. Must be
-		 *                      positive: a zero bound would park the first operation on a
-		 *                      permit that can never exist.
+		 * @param max_in_flight How many operations may be at the backend at once, counted
+		 *                      across both backends. Must be positive: a zero bound would park
+		 *                      the first operation on a permit that can never exist.
 		 */
-		io_shared(io_backend& seam, const scheduler_ref home, const std::ptrdiff_t max_in_flight):
+		io_shared(io_backend& seam, io_backend& adopted_seam, const scheduler_ref home, const std::ptrdiff_t max_in_flight):
 		  slots(max_in_flight),
 		  backend(&seam),
+		  adopted_backend(&adopted_seam),
+		  primary_kind(seam.kind()),
+		  adopted_kind(adopted_seam.kind()),
 		  completion(home)
 		{
 			assert(max_in_flight > 0 && "an alt file I/O service with no in-flight slots");
@@ -158,6 +168,23 @@ namespace alt::detail
 		 * wait for quiescence orders ahead of that destruction, may dereference it.
 		 */
 		io_backend* const backend;
+
+		/**
+		 * The seam an adopted file's operations go through; see the constructor. Equal to
+		 * `backend` unless that is IOCP. Under the same rule as `backend`: a resumption must
+		 * never touch it. Reach for it through backend_for().
+		 */
+		io_backend* const adopted_backend;
+
+		/**
+		 * `backend->kind()`, read at construction. What alt::async_file::backend() reports for
+		 * an opened file, kept here so that call never dereferences a backend that ~file_io
+		 * may already have destroyed.
+		 */
+		const io_backend_kind primary_kind;
+
+		/** `adopted_backend->kind()`, read at construction, for the same reason as primary_kind. */
+		const io_backend_kind adopted_kind;
 
 		/** Where resumptions and permit releases happen. Not owned; fixed at construction. */
 		const scheduler_ref completion;
@@ -198,6 +225,23 @@ namespace alt::detail
 		[[nodiscard]] std::size_t parked_waiters()
 		{
 			return slots.parked();
+		}
+
+		/**
+		 * @brief The backend an operation on @p file must be submitted to.
+		 *
+		 * adopted_backend for a file whose handle was adopted, and backend for everything
+		 * else: a file the service opened, or an operation with no file at all (a path
+		 * operation, an open, run()). Only the submission path calls this, and the operation
+		 * block keeps what it returned, so a cancel goes to the backend its submission did.
+		 */
+		[[nodiscard]] io_backend& backend_for(const io_handle* const file) const noexcept
+		{
+			if(file != nullptr && file->origin() == handle_origin::adopted)
+			{
+				return *adopted_backend;
+			}
+			return *backend;
 		}
 
 		/** @brief Counts one more operation at the backend. Called before each submission. */

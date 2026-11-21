@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.16.0`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.17.0`.
 
 ## Directory layout
 
@@ -203,22 +203,22 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.16.0_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.17.0_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.16.0 REQUIRED)
+find_package(Alt 1.17.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release: the inline
 sizes of the async primitives (`async_event`, `async_mutex`, `task_group`, ...) can
-change between minors. The package config enforces this: `find_package(Alt 1.16.0)`
-accepts 1.16.0 and later 1.16.x releases, but rejects 1.17.0 and 1.15.x, and a request for
-a higher patch than the installed one (1.16.1 against 1.16.0) also fails. When upgrading
+change between minors. The package config enforces this: `find_package(Alt 1.17.0)`
+accepts 1.17.0 and later 1.17.x releases, but rejects 1.18.0 and 1.16.x, and a request for
+a higher patch than the installed one (1.17.1 against 1.17.0) also fails. When upgrading
 across a minor release, update the version your project requests.
 
 A refused request prints which minor series the installed package accepts and why, so a

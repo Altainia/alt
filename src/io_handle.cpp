@@ -13,12 +13,12 @@
 namespace alt::detail
 {
 
-	std::shared_ptr<io_handle> io_handle::adopt(native_handle handle)
+	std::shared_ptr<io_handle> io_handle::adopt(native_handle handle, const handle_origin origin)
 	{
-		return std::make_shared<io_handle>(private_token{}, handle);
+		return std::make_shared<io_handle>(private_token{}, handle, origin);
 	}
 
-	io_handle::io_handle(private_token /*token*/, native_handle handle) noexcept: m_handle(handle)
+	io_handle::io_handle(private_token /*token*/, native_handle handle, const handle_origin origin) noexcept: m_handle(handle), m_origin(origin)
 	{}
 
 	io_handle::~io_handle()

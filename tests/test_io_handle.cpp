@@ -157,3 +157,26 @@ TEST(IoHandleTest, ADescriptorIsNotReusedUnderAHeldReference)
 	EXPECT_EQ(operation->native(), held_fd);
 #endif
 }
+
+TEST(IoHandleTest, AdoptDefaultsToTheAdoptedOrigin)
+{
+	// The default is the safe one: a handle whose preparation nobody vouches for is routed to
+	// the backend that serves any handle.
+	temp_file  file;
+	const auto handle = alt::detail::io_handle::adopt(file.release());
+	EXPECT_EQ(handle->origin(), alt::detail::handle_origin::adopted);
+
+	const auto empty = alt::detail::io_handle::adopt(alt::invalid_native_handle);
+	EXPECT_EQ(empty->origin(), alt::detail::handle_origin::adopted);
+}
+
+TEST(IoHandleTest, AnOpenedOriginIsKept)
+{
+	temp_file  file;
+	const auto handle = alt::detail::io_handle::adopt(file.release(), alt::detail::handle_origin::opened);
+	EXPECT_EQ(handle->origin(), alt::detail::handle_origin::opened);
+
+	// Immutable: asking to close does not change where the handle came from.
+	handle->request_close();
+	EXPECT_EQ(handle->origin(), alt::detail::handle_origin::opened);
+}

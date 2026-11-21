@@ -29,6 +29,7 @@
 
 #include "coroutine_test_support.hpp"
 #include "death_test_support.hpp"
+#include "io_backend_internal.hpp"
 
 #ifdef _WIN32
 // windows.h defines min and max as function-like macros; NOMINMAX is its documented switch to leave them out.
@@ -425,6 +426,12 @@ namespace
 				m_backend = alt::make_thread_pool_backend(*m_pool);
 			}
 			return *m_backend;
+		}
+
+		/// Replaces the backend with one whose open follows @p policy. Call before the first request.
+		void use_policy(const alt::detail::pool_open_policy& policy)
+		{
+			m_backend = alt::detail::make_thread_pool_backend(*m_pool, policy);
 		}
 
 		/// Submits and waits. The request must not need a result beyond the completion.
@@ -1179,6 +1186,102 @@ TEST_F(ThreadPoolBackendTest, PositionalTransfersOnAnAdoptedOverlappedFileHandle
 	}
 	file.reset();
 	EXPECT_EQ(read_whole(path), "hello world");
+}
+
+namespace
+{
+	/// What a prepare hook saw: how often it ran, and the last handle it was given.
+	struct prepare_log
+	{
+		int                calls = 0;
+		alt::native_handle seen  = alt::invalid_native_handle;
+		std::error_code    result;
+	};
+
+	std::error_code record_prepare(void* context, alt::native_handle handle) noexcept
+	{
+		auto& log = *static_cast<prepare_log*>(context);
+		++log.calls;
+		log.seen = handle;
+		return log.result;
+	}
+} // namespace
+
+TEST_F(ThreadPoolBackendTest, AnOpenPolicysPrepareHookSeesTheNewHandleOnce)
+{
+	prepare_log log;
+	use_policy({.extra_flags = 0, .prepare = record_prepare, .context = &log});
+	const auto path = write_file("data.txt", "x");
+
+	const auto file = open_file(path, alt::flags(alt::open_flag::read));
+
+	ASSERT_TRUE(file.has_value());
+	EXPECT_EQ(log.calls, 1);
+	EXPECT_NE(log.seen, alt::invalid_native_handle);
+	EXPECT_EQ(log.seen, (*file)->native());
+}
+
+TEST_F(ThreadPoolBackendTest, AnOpenWhosePrepareHookFailsReportsThatErrorAndLeavesNoHandle)
+{
+	prepare_log log;
+	log.result = std::make_error_code(std::errc::io_error);
+	use_policy({.extra_flags = 0, .prepare = record_prepare, .context = &log});
+	const auto path = write_file("data.txt", "x");
+
+	// A first open settles whatever the process allocates once, so the count below is steady.
+	log.result = {};
+	ASSERT_TRUE(open_file(path, alt::flags(alt::open_flag::read)).has_value());
+	log.result = std::make_error_code(std::errc::io_error);
+	log.calls  = 0;
+
+	DWORD before = 0;
+	ASSERT_NE(::GetProcessHandleCount(::GetCurrentProcess(), &before), FALSE);
+
+	alt::io_open_args  args{.path = path, .open_flags = alt::flags(alt::open_flag::read), .mode = {}};
+	alt::native_handle handle = alt::invalid_native_handle;
+	alt::io_request    request;
+	request.op         = alt::io_op::open;
+	request.in         = &args;
+	request.out        = &handle;
+	const auto outcome = run(request);
+
+	DWORD after = 0;
+	ASSERT_NE(::GetProcessHandleCount(::GetCurrentProcess(), &after), FALSE);
+	EXPECT_EQ(log.calls, 1);
+	EXPECT_EQ(outcome.error, std::errc::io_error);
+	EXPECT_EQ(handle, alt::invalid_native_handle);
+	EXPECT_EQ(after, before) << "the handle the failed open created was not closed";
+}
+
+TEST_F(ThreadPoolBackendTest, AnOpenPolicysExtraFlagsReachCreateFile)
+{
+	use_policy({.extra_flags = static_cast<std::uint32_t>(FILE_FLAG_OVERLAPPED), .prepare = nullptr, .context = nullptr});
+	const std::wstring name = L"\\\\.\\pipe\\alt_open_policy_" + std::to_wstring(::GetCurrentProcessId());
+	scoped_handle      server(::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 0, 0, nullptr));
+	ASSERT_NE(server.value, INVALID_HANDLE_VALUE) << ::GetLastError();
+
+	const auto file = open_file(std::filesystem::path(name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	// The client connected by opening; this only settles the server's side of the handshake.
+	static_cast<void>(::ConnectNamedPipe(server.value, nullptr));
+
+	scoped_handle event(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+	ASSERT_NE(event.value, nullptr);
+	OVERLAPPED position{};
+	position.hEvent = event.value;
+	char       byte = 0;
+	const BOOL done = ::ReadFile(reinterpret_cast<HANDLE>((*file)->native()), &byte, 1, nullptr, &position);
+	// A synchronous handle would have blocked above; an overlapped one answers at once.
+	ASSERT_EQ(done, FALSE);
+	ASSERT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_IO_PENDING));
+
+	DWORD written = 0;
+	ASSERT_NE(::WriteFile(server.value, "z", 1, &written, nullptr), FALSE);
+	ASSERT_EQ(::WaitForSingleObject(event.value, 10'000), WAIT_OBJECT_0);
+	DWORD moved = 0;
+	ASSERT_NE(::GetOverlappedResult(reinterpret_cast<HANDLE>((*file)->native()), &position, &moved, FALSE), FALSE);
+	EXPECT_EQ(moved, 1U);
+	EXPECT_EQ(byte, 'z');
 }
 #endif
 

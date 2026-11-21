@@ -125,7 +125,17 @@ namespace alt
 		 *               std::errc::illegal_seek. One in O_NONBLOCK mode on a device
 		 *               that honours it reports
 		 *               std::errc::resource_unavailable_try_again instead of waiting.
-		 *               Handles opened by file_io::open satisfy all of this.
+		 *               Handles opened by file_io::open satisfy all of this; on Windows,
+		 *               one from an IOCP service is overlapped and associated with that
+		 *               service's completion port (see handle()), which the thread-pool
+		 *               backend that serves an adopted file handles like any overlapped
+		 *               handle.
+		 *
+		 * **Which backend serves it.** On an IOCP service, an adopted file's operations
+		 * go to a thread-pool backend on the service's pool rather than to IOCP, which can
+		 * transfer only on handles its own open prepared, and backend() reports
+		 * io_backend_kind::thread_pool for it. On every other service it is served by,
+		 * and reports, the service's own backend.
 		 */
 		[[nodiscard]] static async_file adopt(const file_io& io, native_handle handle);
 
@@ -233,8 +243,38 @@ namespace alt
 		 *
 		 * For handing to a call the library does not wrap. Do not close it, and do not use
 		 * it after close() or once the file is destroyed.
+		 *
+		 * **On Windows, a file that file_io::open() produced on an IOCP service** (see
+		 * backend()) has a handle opened with FILE_FLAG_OVERLAPPED and associated with the
+		 * service's private completion port, and this returns exactly that handle. So a
+		 * synchronous call on it, a ReadFile or WriteFile with no OVERLAPPED (for example
+		 * inside file_io::run()), is not valid. Use overlapped calls with an event of your
+		 * own, and set the low-order bit of its `hEvent` so that no completion packet is
+		 * queued to the service's port. A packet that does reach the port is ignored, even
+		 * one naming an address that a transfer of the library's still in flight has since
+		 * reused, so such a call cannot disturb the library, but it is a packet the port
+		 * need not have carried. An adopted file's handle is returned as it was adopted.
 		 */
 		[[nodiscard]] native_handle handle() const noexcept;
+
+		/**
+		 * @brief The backend that serves this file's operations.
+		 *
+		 * The same as file_io::backend() of the service that produced the file, with one
+		 * exception: on an IOCP service, a file brought in with adopt() reports
+		 * io_backend_kind::thread_pool, because IOCP can transfer only on handles its own
+		 * open prepared, and an adopted file's operations are served by a thread-pool
+		 * backend on the service's pool instead. That routing is the library's, so a
+		 * consumer who adopts on Windows can see it here rather than discover it.
+		 *
+		 * A file with no service, because it was moved from or closed, reports
+		 * io_backend_kind::thread_pool. A file adopted with invalid_native_handle reports
+		 * what any adopted file on its service would. Never io_backend_kind::automatic.
+		 *
+		 * Reads only values fixed when the service was created, so it is valid even after
+		 * the service is gone.
+		 */
+		[[nodiscard]] io_backend_kind backend() const noexcept;
 
 	private:
 		async_file(std::shared_ptr<detail::io_handle> file, std::shared_ptr<detail::io_shared> owner) noexcept;

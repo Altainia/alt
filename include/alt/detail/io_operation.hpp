@@ -280,6 +280,17 @@ namespace alt::detail
 		/** What the backend gave for this submission, for the cancel hint. Empty until submitted. */
 		io_token token;
 
+		/**
+		 * The backend the submission went to, chosen by io_shared::backend_for() and set
+		 * before submit() is called. Every cancel hint goes here and never to
+		 * `owner->backend`: an IOCP service sends an adopted file's operations to a second
+		 * backend, and a token means nothing to any backend but the one that issued it, so a
+		 * cancel sent elsewhere would be lost, or worse, name another operation. Null until
+		 * submitted; written under `mutex`, and read under it by the stop callback, which
+		 * only cancels once `token` is set.
+		 */
+		io_backend* submitted_to = nullptr;
+
 		/** What the operation produced. Read by await_resume on the resumed path only. */
 		io_completion result;
 

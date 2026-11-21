@@ -3,11 +3,16 @@
 #include <alt/file_io.hpp>
 #include <alt/thread_pool.hpp>
 #include <cassert>
+#include <expected>
 #include <filesystem>
 #include <memory>
 #include <new>
+#include <system_error>
 #include <utility> // std::in_place
 #include <vector>
+
+// Guarded inside: on every other platform it declares nothing.
+#include "io_backend_iocp.hpp"
 
 namespace alt
 {
@@ -120,25 +125,52 @@ namespace alt
 			co_return std::expected<void, std::error_code>{};
 		}
 
-		/**
-		 * Resolves a requested kind to one this build provides.
-		 *
-		 * The probe's structure rather than its content: in 7a `automatic` always
-		 * settles on the thread pool, and a later phase adds branches here ahead of that
-		 * fallback instead of adding a mechanism.
-		 */
-		std::expected<io_backend_kind, std::error_code> probe(const io_backend_kind requested)
+		using built_backend = std::expected<std::unique_ptr<io_backend>, std::error_code>;
+
+#ifdef _WIN32
+		/** Windows' `automatic`: IOCP, or the thread pool if the port or its thread cannot be created. */
+		built_backend automatic_on_windows(thread_pool& workers)
 		{
+			built_backend iocp = detail::make_iocp_backend(workers);
+			if(iocp)
+			{
+				return iocp;
+			}
+			return make_thread_pool_backend(workers);
+		}
+#endif
+
+		/**
+		 * The probe: resolves a requested kind to a backend this build provides, and builds it.
+		 *
+		 * Resolving and building are one step because on Windows whether `automatic` gets IOCP
+		 * depends on whether building it succeeds. It falls back to the thread pool when the
+		 * port or its thread cannot be created, which file_io::backend() then reports; an
+		 * explicit `iocp` request fails with that error instead. A later backend adds its branch
+		 * ahead of the fallback in the same way.
+		 *
+		 * May throw std::bad_alloc, which create() reports.
+		 */
+		built_backend probe(thread_pool& workers, const io_backend_kind requested)
+		{
+			// Each platform-specific case returns ahead of the shared one below it; elsewhere
+			// its label is empty and it falls into that one.
 			switch(requested)
 			{
 			case io_backend_kind::automatic:
+#ifdef _WIN32
+				return automatic_on_windows(workers);
+#endif
 			case io_backend_kind::thread_pool:
-				return io_backend_kind::thread_pool;
+				return make_thread_pool_backend(workers);
+			case io_backend_kind::iocp:
+#ifdef _WIN32
+				return detail::make_iocp_backend(workers);
+#endif
+			case io_backend_kind::io_uring:
+				return std::unexpected(std::make_error_code(std::errc::not_supported));
 			case io_backend_kind::manual:
 				return std::unexpected(std::make_error_code(std::errc::invalid_argument));
-			case io_backend_kind::io_uring:
-			case io_backend_kind::iocp:
-				return std::unexpected(std::make_error_code(std::errc::not_supported));
 			}
 
 			return std::unexpected(std::make_error_code(std::errc::invalid_argument));
@@ -164,18 +196,24 @@ namespace alt
 			return std::unexpected(bad);
 		}
 
-		const std::expected<io_backend_kind, std::error_code> chosen = probe(options.backend);
-		if(!chosen)
-		{
-			return std::unexpected(chosen.error());
-		}
-
 		try
 		{
-			std::unique_ptr<io_backend> owned = make_thread_pool_backend(workers);
+			built_backend built = probe(workers, options.backend);
+			if(!built)
+			{
+				return std::unexpected(built.error());
+			}
+
+			std::unique_ptr<io_backend> owned = std::move(*built);
 			io_backend&                 seam  = *owned;
-			assert(seam.kind() == *chosen && "the backend built is not the one the probe settled on");
-			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, std::move(owned), seam, completion, options.max_in_flight};
+			assert(seam.kind() != io_backend_kind::automatic && (options.backend == io_backend_kind::automatic || seam.kind() == options.backend) && "the probe built a backend other than the one requested");
+
+			// IOCP transfers only on handles its own open prepared, overlapped and associated
+			// with its port, so an adopted file's operations go to a thread-pool backend on the
+			// same pool, which serves any handle. Every other backend serves adopted files itself.
+			std::unique_ptr<io_backend> adopted      = seam.kind() == io_backend_kind::iocp ? make_thread_pool_backend(workers) : nullptr;
+			io_backend&                 adopted_seam = adopted ? *adopted : seam;
+			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, std::move(owned), std::move(adopted), seam, adopted_seam, completion, options.max_in_flight};
 		}
 		catch(const std::bad_alloc&)
 		{
@@ -199,7 +237,8 @@ namespace alt
 
 		try
 		{
-			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, nullptr, backend, completion, options.max_in_flight};
+			// The caller's backend serves adopted files too: there is no second one to route to.
+			return std::expected<file_io, std::error_code>{std::in_place, passkey{}, nullptr, nullptr, backend, backend, completion, options.max_in_flight};
 		}
 		catch(const std::bad_alloc&)
 		{
@@ -207,9 +246,10 @@ namespace alt
 		}
 	}
 
-	file_io::file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, const scheduler_ref completion, const std::size_t max_in_flight):
+	file_io::file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, std::unique_ptr<io_backend> owned_adopted, io_backend& backend, io_backend& adopted_backend, const scheduler_ref completion, const std::size_t max_in_flight):
 	  m_owned_backend(std::move(owned)),
-	  m_shared(std::make_shared<detail::io_shared>(backend, completion, static_cast<std::ptrdiff_t>(max_in_flight))),
+	  m_owned_adopted_backend(std::move(owned_adopted)),
+	  m_shared(std::make_shared<detail::io_shared>(backend, adopted_backend, completion, static_cast<std::ptrdiff_t>(max_in_flight))),
 	  m_kind(backend.kind())
 	{}
 
@@ -228,8 +268,11 @@ namespace alt
 
 		m_shared->stop_accepting();
 
-		// Backend quiescence only. Resumptions the backend has already posted stay on
-		// the completion scheduler, and they hold their own reference to m_shared.
+		// Backend quiescence only, for both backends at once: an IOCP service's second,
+		// adopted-file backend counts its operations in the same m_shared. Both are
+		// destroyed after this returns, which is what each of them requires. Resumptions
+		// a backend has already posted stay on the completion scheduler, and they hold
+		// their own reference to m_shared.
 		m_shared->wait_until_quiet();
 	}
 

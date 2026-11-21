@@ -139,7 +139,7 @@ namespace
 
 	std::shared_ptr<io_shared> make_shared_state(alt::io_backend& backend, const alt::scheduler_ref completion, std::ptrdiff_t max_in_flight = 4)
 	{
-		return std::make_shared<io_shared>(backend, completion, max_in_flight);
+		return std::make_shared<io_shared>(backend, backend, completion, max_in_flight);
 	}
 
 	/**
@@ -329,6 +329,53 @@ namespace
 	{
 		return [&source] { static_cast<void>(source.request_stop()); };
 	}
+
+	/**
+	 * A backend that forwards every submission to another and then, once that submission
+	 * has returned its token, runs a hook. The hook is what reaches io_awaiter::start's
+	 * window between submit() returning and the token being recorded: a stop requested
+	 * there finds the block with no token to cancel, so the cancel is start()'s to issue.
+	 */
+	class hook_after_submit_backend final: public alt::io_backend
+	{
+	public:
+		hook_after_submit_backend(alt::io_backend& inner, std::function<void()> after_submit) noexcept:
+		  m_inner(&inner),
+		  m_after_submit(std::move(after_submit))
+		{}
+
+		hook_after_submit_backend(const hook_after_submit_backend&)            = delete;
+		hook_after_submit_backend& operator=(const hook_after_submit_backend&) = delete;
+		hook_after_submit_backend(hook_after_submit_backend&&)                 = delete;
+		hook_after_submit_backend& operator=(hook_after_submit_backend&&)      = delete;
+		~hook_after_submit_backend() override                                  = default;
+
+		[[nodiscard]] std::expected<alt::io_token, std::error_code> submit(const alt::io_request& request,
+		                                                                   alt::io_completion_fn  on_done,
+		                                                                   void*                  state) override
+		{
+			const auto token = m_inner->submit(request, on_done, state);
+			if(m_after_submit)
+			{
+				m_after_submit();
+			}
+			return token;
+		}
+
+		void cancel(alt::io_token token) noexcept override
+		{
+			m_inner->cancel(token);
+		}
+
+		[[nodiscard]] alt::io_backend_kind kind() const noexcept override
+		{
+			return m_inner->kind();
+		}
+
+	private:
+		alt::io_backend*      m_inner;
+		std::function<void()> m_after_submit;
+	};
 
 	/** The same chain, but reporting what the co_await threw instead of letting it escape. */
 	alt::cancellable_task chain_catching_the_await(std::shared_ptr<io_shared> shared,
@@ -939,5 +986,94 @@ TEST(IoOperationTest, AChainStoppedBeforeTheAwaitNeverReachesTheBackend)
 	EXPECT_FALSE(first->body_ran);
 	EXPECT_EQ(alt_test::live_frames, 0);
 	EXPECT_EQ(shared->slots.available(), 2);
+	EXPECT_EQ(shared->at_backend.load(), 0U);
+}
+
+TEST(IoOperationTest, EachFileIsSubmittedToItsOwnBackendAndCancelledThere)
+{
+	alt_test::reset_coroutine_test_state();
+
+	// Two backends in one service, as an IOCP file_io has: a primary for the files it opened
+	// and a second for the files it adopted. A token means nothing to any backend but the one
+	// that issued it, so the stop callback's cancel must go where the submission did.
+	alt::manual_io_backend primary;
+	alt::manual_io_backend adopted;
+	alt::manual_scheduler  home;
+	const auto             shared      = std::make_shared<io_shared>(primary, adopted, alt::scheduler_ref{home}, 4);
+	const auto             opened_file = io_handle::adopt(alt::invalid_native_handle, alt::detail::handle_origin::opened);
+	const auto             foreign     = io_handle::adopt(alt::invalid_native_handle);
+	const alt::io_buffer   buffer      = alt::io_buffer::allocate(16).value();
+
+	const std::shared_ptr<op_record> on_opened    = std::make_shared<op_record>();
+	const std::shared_ptr<op_record> on_adopted   = std::make_shared<op_record>();
+	alt::cancellation_handle         opened_chain = alt::start(awaiting_chain(shared, read_request(buffer, opened_file), opened_file, on_opened));
+	ASSERT_EQ(primary.pending(), 1U);
+	ASSERT_EQ(adopted.pending(), 0U) << "an opened file's operation reached the adopted backend";
+
+	alt::cancellation_handle adopted_chain = alt::start(awaiting_chain(shared, read_request(buffer, foreign), foreign, on_adopted));
+	ASSERT_EQ(primary.pending(), 1U) << "an adopted file's operation reached the primary backend";
+	ASSERT_EQ(adopted.pending(), 1U);
+
+	// Both backends issued the same token value for their first operation, so a cancel sent
+	// to the wrong one lands on the other file's operation rather than vanishing.
+	EXPECT_TRUE(adopted_chain.request_stop());
+	EXPECT_TRUE(adopted.was_cancelled(0));
+	EXPECT_FALSE(primary.was_cancelled(0)) << "the adopted file's cancel reached the primary backend";
+
+	EXPECT_TRUE(opened_chain.request_stop());
+	EXPECT_TRUE(primary.was_cancelled(0));
+
+	EXPECT_EQ(home.drain(), 2U);
+	primary.complete(0, alt::io_completion{.bytes = 16, .error = {}});
+	adopted.complete(0, alt::io_completion{.bytes = 16, .error = {}});
+	EXPECT_EQ(home.drain(), 0U);
+	EXPECT_FALSE(on_opened->body_ran);
+	EXPECT_FALSE(on_adopted->body_ran);
+	EXPECT_EQ(alt_test::live_frames, 0);
+	EXPECT_EQ(shared->at_backend.load(), 0U);
+}
+
+TEST(IoOperationTest, AStopDuringAnAdoptedFilesSubmitIsCancelledOnTheAdoptedBackend)
+{
+	alt_test::reset_coroutine_test_state();
+
+	// The stop lands after the adopted backend has issued its token and before start() has
+	// recorded it, so the stop callback finds no token to cancel and start() issues the
+	// cancel itself, which must go to the backend the submission went to.
+	alt::manual_io_backend    primary;
+	alt::manual_io_backend    adopted;
+	std::stop_source          source;
+	hook_after_submit_backend stopping{adopted, stop_from_inside_submit(source)};
+	alt::manual_scheduler     home;
+	const auto                shared      = std::make_shared<io_shared>(primary, stopping, alt::scheduler_ref{home}, 4);
+	const auto                opened_file = io_handle::adopt(alt::invalid_native_handle, alt::detail::handle_origin::opened);
+	const auto                foreign     = io_handle::adopt(alt::invalid_native_handle);
+	const alt::io_buffer      buffer      = alt::io_buffer::allocate(16).value();
+
+	// An operation of the primary's own first, so a cancel misrouted there has a token
+	// value to land on.
+	const std::shared_ptr<op_record> on_opened    = std::make_shared<op_record>();
+	alt::cancellation_handle         opened_chain = alt::start(awaiting_chain(shared, read_request(buffer, opened_file), opened_file, on_opened));
+	ASSERT_EQ(primary.pending(), 1U);
+
+	const std::shared_ptr<op_record> on_adopted = std::make_shared<op_record>();
+	static_cast<void>(alt::start(awaiting_chain(shared, read_request(buffer, foreign), foreign, on_adopted), {.token = source.get_token()}));
+	ASSERT_TRUE(source.stop_requested());
+	ASSERT_EQ(adopted.pending(), 1U);
+
+	EXPECT_TRUE(adopted.was_cancelled(0)) << "the stop during submit was never cancelled on the adopted backend";
+	EXPECT_FALSE(primary.was_cancelled(0)) << "the stop during submit was cancelled on the primary backend";
+
+	// The detached chain's teardown, then both operations' completions, which touch no frame.
+	EXPECT_EQ(home.drain(), 1U);
+	adopted.complete(0, alt::io_completion{.bytes = 16, .error = {}});
+	EXPECT_EQ(home.drain(), 0U);
+	EXPECT_FALSE(on_adopted->body_ran);
+
+	primary.complete(0, alt::io_completion{.bytes = 16, .error = {}});
+	EXPECT_EQ(home.drain(), 1U);
+	EXPECT_TRUE(on_opened->body_ran);
+	EXPECT_FALSE(opened_chain.stop_requested());
+	EXPECT_EQ(alt_test::live_frames, 0);
 	EXPECT_EQ(shared->at_backend.load(), 0U);
 }
