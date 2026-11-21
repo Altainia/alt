@@ -564,30 +564,102 @@ TEST_F(AsyncFileTest, TwoPositionalReadsOnOneFileEachGetTheirOwnOffsetsBytes)
 	EXPECT_EQ(text_of(second_buffer, 4), "AAAA");
 }
 
+namespace
+{
+	/**
+	 * Forwards to a manual scheduler, except that while held, a post from any thread but the
+	 * one that built it waits until release(). Posts from the building thread, which include
+	 * an inline completion's, always go straight through, so holding cannot stall the test.
+	 */
+	class holdable_scheduler
+	{
+	public:
+		explicit holdable_scheduler(alt::manual_scheduler& inner): m_inner(&inner), m_owner(std::this_thread::get_id())
+		{}
+
+		void post(alt::work_item item)
+		{
+			if(std::this_thread::get_id() != m_owner)
+			{
+				m_open.wait(false);
+			}
+			m_inner->post(item);
+		}
+
+		void hold()
+		{
+			m_open.store(false);
+		}
+
+		void release()
+		{
+			m_open.store(true);
+			m_open.notify_all();
+		}
+
+	private:
+		alt::manual_scheduler* m_inner;
+		std::thread::id        m_owner;
+		std::atomic<bool>      m_open{true};
+	};
+
+	/** Releases a holdable_scheduler on scope exit, so a failed assertion cannot leave it held. */
+	struct release_on_exit
+	{
+		holdable_scheduler& scheduler;
+
+		explicit release_on_exit(holdable_scheduler& held): scheduler(held)
+		{}
+		release_on_exit(const release_on_exit&)            = delete;
+		release_on_exit& operator=(const release_on_exit&) = delete;
+		release_on_exit(release_on_exit&&)                 = delete;
+		release_on_exit& operator=(release_on_exit&&)      = delete;
+
+		~release_on_exit()
+		{
+			scheduler.release();
+		}
+	};
+} // namespace
+
 TEST_F(AsyncFileTest, ManyConcurrentReadsAllComplete)
 {
-	// More reads than the fixture's max_in_flight of 64, so most of them wait for a permit
+	// More reads than this service's max_in_flight of 256, so some of them wait for a permit
 	// and are submitted as earlier ones complete: every completion must reach its own read,
 	// and none may be lost while the backend has a full complement in flight.
-	constexpr std::size_t count = 200;
+	//
+	// The bound is above the fixture's 64 because 64 is also how many packets the IOCP
+	// backend's completion thread takes per wake. Raising it alone is not enough, though: that
+	// thread keeps up with submissions, so it never found more than a few packets waiting.
+	// Holding its first completion's post until every read is submitted is what lets the
+	// packets pile up behind it, so a wake that fills its whole batch and must go round again
+	// for the rest really happens. On the thread-pool backend the hold only delays the worker.
+	constexpr std::size_t count = 300;
 	std::string           content;
 	for(std::size_t index = 0; index < count; ++index)
 	{
 		content.push_back(static_cast<char>(index));
 	}
-	const auto path = write_file("many.bin", content);
-	auto       file = run(real_io().open(path, alt::flags(alt::open_flag::read)));
+	const auto         path = write_file("many.bin", content);
+	holdable_scheduler completions{home()};
+	auto               service = alt::file_io::create(pool(), alt::scheduler_ref{completions}, alt_test::file_io_options_under_test({.backend = alt::io_backend_kind::automatic, .max_in_flight = 256, .queue_depth = 0}));
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+	auto file = run(service->open(path, alt::flags(alt::open_flag::read)));
 	ASSERT_TRUE(file.has_value());
 
 	using result_type = std::expected<std::size_t, std::error_code>;
 	std::vector<alt::io_buffer>                        buffers;
 	std::vector<std::shared_ptr<outcome<result_type>>> results;
 	std::vector<alt::cancellation_handle>              chains;
-	for(std::size_t index = 0; index < count; ++index)
 	{
-		buffers.push_back(buffer_of(1));
-		results.push_back(std::make_shared<outcome<result_type>>());
-		chains.push_back(alt::start(capture(file->read_at(buffers.back(), index, 1), results.back())));
+		completions.hold();
+		const release_on_exit released{completions};
+		for(std::size_t index = 0; index < count; ++index)
+		{
+			buffers.push_back(buffer_of(1));
+			results.push_back(std::make_shared<outcome<result_type>>());
+			chains.push_back(alt::start(capture(file->read_at(buffers.back(), index, 1), results.back())));
+		}
 	}
 	ASSERT_TRUE(pump_until([&] { return std::ranges::all_of(results, [](const auto& result) { return result->finished; }); }));
 
