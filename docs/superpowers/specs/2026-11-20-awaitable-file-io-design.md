@@ -435,7 +435,7 @@ associated with a completion port gets no packet naming the worker's stack `OVER
 The Windows half of the synchronous-handle precondition is lifted. The 7c question below
 is unchanged: the pool arm can now serve an overlapped handle, but that does not give an
 IOCP backend a way to prepare one.
-**7c must choose among three options, each with a cost (issue #53):**
+**7c had to choose among three options, each with a cost (issue #53):**
 
 1. *Add a registration call to the seam.* Honest, and gives an IOCP backend its hook, but
    it is the widening this phase exists to prevent, and it lands on every backend,
@@ -446,6 +446,35 @@ IOCP backend a way to prepare one.
 3. *Require that adopted handles be prepared for the backend in use.* Cheapest to build,
    but it changes a published public API's requirements in a later minor release, for
    consumers who adopted under the synchronous-handle rule above.
+
+**Decided 2026-11-21 (issue #53): option 2, reported per file, implemented in the file
+layer.** The full analysis is on the issue; the reasoning that decided it:
+
+- **The problem was larger than `adopt()`.** An IOCP backend must know, per transfer,
+  whether *that* handle is prepared, and the seam cannot tell it: `io_request` carries a
+  bare `native_handle`, and a backend never sees a close, because `io_handle`'s
+  destructor calls `CloseHandle` itself. A registry of prepared handles could therefore
+  never retire an entry, and Windows reuses `HANDLE` values, so a closed prepared value
+  can come back as an unprepared adopted one: overlapped I/O on a handle with no port,
+  waiting for a packet that never comes. Option 1 done properly therefore needs handle
+  *lifetimes* on the seam, not one registration call, and `adopt()` (which returns
+  `async_file`, not `expected`) has nowhere to report a preparation that fails.
+- **Option 2 is the only one that changes neither the seam nor a published contract.**
+  The routing decision belongs to the file layer, which knows a file was adopted:
+  `io_shared` holds a second, internal backend pointer to a thread-pool backend, and an
+  adopted file's operations are submitted there whenever the primary backend is IOCP.
+  On every other backend nothing changes, since only IOCP needs a handle prepared.
+- **Since #52 it is correct**, because the pool's transfer arm serves synchronous and
+  overlapped handles alike.
+- **It is not silent.** Each `async_file` reports which backend serves it. That is a
+  public addition, not a break, and it is the one public API change 7c makes, against
+  the staging table's "no public API change": the anti-goal outranks that line.
+- **Its cost falls on no known consumer.** The only adopter the design names is
+  `cpwf`'s `confined_open`, which is `openat2` and so Linux-only, where adopted
+  descriptors need no preparation.
+- **It upgrades additively.** Should a Windows adopter appear, adopted files can move to
+  IOCP by giving the seam handle lifetimes (option 1 done properly, perhaps using
+  `ReOpenFile` to obtain an overlapped handle to the same file), without breaking anyone.
 
 **Batching is a trade the seam made, seen and accepted.** The seam has no batch or flush
 point, and `submit` gives a backend no way to know whether more submissions are coming.
