@@ -1303,6 +1303,7 @@ TEST_F(ThreadPoolBackendTest, ListDirectoryReportsNonAsciiNamesAsUtf8)
 	ASSERT_FALSE(done.error) << done.error.message();
 
 	std::vector<std::string> listed;
+	listed.reserve(entries.size());
 	for(const auto& entry: entries)
 	{
 		listed.push_back(entry.name);
