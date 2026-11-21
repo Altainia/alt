@@ -685,10 +685,9 @@ TEST_F(AsyncFileTest, AStopBetweenThePermitWaitAndTheSubmissionReturnsThePermit)
 
 	EXPECT_FALSE(*submitted);
 	EXPECT_EQ(manual_backend().pending(), 0U);
-	// The only permit there is. Had the abandoned frame kept it, this would be false and
+	// The only permit there is. Had the abandoned frame kept it, this would be 0 and
 	// every later operation on the service would park forever.
-	EXPECT_TRUE(shared->slots.try_acquire());
-	shared->slots.release();
+	EXPECT_EQ(shared->slots.available(), 1);
 }
 
 TEST_F(AsyncFileTest, AStopWhileParkedOnTheBackpressureLimitDeliversNothingAndLeavesTheLimitUsable)
@@ -729,7 +728,5 @@ TEST_F(AsyncFileTest, AStopWhileParkedOnTheBackpressureLimitDeliversNothingAndLe
 
 	// Exactly one permit exists: the stopped waiter neither kept one nor returned two.
 	const auto shared = alt::detail::file_io_access::shared(*service);
-	EXPECT_TRUE(shared->slots.try_acquire());
-	EXPECT_FALSE(shared->slots.try_acquire());
-	shared->slots.release();
+	EXPECT_EQ(shared->slots.available(), 1);
 }

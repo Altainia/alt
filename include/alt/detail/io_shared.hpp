@@ -15,6 +15,74 @@
 
 namespace alt::detail
 {
+	class io_permit;
+	class io_permit_awaiter;
+	class io_awaiter;
+	struct io_operation;
+
+	/**
+	 * @brief The backpressure permits: an async_semaphore only the permit machinery can touch.
+	 *
+	 * Awaiting the semaphore directly yields a permit held in a plain wait result, which is
+	 * lost for good if the chain is cancelled before the next await, because the cancellation
+	 * check destroys the frame ahead of the awaiter that would have released it. Releasing it
+	 * directly can return a permit that was never taken. Both halves of that contract are
+	 * therefore private here: io_permit_awaiter takes a permit and wraps it in an io_permit,
+	 * and io_permit, io_operation and io_awaiter are the only code that puts one back.
+	 *
+	 * A permit is put back by the operation's own code only: the io_permit destructor for one
+	 * never submitted, io_awaiter::start's failure paths, or the operation block's posted
+	 * resumption for one that was. Never by the backend's callback, because
+	 * async_semaphore::release() resumes a parked waiter inline on the releasing thread and
+	 * that would put the next operation's submission on an I/O thread. See
+	 * alt::detail::io_awaiter, which states the invariant that buys.
+	 */
+	class permit_pool
+	{
+	public:
+		/** @brief A pool of @p permits, all free. */
+		explicit permit_pool(const std::ptrdiff_t permits): m_semaphore(permits)
+		{}
+
+		/** @brief How many permits are free right now. A snapshot: it takes and returns nothing. */
+		[[nodiscard]] std::ptrdiff_t available() const noexcept
+		{
+			return m_semaphore.available();
+		}
+
+		/**
+		 * @brief How many operations are parked waiting for a permit.
+		 *
+		 * An upper bound, like waiter_list::size(): an operation already claimed by a cancel
+		 * but not yet unlinked still counts. Reached through a throwaway awaiter's list
+		 * because the semaphore keeps its queue private; the awaiter is never awaited, so this
+		 * takes no permit.
+		 */
+		[[nodiscard]] std::size_t parked()
+		{
+			return async_semaphore::semaphore_awaiter{m_semaphore}.list().size();
+		}
+
+	private:
+		friend class io_permit;
+		friend class io_permit_awaiter;
+		friend class io_awaiter;
+		friend struct io_operation;
+
+		/** @brief The semaphore to wait on. Only io_permit_awaiter, which wraps the permit it gets, calls this. */
+		[[nodiscard]] async_semaphore& semaphore() noexcept
+		{
+			return m_semaphore;
+		}
+
+		/** @brief Puts one permit back, resuming a parked waiter inline on the calling thread. Exactly once per permit. */
+		void release()
+		{
+			m_semaphore.release();
+		}
+
+		async_semaphore m_semaphore;
+	};
 
 	/**
 	 * @brief The part of a file I/O service that an in-flight operation co-owns.
@@ -78,16 +146,8 @@ namespace alt::detail
 		io_shared(io_shared&&)                 = delete;
 		io_shared& operator=(io_shared&&)      = delete;
 
-		/**
-		 * @brief The backpressure permits, one per operation that may be at the backend.
-		 *
-		 * Awaited by the operation's own coroutine before it submits, and released by the
-		 * operation block's posted resumption -- never by the backend's callback, because
-		 * alt::async_semaphore::release() resumes a parked waiter inline on the releasing
-		 * thread and that would put the next operation's submission on an I/O thread. See
-		 * alt::detail::io_awaiter, which states the invariant that buys.
-		 */
-		async_semaphore slots;
+		/** @brief The backpressure permits, one per operation that may be at the backend. */
+		permit_pool slots;
 
 		/**
 		 * The seam. Not owned, and fixed at construction; see the constructor.
@@ -129,36 +189,15 @@ namespace alt::detail
 		std::condition_variable quiet;
 
 		/**
-		 * @brief An awaitable for one backpressure permit.
-		 *
-		 * The first of an operation's two suspension points, and a plain
-		 * alt::async_semaphore wait, so cancellation while parked here costs nothing and
-		 * involves no kernel: the awaiting chain is released with
-		 * std::errc::operation_canceled and the operation never reaches the backend at
-		 * all. The interesting cancellation window is only the submitted phase.
-		 *
-		 * Reserved for the permit machinery's own bookkeeping (parked_waiters() reaches the
-		 * semaphore's queue through it). An operation takes its permit with
-		 * alt::detail::acquire_permit(), which cannot lose it: a permit held in the plain wait
-		 * result this returns is lost for good if the chain is cancelled before the next
-		 * await, because the cancellation check destroys the frame ahead of the awaiter that
-		 * would have released it.
-		 */
-		[[nodiscard]] async_semaphore::semaphore_awaiter acquire_slot() noexcept
-		{
-			return async_semaphore::semaphore_awaiter{slots};
-		}
-
-		/**
 		 * @brief How many operations are parked waiting for a permit.
 		 *
-		 * An upper bound, like waiter_list::size(): an operation already claimed by a
-		 * cancel but not yet unlinked still counts. Reached through the awaiter's list
-		 * because the semaphore keeps its queue private; ~file_io asserts this is zero.
+		 * See permit_pool::parked(), which holds the semaphore this reads; ~file_io asserts
+		 * this is zero. There is no member that returns an awaiter on the permits: see permit_pool
+		 * for why only alt::detail::acquire_permit() may take one.
 		 */
 		[[nodiscard]] std::size_t parked_waiters()
 		{
-			return acquire_slot().list().size();
+			return slots.parked();
 		}
 
 		/** @brief Counts one more operation at the backend. Called before each submission. */
@@ -317,7 +356,7 @@ namespace alt::detail
 	{
 	public:
 		/** @brief Waits on @p owner's slots. */
-		explicit io_permit_awaiter(std::shared_ptr<io_shared> owner): m_inner{owner->slots}, m_owner(std::move(owner))
+		explicit io_permit_awaiter(std::shared_ptr<io_shared> owner): m_inner{owner->slots.semaphore()}, m_owner(std::move(owner))
 		{}
 
 		/** @brief Ready when a permit is free. */

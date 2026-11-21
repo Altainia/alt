@@ -225,6 +225,7 @@ Making the operation a coroutine instead gets all of that free:
 alt::task<std::expected<std::size_t, std::error_code>>
 async_file::read_at(io_buffer buffer, std::uint64_t offset, std::size_t size)
 {
+    // SUPERSEDED: acquire_slot() is gone and this leaks the permit if the chain is cancelled; use detail::acquire_permit().
     const auto slot = co_await m_io->acquire_slot();   // backpressure; cancellable
     co_return co_await m_io->submit_read(m_handle, std::move(buffer), offset, size);
 }
