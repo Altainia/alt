@@ -675,14 +675,19 @@ namespace
 	/// Handles to @p count distinct pool workers that GetThreadIOPendingFlag can query, learned by
 	/// running one job on each: every job waits until all have arrived, so no thread runs two.
 	/// @p count must not exceed the pool's thread count, or this never returns.
+	///
+	/// The probe is shared, not on this frame: wait() can return while a worker is still inside
+	/// arrive_and_wait(), and a latch destroyed under it leaves that worker parked for good on
+	/// whatever the reused memory holds, one pool thread short for the rest of the test.
 	std::vector<scoped_handle> worker_threads(alt::thread_pool& pool, std::ptrdiff_t count)
 	{
-		threads_probe probe(count);
+		const auto probe = std::make_shared<threads_probe>(count);
 		for(std::ptrdiff_t i = 0; i < count; ++i)
 		{
 			pool.post(alt::work_item{.invoke = +[](void* state) noexcept {
-				                         auto&      p    = *static_cast<threads_probe*>(state);
-				                         const auto slot = static_cast<std::size_t>(p.next.fetch_add(1));
+				                         const std::unique_ptr<std::shared_ptr<threads_probe>> owner(static_cast<std::shared_ptr<threads_probe>*>(state));
+				                         auto&                                                 p    = **owner;
+				                         const auto                                            slot = static_cast<std::size_t>(p.next.fetch_add(1));
 				                         // GetCurrentThread() is a pseudo-handle that means "the caller" on
 				                         // every thread; duplicating it yields a real handle to this worker.
 				                         // GetThreadIOPendingFlag needs the full query right: with
@@ -693,12 +698,12 @@ namespace
 				                         }
 				                         p.arrived.arrive_and_wait();
 			                         },
-			                         .state = &probe});
+			                         .state = new std::shared_ptr<threads_probe>(probe)});
 		}
-		probe.arrived.wait();
+		probe->arrived.wait();
 		std::vector<scoped_handle> workers;
-		workers.reserve(probe.handles.size());
-		for(HANDLE handle: probe.handles)
+		workers.reserve(probe->handles.size());
+		for(HANDLE handle: probe->handles)
 		{
 			workers.emplace_back(handle);
 		}
@@ -1090,7 +1095,9 @@ TEST(ThreadPoolBackendConcurrencyTest, OneOverlappedTransferCompletingDoesNotFin
 	waiter second;
 	ASSERT_TRUE(backend->submit(transfer_on(pipe.server.value, alt::io_op::read, std::move(*second_buffer), 0, 4), deliver, &second).has_value());
 	pipe_releaser second_releaser(pipe.client, second);
-	ASSERT_TRUE(wait_until([&] { return first.calls.load() != 0 || second.calls.load() != 0 || pending_count() == 2; }));
+	ASSERT_TRUE(wait_until([&] { return first.calls.load() != 0 || second.calls.load() != 0 || pending_count() == 2; }))
+	  << "both reads never showed as in flight: worker 0 pending=" << has_pending_io(workers[0].value).value_or(false)
+	  << ", worker 1 pending=" << has_pending_io(workers[1].value).value_or(false);
 	ASSERT_EQ(first.calls.load(), 0) << "the first read finished before anything was written";
 	ASSERT_EQ(second.calls.load(), 0) << "the second read finished before anything was written";
 
