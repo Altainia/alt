@@ -83,8 +83,11 @@ New to 7c:
   (CLAUDE.md). Every cancellation test here runs on the three MSVC CI legs, which are the
   only ones that compile this backend at all.
 - **The backend is compiled only on Windows** (`#ifdef _WIN32`, the parent's file layout:
-  `src/io_backend_iocp.cpp`), so `clang-tidy`, cppcheck, GCC, Clang, TSan and Coverage
-  never see it. MSVC `/W4 /WX` and MSVC ASan are its only automated gates.
+  `src/io_backend_iocp.cpp`), so `clang-tidy`, GCC, Clang, TSan and Coverage never see it.
+  cppcheck does: the `cppcheck` target walks every preprocessor configuration of each
+  `src/*.cpp`, `_WIN32` included, so it analyzes this file on Linux too, though without the
+  Windows headers' declarations. MSVC `/W4 /WX` and MSVC ASan are its only gates that
+  compile it.
 
 ## Approaches
 

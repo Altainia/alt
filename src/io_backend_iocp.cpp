@@ -159,18 +159,17 @@ namespace alt::detail
 				// here is a caller's bug. Freeing it would hand the kernel freed memory to complete
 				// into, and leaking it would leave a packet for a thread about to be gone, so neither
 				// is a way out: debug builds say why, and every build stops.
-				assert(!in_flight && "IOCP backend destroyed with transfers in flight");
 				if(in_flight)
 				{
+					assert(false && "IOCP backend destroyed with transfers in flight");
 					std::terminate();
 				}
 				// The same for an operation forwarded to the pool and not yet done with this backend:
 				// a queued open would run its prepare hook later against the port closed below, whose
 				// handle value may by then name another port.
-				const bool forwarding = m_forwarded.load() != 0;
-				assert(!forwarding && "IOCP backend destroyed with forwarded operations in flight");
-				if(forwarding)
+				if(m_forwarded.load() != 0)
 				{
+					assert(false && "IOCP backend destroyed with forwarded operations in flight");
 					std::terminate();
 				}
 				if(m_thread.joinable())
