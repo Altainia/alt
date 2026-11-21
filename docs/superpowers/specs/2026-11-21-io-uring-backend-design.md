@@ -170,7 +170,7 @@ immediately why there is none.
 | Path | Contents |
 |------|----------|
 | `src/io_backend_io_uring.hpp` | Factory and test accessors, entire contents guarded by `#ifdef __linux__`, exactly as `io_backend_iocp.hpp` guards on `_WIN32`. Declares nothing elsewhere. |
-| `src/io_backend_io_uring.cpp` | The backend. The only translation unit that includes `<liburing.h>`. |
+| `src/io_backend_io_uring.cpp` | The backend. The only translation unit that includes `<liburing.h>`. The test file reaches `<liburing/io_uring.h>`, the kernel ABI header alone, to synthesize an `io_uring_probe`; see Testing. |
 | `src/file_io.cpp` | A Linux `automatic` branch and the `io_uring` case in `probe()`; `probe()` gains the queue depth. |
 | `tests/test_io_backend_io_uring.cpp` | The backend's own tests, registered in `tests/CMakeLists.txt`. |
 | `CMakeLists.txt`, `cmake/AltConfig.cmake.in`, `packaging/`, `.github/workflows/ci.yml`, `CLAUDE.md`, `README.md` | Dependency wiring and documentation. |
@@ -234,7 +234,20 @@ So the design is:
   `io_uring_queue_init_params`, to at least `max_in_flight` plus the reserved internal
   completions (the wake-up NOP and one cancel per in-flight operation). Completion-queue
   overflow is then unreachable *by construction* rather than by assumption, whatever
-  `queue_depth` the caller passes.
+  `queue_depth` the caller passes — **for `max_in_flight` up to and including 32767, and
+  not above it.** Covering `max_in_flight` costs `2 * max_in_flight + 1` entries, and
+  `IORING_MAX_CQ_ENTRIES` is 65536: 32767 needs 65535 and fits, 32768 needs 65537 and is
+  one entry short, and larger values fall further behind. *(Corrected during phase 7b
+  implementation; the sentence above was unqualified and the arithmetic does not support
+  it. The original wording was carried into the backend's own documentation before it was
+  caught, which is why it is corrected here as well as there.)*
+- **Above that bound the value is accepted, not refused**, and the guarantee weakens from
+  unreachable to merely safe. Every kernel that passes the capability check is 5.6 or
+  newer, hence sets `IORING_FEAT_NODROP`, under which an overflowing completion goes to a
+  kernel-side backlog and further submissions are refused with `EBUSY` rather than a
+  completion being dropped. No callback is lost at any `max_in_flight`. `file_io::create`
+  validates `max_in_flight` only against zero, so an extreme value is reachable through
+  the public API, and refusing a legal `std::size_t` there would be the worse contract.
 - Consequently **the factory takes `max_in_flight` as well as `queue_depth`**. The two
   bound different rings and only the caller knows both.
 - **Submission is serialized by a mutex.** liburing's `io_uring_get_sqe` and
@@ -427,7 +440,11 @@ same harness rather than growing a parallel set of file-layer tests.
   the ring, which is where the submission mutex and the permit bound interact.
 - The depth actually in effect, through the test accessor, for `queue_depth` zero and
   non-zero, and that the completion ring is sized at least to cover `max_in_flight` plus
-  the reserved internal completions.
+  the reserved internal completions. **Including the boundary**: the largest
+  `max_in_flight` the bound above covers, and the first value past it, which must build a
+  ring rather than be refused. A `>= max_in_flight` assertion is too weak to pin any of
+  this, because the kernel's own default of twice the submission ring satisfies it by
+  accident at most depths.
 - The capability check: all four opcodes present on this machine, and — since it cannot be
   made to fail here — that the factory's `not_supported` path is reached when the check is
   made to report a missing opcode. If that cannot be injected without a production hook,
@@ -470,6 +487,18 @@ check is the mitigation, and it is the one place where getting this wrong produc
 backend that is selected and then fails every transfer. It needs a test that the check is
 actually consulted, not merely present.
 
+*Implementation note, phase 7b:* this requirement is **half met**, deliberately and on
+record. The decision was factored into a pure predicate,
+`detail::io_uring_probe_has_required_opcodes`, declared in the backend's private header so
+the suite drives it with a **synthetic** `io_uring_probe` — one opcode's
+`IO_URING_OP_SUPPORTED` bit cleared, and a `last_op` below `IORING_OP_READ`, which is the
+5.1-to-5.5 kernel's own shape. So "a missing opcode is refused" is a tested fact with
+mutations of record. That the **factory calls** the predicate is still untested: on a
+kernel with all four opcodes the refusal is unreachable, and the measured evidence is that
+deleting `check_capabilities()`'s call from the factory leaves the whole suite green. A
+test for that last step needs an injectable probe, i.e. a production hook, which this
+phase does not add.
+
 **AddressSanitizer and kernel writes.** Lower risk: the kernel writes within an allocation
 ASan knows about. Worth confirming early rather than assuming.
 
@@ -507,7 +536,7 @@ is on record:
 
 | Raised | Settled as |
 |--------|-----------|
-| `queue_depth`'s real meaning, given the submission queue drains on every submit | It sizes the submission ring; the completion ring is sized independently with `IORING_SETUP_CQSIZE`. The factory takes both bounds. The earlier "full queue" test was wrong and is removed. |
+| `queue_depth`'s real meaning, given the submission queue drains on every submit | It sizes the submission ring; the completion ring is sized independently with `IORING_SETUP_CQSIZE`, covering `max_in_flight` up to 32767 and clamped to the kernel's ceiling above that (see "The ring, its depth, and submission"). The factory takes both bounds. The earlier "full queue" test was wrong and is removed. |
 | Whether opcode support needs probing | Yes — one all-or-nothing check. The earlier claim that ring creation implies support was false. |
 | Whether a cancelled operation must report `operation_canceled` | No. The `detached` branch never reads the completion, so tests assert invariants only. |
 | Parity with the pool arm's clamping, `EINTR` and error mapping | Share one `transfer_size` and one errno mapping via `io_backend_internal.hpp`; `EINTR` is the reaper's concern; the ~2 GiB cap is a short count returned as-is. |

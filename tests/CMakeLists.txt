@@ -95,6 +95,17 @@ target_include_directories(alt_tests
         ${PROJECT_SOURCE_DIR}/src
 )
 
+# test_io_backend_io_uring.cpp includes <liburing/io_uring.h> -- the kernel ABI definitions
+# alone, not liburing's API -- so that it can build an io_uring_probe by hand and put it through
+# the backend's capability predicate. A probe reporting a missing opcode is not obtainable from
+# any kernel this project builds on, so synthesizing one is the only way that refusal is
+# observable. The header needs no link, only its include directory, which on Debian and Ubuntu is
+# /usr/include and contributes no -I at all; linking the imported target is what carries the
+# directory where a distribution puts it elsewhere.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(alt_tests PRIVATE PkgConfig::LIBURING)
+endif()
+
 alt_add_warnings(alt_tests)
 
 # MSVC's optimizer reports C4702 "unreachable code" after inlining, and test_scope.cpp

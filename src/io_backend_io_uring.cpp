@@ -25,6 +25,14 @@
 
 namespace alt::detail
 {
+	bool io_uring_probe_has_required_opcodes(const ::io_uring_probe& probe) noexcept
+	{
+		// Four calls rather than a loop over a table: the list is fixed, short, and every entry is
+		// named at the one place a reader will look for it.
+		return io_uring_opcode_supported(&probe, IORING_OP_READ) != 0 && io_uring_opcode_supported(&probe, IORING_OP_WRITE) != 0 &&
+		       io_uring_opcode_supported(&probe, IORING_OP_FSYNC) != 0 && io_uring_opcode_supported(&probe, IORING_OP_ASYNC_CANCEL) != 0;
+	}
+
 	namespace
 	{
 		/**
@@ -68,9 +76,19 @@ namespace alt::detail
 		/**
 		 * The two bounds the ring sizes are derived from.
 		 *
-		 * A struct rather than a pair of parameters so that the two cannot be passed the wrong way
-		 * round: they are both counts of the same type, they mean entirely different things, and
-		 * swapping them would produce a working ring of the wrong shape rather than an error.
+		 * A struct rather than a pair of parameters so that the derivation's one call site names
+		 * both values instead of passing them positionally: they are counts of the same type, they
+		 * mean entirely different things, and swapping them would produce a working ring of the
+		 * wrong shape rather than an error.
+		 *
+		 * It does NOT remove that hazard from the path as a whole, and should not be read as
+		 * having done so. make_io_uring_backend() and create_ring() both still take the pair as
+		 * two adjacent std::size_t parameters, and a caller that swaps them there gets no
+		 * diagnostic from the compiler or from clang-tidy, whose
+		 * bugprone-easily-swappable-parameters suppresses a pair that is passed straight on to one
+		 * other call -- which is exactly what each of those two does. The FACTORY'S boundary is
+		 * where the hazard is live, so a call site there names both values; the factory's own
+		 * documentation says so.
 		 */
 		struct ring_bounds
 		{
@@ -97,6 +115,22 @@ namespace alt::detail
 		 * can be in flight at once -- and never below the submission ring, which the kernel
 		 * requires. Completion-queue overflow is then unreachable by construction rather than by
 		 * assumption, whatever depth the caller passes.
+		 *
+		 * **That holds for max_in_flight up to and including 32767, and not above it.** Covering
+		 * max_in_flight needs `2 * max_in_flight + 1` completion entries, and the kernel's ceiling
+		 * is 65536: 32767 needs 65535 and gets 65536, while 32768 needs 65537 and gets 65536, one
+		 * entry short. Larger values fall further behind, since in_flight below is clamped to
+		 * 32768 before `reserved` is computed, so a max_in_flight of 100000 is permitted against a
+		 * completion ring of 65536.
+		 *
+		 * Above the bound the guarantee weakens from unreachable to merely safe, and an extreme
+		 * max_in_flight is accepted rather than refused: refusing a legal std::size_t for it would
+		 * be the worse contract, and the degradation is benign. Every kernel that passes the
+		 * capability check is 5.6 or newer, hence sets IORING_FEAT_NODROP, under which an
+		 * overflowing completion goes to a kernel-side backlog and further submissions are refused
+		 * with EBUSY -- which submit() already reports as the errno it is -- rather than a
+		 * completion being dropped. No callback is lost at any max_in_flight; only the "cannot
+		 * happen" claim is.
 		 *
 		 * Both counts are clamped to the kernel's ceilings here, which is what turns an
 		 * out-of-range request into a working ring instead of the EINVAL io_uring_setup answers it
@@ -222,8 +256,11 @@ namespace alt::detail
 				{
 					return not_supported;
 				}
-				const bool supported = io_uring_opcode_supported(probe, IORING_OP_READ) != 0 && io_uring_opcode_supported(probe, IORING_OP_WRITE) != 0 &&
-				                       io_uring_opcode_supported(probe, IORING_OP_FSYNC) != 0 && io_uring_opcode_supported(probe, IORING_OP_ASYNC_CANCEL) != 0;
+				// The decision itself lives in io_uring_probe_has_required_opcodes(), which the
+				// header exports so the suite can put a synthetic probe through it. What is left
+				// here is the part a test cannot reach: asking the running kernel, and acting on
+				// the answer.
+				const bool supported = io_uring_probe_has_required_opcodes(*probe);
 				io_uring_free_probe(probe);
 				return supported ? std::error_code{} : not_supported;
 			}

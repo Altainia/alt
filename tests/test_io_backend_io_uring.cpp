@@ -8,6 +8,7 @@
 #	include <alt/io_backend.hpp>
 #	include <alt/io_buffer.hpp>
 #	include <alt/thread_pool.hpp>
+#	include <liburing/io_uring.h>
 #	include <atomic>
 #	include <chrono>
 #	include <cstddef>
@@ -21,6 +22,8 @@
 #	include <memory>
 #	include <semaphore>
 #	include <string>
+#	include <string_view>
+#	include <vector>
 #	include <system_error>
 #	include <thread>
 #	include <unistd.h>
@@ -44,6 +47,54 @@ namespace
 	 * to one translation unit in src/, and no header this suite can reach names the constant.
 	 */
 	constexpr std::size_t max_submission_entries = 32768;
+
+	/// The most completion entries io_uring_setup accepts (IORING_MAX_CQ_ENTRIES). Same reason for the literal.
+	constexpr std::size_t max_completion_entries = 2 * max_submission_entries;
+
+	/// The lead of the skip a large-ring test takes when the kernel cannot spare the memory.
+	constexpr std::string_view largest_ring_skip_reason = "the largest ring the kernel allows does not fit this environment's budget: ";
+
+	/**
+	 * A probe built by hand, so that "an opcode is missing" is a case a test can produce.
+	 *
+	 * io_uring_probe is a kernel ABI struct with a flexible array of per-opcode entries, declared
+	 * in <liburing/io_uring.h>, which is the header this file includes: the ABI definitions
+	 * alone, not liburing's own API. Building one needs no library call and nothing newer than
+	 * the project's liburing floor, so this is portable rather than a trick that works here.
+	 *
+	 * @p missing is the one opcode whose IO_URING_OP_SUPPORTED bit is cleared, or -1 for a probe
+	 * that reports everything. @p last_op is the highest opcode the probe claims to describe; an
+	 * opcode above it reads as unsupported, which is how a kernel too old to know an opcode
+	 * answers.
+	 */
+	class synthetic_probe
+	{
+	public:
+		synthetic_probe(const int last_op, const int missing)
+		{
+			const std::size_t described = static_cast<std::size_t>(last_op) + 1;
+			m_bytes.assign(sizeof(io_uring_probe) + (described * sizeof(io_uring_probe_op)), 0);
+			io_uring_probe& probe = get();
+			probe.last_op         = static_cast<unsigned char>(last_op);
+			probe.ops_len         = static_cast<unsigned char>(described);
+			for(int op = 0; op <= last_op; ++op)
+			{
+				probe.ops[op].op    = static_cast<unsigned char>(op);
+				probe.ops[op].flags = op == missing ? 0 : static_cast<unsigned short>(IO_URING_OP_SUPPORTED);
+			}
+		}
+
+		[[nodiscard]] io_uring_probe& get()
+		{
+			return *reinterpret_cast<io_uring_probe*>(m_bytes.data());
+		}
+
+	private:
+		std::vector<unsigned char> m_bytes;
+	};
+
+	/// The highest opcode this suite's synthetic probes describe: above every opcode the backend needs.
+	constexpr int highest_probed_opcode = IORING_OP_WRITE + 1;
 
 	/// Blocks a pool thread until the test lets it go.
 	struct blocker
@@ -202,6 +253,19 @@ namespace
 			return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 		}
 
+		/**
+		 * Whether @p made failed only because the ring did not fit this environment's memory
+		 * budget, rather than because of anything this code decided.
+		 *
+		 * The largest ring the kernel allows is a few megabytes of kernel memory, which a
+		 * constrained container may refuse. A sizing or clamping regression reports EINVAL rather
+		 * than ENOMEM, so a test that skips on this cannot be hiding one.
+		 */
+		static bool ring_did_not_fit(const std::expected<std::unique_ptr<alt::io_backend>, std::error_code>& made)
+		{
+			return !made && made.error() == std::errc::not_enough_memory;
+		}
+
 		static alt::io_buffer buffer_of(std::size_t size)
 		{
 			auto buffer = alt::io_buffer::allocate(size);
@@ -253,11 +317,14 @@ TEST_F(IoUringBackendTest, SizesTheCompletionRingForMaxInFlightEvenAtDepthOne)
 	// The caller asked for the smallest submission ring there is, and got it.
 	EXPECT_EQ(alt::detail::io_uring_submission_depth_for_testing(*built), 1U);
 	// The completion ring is sized from max_in_flight regardless, so completion-queue overflow is
-	// unreachable at any queue_depth rather than only at a generous one.
-	EXPECT_GE(alt::detail::io_uring_completion_depth_for_testing(*built), default_max_in_flight);
+	// unreachable at any queue_depth rather than only at a generous one. The full bound is
+	// asserted here, reserved internal completions included, rather than a weaker
+	// `>= max_in_flight` that the kernel's own default of twice the submission ring could satisfy
+	// by accident at a larger depth.
+	EXPECT_GE(alt::detail::io_uring_completion_depth_for_testing(*built), default_max_in_flight + default_max_in_flight + 1);
 }
 
-TEST_F(IoUringBackendTest, HonoursAnExplicitQueueDepth)
+TEST_F(IoUringBackendTest, HonorsAnExplicitQueueDepth)
 {
 	const auto exact = build(128, default_max_in_flight);
 	ASSERT_NE(exact, nullptr);
@@ -276,14 +343,55 @@ TEST_F(IoUringBackendTest, ClampsAQueueDepthLargerThanTheKernelAllows)
 	// clamp is what turns an out-of-range queue_depth into a working ring instead of EINVAL. The
 	// factory is called directly rather than through build(), which cannot tell the two apart.
 	auto made = alt::detail::make_io_uring_backend(pool(), 1U << 20U, default_max_in_flight);
-	if(!made && made.error() == std::errc::not_enough_memory)
+	if(ring_did_not_fit(made))
 	{
-		// The largest ring the kernel allows is a few megabytes of its memory. A clamp regression
-		// reports EINVAL rather than this, so skipping here does not hide one.
-		GTEST_SKIP() << "the largest ring the kernel allows does not fit this environment's budget: " << made.error().message();
+		GTEST_SKIP() << largest_ring_skip_reason << made.error().message();
 	}
 	ASSERT_TRUE(made.has_value()) << "an out-of-range queue_depth must be clamped, not refused: " << made.error().message();
 	EXPECT_EQ(alt::detail::io_uring_submission_depth_for_testing(**made), max_submission_entries);
+}
+
+/**
+ * The upper edge of the completion ring's documented guarantee: the largest max_in_flight it
+ * covers.
+ *
+ * Covering max_in_flight costs `2 * max_in_flight + 1` completion entries -- one per operation,
+ * one cancel per operation, and the wake-up NOP -- against a kernel ceiling of 65536. 32767 needs
+ * 65535 and is the last value that fits.
+ */
+TEST_F(IoUringBackendTest, CoversTheLargestMaxInFlightItDocuments)
+{
+	constexpr std::size_t in_flight = 32767;
+	auto                  made      = alt::detail::make_io_uring_backend(pool(), 0, in_flight);
+	if(ring_did_not_fit(made))
+	{
+		GTEST_SKIP() << largest_ring_skip_reason << made.error().message();
+	}
+	ASSERT_TRUE(made.has_value()) << made.error().message();
+	EXPECT_GE(alt::detail::io_uring_completion_depth_for_testing(**made), in_flight + in_flight + 1);
+}
+
+/**
+ * And the first max_in_flight above that edge, which the documentation says is accepted rather
+ * than refused, with the completion ring clamped to the kernel's ceiling.
+ *
+ * 32768 would need 65537 entries and gets 65536, so overflow stops being unreachable. That is
+ * deliberate and safe: every kernel past the capability check sets IORING_FEAT_NODROP, so an
+ * overflowing completion is backlogged and further submissions refused rather than a completion
+ * dropped. What must not happen is the factory REFUSING the value, which is what this pins.
+ */
+TEST_F(IoUringBackendTest, AcceptsAMaxInFlightAboveTheBoundAndClampsTheCompletionRing)
+{
+	constexpr std::size_t in_flight = 32768;
+	auto                  made      = alt::detail::make_io_uring_backend(pool(), 0, in_flight);
+	if(ring_did_not_fit(made))
+	{
+		GTEST_SKIP() << largest_ring_skip_reason << made.error().message();
+	}
+	ASSERT_TRUE(made.has_value()) << "a max_in_flight past the covered bound must still build a ring: " << made.error().message();
+	EXPECT_EQ(alt::detail::io_uring_completion_depth_for_testing(**made), max_completion_entries);
+	// One short of what covering 32768 would take, which is the whole point of the bound.
+	EXPECT_LT(alt::detail::io_uring_completion_depth_for_testing(**made), in_flight + in_flight + 1);
 }
 
 TEST_F(IoUringBackendTest, ForwardsAnOperationItDoesNotHandleToThePool)
@@ -341,23 +449,54 @@ TEST_F(IoUringBackendTest, AWriteAtPutsBytesAtTheOffset)
 }
 
 /**
- * The capability check, and this suite's deliberate canary.
+ * An ENVIRONMENT canary, and nothing more: this runner can build a backend at all.
  *
- * The factory probes the running kernel for READ, WRITE, FSYNC and ASYNC_CANCEL all-or-nothing
- * and refuses with std::errc::not_supported if any is missing, so a backend that was built at all
- * is the evidence that all four are supported here. Rings have existed since kernel 5.1 while
- * READ and WRITE arrived in 5.6 and ASYNC_CANCEL in 5.5, which is why creating a ring is not that
- * evidence by itself.
+ * It says nothing about whether the factory consults its capability check, and cannot: on a
+ * kernel with all four opcodes -- every kernel this project builds on -- the check's refusal is
+ * unreachable, so deleting the check outright leaves this test green. The decision the check
+ * makes is pinned by AcceptsAProbeReportingEveryOpcodeItNeeds and the two refusal cases below,
+ * which put a synthetic probe through the real predicate. That the factory CALLS the predicate is
+ * untested, and recorded as untested.
  *
- * Its entire job is to FAIL, never to skip, when a ring cannot be created or an opcode is
- * missing: a runner that stops permitting io_uring must turn this suite red rather than leave the
- * whole backend unexercised behind a green sweep. Do not "fix" it into a GTEST_SKIP.
+ * Its entire job is to FAIL, never to skip, when no usable ring can be created: a runner that
+ * stops permitting io_uring must turn this suite red rather than leave the whole backend
+ * unexercised behind a green sweep. Do not "fix" it into a GTEST_SKIP.
  */
-TEST_F(IoUringBackendTest, TheRunnerSupportsEveryOpcodeThisBackendNeeds)
+TEST_F(IoUringBackendTest, TheRunnerProvidesARingThisBackendCanUse)
 {
 	auto made = alt::detail::make_io_uring_backend(pool(), 0, default_max_in_flight);
 	ASSERT_TRUE(made.has_value()) << "io_uring is unavailable or lacks an opcode this backend needs: " << (made ? std::string{} : made.error().message());
 	EXPECT_EQ((*made)->kind(), alt::io_backend_kind::io_uring);
+}
+
+TEST(IoUringCapabilityTest, AcceptsAProbeReportingEveryOpcodeItNeeds)
+{
+	synthetic_probe complete(highest_probed_opcode, -1);
+	EXPECT_TRUE(alt::detail::io_uring_probe_has_required_opcodes(complete.get()));
+}
+
+TEST(IoUringCapabilityTest, RefusesAProbeMissingAnyOneOfTheFour)
+{
+	// One case per opcode, so that dropping any single one of the four from the check is a named
+	// failure rather than a gap another case happens to cover.
+	for(const int opcode: {IORING_OP_READ, IORING_OP_WRITE, IORING_OP_FSYNC, IORING_OP_ASYNC_CANCEL})
+	{
+		synthetic_probe without_one(highest_probed_opcode, opcode);
+		EXPECT_FALSE(alt::detail::io_uring_probe_has_required_opcodes(without_one.get())) << "opcode " << opcode << " is not required by the check";
+	}
+}
+
+/**
+ * A kernel too old to know an opcode reports a last_op below it, rather than a cleared bit.
+ *
+ * This is the 5.1-to-5.5 shape the check exists for: ASYNC_CANCEL is opcode 14 and READ is 22, so
+ * a probe whose last_op is 14 describes a kernel that has cancel and not reads -- exactly the
+ * kernel that creates a ring and then fails every transfer with EINVAL.
+ */
+TEST(IoUringCapabilityTest, RefusesAProbeWhoseHighestOpcodeIsBelowRead)
+{
+	synthetic_probe old_kernel(IORING_OP_ASYNC_CANCEL, -1);
+	EXPECT_FALSE(alt::detail::io_uring_probe_has_required_opcodes(old_kernel.get()));
 }
 
 TEST_F(IoUringBackendTest, CancellingAForwardedOperationReachesThePool)

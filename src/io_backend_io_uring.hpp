@@ -11,6 +11,16 @@
 #	include <system_error>
 
 /**
+ * The kernel's IORING_REGISTER_PROBE result, as liburing's own headers declare it.
+ *
+ * Named by forward declaration so this header stays free of liburing.h, exactly as
+ * io_backend_iocp.hpp keeps windows.h out of include/alt/. A caller that needs the definition --
+ * the suite, which synthesizes one -- includes <liburing/io_uring.h>, the kernel ABI header that
+ * declares it and nothing else.
+ */
+struct io_uring_probe;
+
+/**
  * The io_uring backend. Private to the library: only file_io::create builds one, and the tests
  * include this header to reach it. A consumer has no reason to, and cannot through
  * include/alt/, which never names liburing.h.
@@ -37,14 +47,26 @@ namespace alt::detail
 	 *
 	 * @p queue_depth is the submission ring size, or 0 to derive it from @p max_in_flight; it is
 	 * rounded up to a power of two and clamped to what the kernel allows. The completion ring is
-	 * sized separately from @p max_in_flight, so completion-queue overflow is unreachable by
-	 * construction whatever depth the caller asks for. The two bound different rings, which is why
-	 * both are parameters.
+	 * sized separately, from @p max_in_flight plus the reserved internal completions, so
+	 * completion-queue overflow is unreachable by construction whatever depth the caller asks for
+	 * -- **for @p max_in_flight up to and including 32767.** Above that the bound cannot be met:
+	 * covering it needs `2 * max_in_flight + 1` completion entries and the kernel's ceiling is
+	 * 65536, so the ring is clamped to that ceiling and overflow becomes possible. It is still
+	 * safe. Every kernel that passes the capability check below is 5.6 or newer, hence sets
+	 * IORING_FEAT_NODROP, under which the kernel holds overflowing completions in a backlog and
+	 * refuses further submissions with EBUSY rather than dropping a completion; no callback is
+	 * lost. An extreme @p max_in_flight is therefore accepted, not refused -- refusing a legal
+	 * std::size_t for it would be the worse contract.
+	 *
+	 * @p queue_depth and @p max_in_flight are **both std::size_t and are not distinguishable by
+	 * type**, so a call site that passes them in the wrong order gets a working ring of the wrong
+	 * shape and no diagnostic. Name both values at the call site.
 	 *
 	 * Creating a ring is not evidence that this backend can work: a 5.1 to 5.5 kernel creates one
 	 * and then fails every transfer, because IORING_OP_READ and IORING_OP_WRITE arrived in 5.6 and
-	 * IORING_OP_ASYNC_CANCEL in 5.5. So the running kernel is probed once, all-or-nothing, and a
-	 * missing opcode fails this call with std::errc::not_supported.
+	 * IORING_OP_ASYNC_CANCEL in 5.5. So the running kernel is probed once, all-or-nothing, through
+	 * io_uring_probe_has_required_opcodes() below, and a missing opcode fails this call with
+	 * std::errc::not_supported.
 	 *
 	 * Destroying it with ANY operation in flight is a precondition violation: a ring operation, or
 	 * an operation forwarded to the pool whose callback has not yet run. It asserts, and under
@@ -57,6 +79,24 @@ namespace alt::detail
 	[[nodiscard]] std::expected<std::unique_ptr<io_backend>, std::error_code> make_io_uring_backend(thread_pool& pool,
 	                                                                                                std::size_t  queue_depth,
 	                                                                                                std::size_t  max_in_flight);
+
+	/**
+	 * Whether @p probe reports every opcode this backend submits: READ, WRITE, FSYNC and
+	 * ASYNC_CANCEL.
+	 *
+	 * All-or-nothing on purpose. It is what keeps the capability question one check with one error
+	 * path rather than a per-operation runtime matrix, and the four are wanted together or not at
+	 * all: a backend that cannot cancel cannot honor the seam's cancel, and one that cannot fsync
+	 * would have to route two of its four operations elsewhere.
+	 *
+	 * Declared here rather than kept private to the backend's translation unit so that the suite
+	 * can run it against a SYNTHETIC io_uring_probe with one opcode's bit cleared. That is not a
+	 * test hook into production behavior: this is a pure function of its argument, with no state
+	 * and no side effect, and make_io_uring_backend() decides with this same function. Without it
+	 * exported, "a missing opcode is refused" is unobservable on a machine whose kernel has all
+	 * four, which is every machine this project builds on.
+	 */
+	[[nodiscard]] bool io_uring_probe_has_required_opcodes(const ::io_uring_probe& probe) noexcept;
 
 	/// The submission ring entries @p ring was created with. Precondition: @p ring was built by make_io_uring_backend().
 	[[nodiscard]] std::size_t io_uring_submission_depth_for_testing(const io_backend& ring) noexcept;
