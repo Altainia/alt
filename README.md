@@ -6,6 +6,7 @@ A generic C++23 utility library. Namespace: `alt`.
 
 - CMake 3.25 or later
 - GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026)
+- Linux only: liburing 2.1 or later and `pkg-config` (`liburing-dev` on Debian and Ubuntu)
 
 ## Build
 

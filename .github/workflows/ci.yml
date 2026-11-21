@@ -28,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
       - name: Configure
         run: cmake --preset debug -DALT_WARNINGS_AS_ERRORS=ON
       - name: Build
@@ -41,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang-19
+        run: sudo apt-get update && sudo apt-get install -y clang-19 liburing-dev
       - name: Configure
         run: >
           cmake --preset debug
@@ -58,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
       - name: Configure
         run: cmake --preset debug-asan -DALT_WARNINGS_AS_ERRORS=ON
       - name: Build
@@ -76,6 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
       - name: Configure
         run: cmake --preset debug-tsan -DALT_WARNINGS_AS_ERRORS=ON
       - name: Build
@@ -88,6 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
       - name: Configure
         run: cmake --preset release-tests -DALT_WARNINGS_AS_ERRORS=ON
       - name: Build
@@ -123,7 +131,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Clang and clang-tidy
-        run: sudo apt-get update && sudo apt-get install -y clang-19 clang-tidy-19
+        run: sudo apt-get update && sudo apt-get install -y clang-19 clang-tidy-19 liburing-dev
       - name: Configure
         run: >
           cmake -B build/tidy
@@ -142,7 +150,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install cppcheck
-        run: sudo apt-get update && sudo apt-get install -y cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck liburing-dev
       - name: Configure
         run: cmake --preset debug -DALT_CPPCHECK=ON
       - name: Run cppcheck
@@ -154,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install lcov
-        run: sudo apt-get update && sudo apt-get install -y lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov liburing-dev
       - name: Configure
         run: cmake --preset debug-coverage
       - name: Build

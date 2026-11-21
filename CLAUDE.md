@@ -26,7 +26,8 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
 
-Requires GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026). The
+Requires GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026). Linux builds also
+require liburing 2.1 or later (`liburing-dev`) and `pkg-config`; Windows does not. The
 same presets work on Windows — see "MSVC" under Quality checks.
 
 ## Tests
