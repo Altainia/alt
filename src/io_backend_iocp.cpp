@@ -53,8 +53,8 @@ namespace alt::detail
 		 *
 		 * The OVERLAPPED is the first member, so the address the kernel hands back in a packet is
 		 * the record's own. It is never cast back to one, though: the completion thread finds the
-		 * record by that address in the registry, and a packet whose address is not registered is
-		 * not this backend's to touch. The buffer copy is what keeps the bytes alive while the
+		 * record by that address in the registry, and a packet whose address is not registered, or
+		 * names a record the kernel has not finished with, is not this backend's to touch. The buffer copy is what keeps the bytes alive while the
 		 * kernel owns them; it is released only after the callback has returned.
 		 */
 		struct transfer_record
@@ -258,6 +258,14 @@ namespace alt::detail
 				return m_ignored.load();
 			}
 
+			/// The OVERLAPPED of the transfer @p token names while it is registered, or null.
+			[[nodiscard]] const OVERLAPPED* pending_overlapped(io_token token) noexcept
+			{
+				const std::scoped_lock lock(m_mutex);
+				const auto             found = m_by_token.find(token.value());
+				return found == m_by_token.end() ? nullptr : &found->second->overlapped;
+			}
+
 		private:
 			std::expected<io_token, std::error_code> submit_transfer(const io_request& request, io_completion_fn on_done, void* state)
 			{
@@ -314,8 +322,11 @@ namespace alt::detail
 				if(!mine)
 				{
 					// Not reachable while the notification mode holds. Were a packet to come after all,
+					// it would find the OVERLAPPED already complete, since the call has returned, so
 					// whichever of it and this withdrawal took the record completed it, and the other
-					// leaves it alone: either way the callback ran exactly once.
+					// leaves it alone: either way the callback ran exactly once. This withdrawal does
+					// not check completion itself: an immediate failure may leave the OVERLAPPED's
+					// status as the STATUS_PENDING kernel32 seeded it with.
 					return token;
 				}
 				const io_completion result = ok != FALSE ? settle(*mine) : failed(*mine, code);
@@ -424,6 +435,33 @@ namespace alt::detail
 				return record;
 			}
 
+			/**
+			 * The packet path's withdrawal: as withdraw(), except that a record whose OVERLAPPED the
+			 * kernel has not finished with is left registered, and null is returned for it.
+			 *
+			 * The lookup is by address alone, and an address does not say which call a packet is
+			 * for. A consumer's own untagged overlapped call on handle(), with an OVERLAPPED freed
+			 * before its packet is dequeued, leaves that packet naming memory a newer record of ours
+			 * may occupy by then. Completing that record would report it failed, its status being
+			 * still pending, and free it while the kernel owns its OVERLAPPED and buffer. The kernel
+			 * writes a request's final status into its OVERLAPPED before queuing its packet, so a
+			 * record's own packet always finds it complete; one that finds it pending is somebody
+			 * else's, and the record's own is still to come.
+			 */
+			std::unique_ptr<transfer_record> withdraw_finished(const OVERLAPPED* key) noexcept
+			{
+				const std::scoped_lock lock(m_mutex);
+				const auto             found = m_by_address.find(key);
+				if(found == m_by_address.end() || !HasOverlappedIoCompleted(&found->second->overlapped))
+				{
+					return nullptr;
+				}
+				std::unique_ptr<transfer_record> record = std::move(found->second);
+				m_by_address.erase(found);
+				m_by_token.erase(record->token);
+				return record;
+			}
+
 			/// Delivers @p result, then frees the record, and its buffer copy with it.
 			static void complete(std::unique_ptr<transfer_record> record, io_completion result) noexcept
 			{
@@ -452,11 +490,12 @@ namespace alt::detail
 							stop = true;
 							continue;
 						}
-						auto record = withdraw(entry.lpOverlapped);
+						auto record = withdraw_finished(entry.lpOverlapped);
 						if(!record)
 						{
 							// Not ours: a consumer's own overlapped call on a handle this backend
-							// opened. Never cast, completed or freed.
+							// opened, even if it names the address of a record of ours still
+							// pending. Never cast, completed or freed.
 							m_ignored.fetch_add(1);
 							continue;
 						}
@@ -520,6 +559,11 @@ namespace alt::detail
 	std::size_t iocp_ignored_packets_for_testing(io_backend& iocp) noexcept
 	{
 		return static_cast<iocp_backend&>(iocp).ignored_packets();
+	}
+
+	const OVERLAPPED* iocp_pending_overlapped_for_testing(io_backend& iocp, io_token token) noexcept
+	{
+		return static_cast<iocp_backend&>(iocp).pending_overlapped(token);
 	}
 } // namespace alt::detail
 

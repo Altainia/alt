@@ -46,6 +46,10 @@ namespace alt::detail
 
 	/// How many packets the completion thread found no record for and ignored. Same precondition.
 	[[nodiscard]] std::size_t iocp_ignored_packets_for_testing(io_backend& iocp) noexcept;
+
+	/// The OVERLAPPED of the IOCP transfer @p token names while it is still registered, or null
+	/// once it has completed or if @p token is not an IOCP transfer's. Same precondition.
+	[[nodiscard]] const OVERLAPPED* iocp_pending_overlapped_for_testing(io_backend& iocp, io_token token) noexcept;
 } // namespace alt::detail
 
 #endif

@@ -162,9 +162,13 @@ registry under its mutex; call `on_done` with the result; free the record.
 
 The completion thread loops on `GetQueuedCompletionStatusEx` (batching several packets
 per wake is the builder's call). For each packet it **looks the `OVERLAPPED` address up in
-the registry, under its mutex**, and completes the record found. A packet whose address
-is not registered is not ours and is ignored: never cast, never completed, never freed
-(see "The handle a consumer sees"). The registry is therefore indexed both by token, for
+the registry, under its mutex**, and completes the record found, provided its
+`OVERLAPPED` has completed (`HasOverlappedIoCompleted`). A packet whose address is not
+registered is not ours and is ignored: never cast, never completed, never freed (see "The
+handle a consumer sees"). So is a packet naming a registered record still pending: a
+consumer's packet whose freed `OVERLAPPED` address a newer record now occupies. The kernel
+writes the final status before queuing a packet, so a record's own packet always finds it
+complete. The registry is therefore indexed both by token, for
 `cancel`, and by record address, for completion; the shape is the builder's call. A packet whose status is `ERROR_HANDLE_EOF` is a zero-byte success; one whose status
 is `ERROR_OPERATION_ABORTED` after a cancel is reported as `std::errc::operation_canceled`;
 any other failure is reported through the same Windows error normalization as the pool
@@ -194,8 +198,8 @@ consequences, both handled:
   bit of `hEvent` so no packet reaches alt's port. This is a behaviour change for any
   Windows user of `handle()` once `automatic` selects IOCP; no such user is known.
 - **A consumer's own overlapped call cannot corrupt alt.** If it posts a packet to our
-  port anyway, the completion thread finds no record at that `OVERLAPPED` address and
-  ignores it (see Transfers). The consumer's own wait on its event is unaffected.
+  port anyway, the completion thread finds no record at that `OVERLAPPED` address, or only
+  a record still pending there, and ignores it (see Transfers). The consumer's own wait on its event is unaffected.
 
 The alternative of keeping a second, ordinary handle per file for `handle()` to return
 (`ReOpenFile`) was considered and rejected: it doubles the handles per file and grows
@@ -308,6 +312,9 @@ call how the fixtures read the variable).
 - **a foreign packet is ignored**: an overlapped transfer the test issues itself, without
   the low-bit tag, on a handle this backend opened, posts a packet the completion thread
   must ignore, while the backend's own transfers keep completing normally;
+- **a stale packet at a pending record's address is ignored**: a packet posted naming a
+  pending read's `OVERLAPPED` is counted as ignored, and the read later completes once with
+  its real data;
 - **pool transfers on a port-associated handle queue no packet**: issue a pool-arm
   transfer on a handle this backend opened, then check the port holds nothing for it.
   This pins the #52 low-bit dependency from the IOCP side;

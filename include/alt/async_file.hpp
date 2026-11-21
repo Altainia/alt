@@ -250,9 +250,10 @@ namespace alt
 		 * synchronous call on it, a ReadFile or WriteFile with no OVERLAPPED (for example
 		 * inside file_io::run()), is not valid. Use overlapped calls with an event of your
 		 * own, and set the low-order bit of its `hEvent` so that no completion packet is
-		 * queued to the service's port. A packet that does reach the port is ignored, so
-		 * such a call cannot disturb the library, but it is a packet the port need not
-		 * have carried. An adopted file's handle is returned as it was adopted.
+		 * queued to the service's port. A packet that does reach the port is ignored, even
+		 * one naming an address that a transfer of the library's still in flight has since
+		 * reused, so such a call cannot disturb the library, but it is a packet the port
+		 * need not have carried. An adopted file's handle is returned as it was adopted.
 		 */
 		[[nodiscard]] native_handle handle() const noexcept;
 

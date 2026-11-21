@@ -789,6 +789,48 @@ TEST_F(IocpBackendTest, AForeignPacketIsIgnored)
 	EXPECT_EQ(settled_ignored_packets(), before + 1);
 }
 
+TEST_F(IocpBackendTest, AStalePacketAtAPendingRecordsAddressIsIgnored)
+{
+	// The registry finds a record by OVERLAPPED address alone. A consumer's own untagged call on
+	// the handle, whose heap OVERLAPPED is freed before its packet is dequeued, leaves a packet
+	// naming an address a newer record may occupy while still pending. Completing that record
+	// would report it failed and free it while the kernel still owns its OVERLAPPED and buffer.
+	// The stale packet is forged here by posting one that names the pending record's address.
+	served_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << ::GetLastError();
+	auto file = open_file(std::filesystem::path(pipe.name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	pipe.accept();
+
+	constexpr std::string_view payload = "genuine";
+	auto                       buffer  = buffer_of(payload.size());
+	const auto                 view    = buffer;
+	waiter                     w;
+	const auto                 token = backend().submit(positional(alt::io_op::read, **file, std::move(buffer), 0, payload.size()), deliver, &w);
+	w.submitted.store(true);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	pipe_releaser releaser(pipe, w);
+
+	const OVERLAPPED* const pending = alt::detail::iocp_pending_overlapped_for_testing(backend(), *token);
+	ASSERT_NE(pending, nullptr) << "the read completed before anything was written to the pipe";
+	const std::size_t before = ignored_packets();
+	// Completion key 0 is the one every handle the backend opens carries, as the stale packet would.
+	ASSERT_NE(::PostQueuedCompletionStatus(alt::detail::iocp_port_for_testing(backend()), 0, 0, const_cast<OVERLAPPED*>(pending)), FALSE) << ::GetLastError();
+
+	EXPECT_TRUE(wait_until([&] { return ignored_packets() == before + 1; })) << "ignored packets: " << ignored_packets() - before;
+	EXPECT_EQ(w.calls.load(), 0) << "the stale packet completed the pending read: " << w.result.error.message();
+
+	ASSERT_TRUE(pipe.write(payload));
+	ASSERT_TRUE(w.done.try_acquire_for(std::chrono::seconds(10))) << "the read never completed";
+	releaser.completed = true;
+
+	EXPECT_FALSE(w.result.error) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, payload.size());
+	EXPECT_EQ(text_of(view, payload.size()), payload);
+	EXPECT_EQ(settled_ignored_packets(), before + 1);
+	EXPECT_EQ(w.calls.load(), 1);
+}
+
 TEST_F(IocpBackendTest, ATaggedOverlappedCallQueuesNothing)
 {
 	// The documented way for a consumer to use handle() itself: tag hEvent, and alt never sees it.

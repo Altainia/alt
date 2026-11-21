@@ -240,10 +240,15 @@ read is a zero-byte success, wherever it surfaces; other errors are normalized a
 thread-pool backend, including `is_a_directory` for a transfer on a directory handle.
 
 **Packets that are not the backend's.** The completion thread looks each packet's
-`OVERLAPPED` address up in the registry and completes only a record it finds there. A packet
-whose address is not registered, such as one from a consumer's own untagged overlapped call
-on a handle this backend opened, is ignored: never cast to a record, never completed, never
-freed. A consumer who uses such a handle directly should set the low-order bit of `hEvent`,
+`OVERLAPPED` address up in the registry and completes only a record it finds there whose
+`OVERLAPPED` the kernel has finished with. A packet whose address is not registered, such as
+one from a consumer's own untagged overlapped call on a handle this backend opened, is
+ignored: never cast to a record, never completed, never freed. So is one naming a registered
+record that is still pending: an address alone does not say which call a packet is for, and
+a consumer's packet whose heap `OVERLAPPED` was freed before the packet was dequeued can name
+the address of a newer transfer of the backend's. The kernel writes a request's final status
+into its `OVERLAPPED` before it queues the packet, so a record's own packet always finds it
+complete, and a pending record's own packet is still to come. A consumer who uses such a handle directly should set the low-order bit of `hEvent`,
 Windows' documented way of keeping a completion off the handle's port; the thread-pool
 backend's own transfers already do, so a pool transfer on one of these handles posts nothing.
 

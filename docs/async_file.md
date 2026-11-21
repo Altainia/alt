@@ -198,8 +198,10 @@ port-associated handle, and `handle()` returns exactly that.** Two consequences:
   its own, and should set the low-order bit of `hEvent`, so that the completion is not
   queued to the service's port.
 - Such a call **cannot corrupt the library**. A packet that reaches the port anyway is one
-  the completion thread has no record for, and it is ignored; the consumer's own wait on
-  its event is unaffected.
+  the IOCP backend's completion thread has no record for, and it is ignored. That holds
+  even for a packet whose `OVERLAPPED` was freed and its address reused by a transfer of the
+  library's still in flight: a record is completed only once the kernel has finished with
+  it. The consumer's own wait on its event is unaffected.
 
 This is a change for Windows users of `handle()` from earlier releases, where `automatic`
 meant the thread pool and the handle was synchronous. An adopted file's handle is returned
