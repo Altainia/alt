@@ -31,17 +31,37 @@ namespace alt::detail
 	/// A thread-pool backend whose io_op::open follows @p policy; otherwise identical to alt::make_thread_pool_backend().
 	std::unique_ptr<io_backend> make_thread_pool_backend(thread_pool& pool, const pool_open_policy& policy);
 
-	/// The byte count a positional transfer may move: never more than the buffer holds. Shared by every backend so they clamp alike.
+	/**
+	 * The byte count a positional transfer may move: never more than the buffer holds.
+	 *
+	 * This is the platform-neutral clamp only. The Windows arm applies its own DWORD clamp on top of it.
+	 */
 	inline std::size_t transfer_size(const io_request& request) noexcept
 	{
 		return std::min(request.size, request.buffer.size());
 	}
 
 #ifndef _WIN32
-	/// The current errno as an error_code in the system category. Shared by the POSIX backends so they report errors alike.
+	/**
+	 * An errno value as an error_code in the system category.
+	 *
+	 * For a caller that already holds the value, such as a completion-queue consumer that has negated a
+	 * negative result. @p errno_value is a positive errno value, not a negative result.
+	 */
+	inline std::error_code errno_error(const int errno_value) noexcept
+	{
+		return {errno_value, std::system_category()};
+	}
+
+	/**
+	 * The current errno as an error_code in the system category.
+	 *
+	 * Reads errno at call time, so call it before anything can clobber it. A caller that already holds an
+	 * errno value passes it to errno_error(int) instead.
+	 */
 	inline std::error_code errno_error() noexcept
 	{
-		return {errno, std::system_category()};
+		return errno_error(errno);
 	}
 #endif
 } // namespace alt::detail
