@@ -259,7 +259,7 @@ namespace alt::detail
 			}
 
 			/// The OVERLAPPED of the transfer @p token names while it is registered, or null.
-			[[nodiscard]] const OVERLAPPED* pending_overlapped(io_token token) noexcept
+			[[nodiscard]] const OVERLAPPED* pending_overlapped(io_token token) const noexcept
 			{
 				const std::scoped_lock lock(m_mutex);
 				const auto             found = m_by_token.find(token.value());
@@ -513,7 +513,7 @@ namespace alt::detail
 			std::unique_ptr<io_backend> m_pool_backend;
 
 			/// The in-flight registry: every transfer submitted to the kernel and not yet completed.
-			std::mutex                                                              m_mutex;
+			mutable std::mutex                                                      m_mutex;
 			std::unordered_map<const OVERLAPPED*, std::unique_ptr<transfer_record>> m_by_address;
 			std::unordered_map<std::uint64_t, transfer_record*>                     m_by_token;
 
@@ -551,19 +551,19 @@ namespace alt::detail
 		return std::unique_ptr<io_backend>(std::move(backend));
 	}
 
-	HANDLE iocp_port_for_testing(io_backend& iocp) noexcept
+	HANDLE iocp_port_for_testing(const io_backend& iocp) noexcept
 	{
-		return static_cast<iocp_backend&>(iocp).port();
+		return static_cast<const iocp_backend&>(iocp).port();
 	}
 
-	std::size_t iocp_ignored_packets_for_testing(io_backend& iocp) noexcept
+	std::size_t iocp_ignored_packets_for_testing(const io_backend& iocp) noexcept
 	{
-		return static_cast<iocp_backend&>(iocp).ignored_packets();
+		return static_cast<const iocp_backend&>(iocp).ignored_packets();
 	}
 
-	const OVERLAPPED* iocp_pending_overlapped_for_testing(io_backend& iocp, io_token token) noexcept
+	const OVERLAPPED* iocp_pending_overlapped_for_testing(const io_backend& iocp, io_token token) noexcept
 	{
-		return static_cast<iocp_backend&>(iocp).pending_overlapped(token);
+		return static_cast<const iocp_backend&>(iocp).pending_overlapped(token);
 	}
 } // namespace alt::detail
 

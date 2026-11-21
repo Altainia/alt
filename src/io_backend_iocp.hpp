@@ -42,14 +42,14 @@ namespace alt::detail
 	[[nodiscard]] std::expected<std::unique_ptr<io_backend>, std::error_code> make_iocp_backend(thread_pool& pool);
 
 	/// The completion port of @p iocp. Precondition: @p iocp was built by make_iocp_backend().
-	[[nodiscard]] HANDLE iocp_port_for_testing(io_backend& iocp) noexcept;
+	[[nodiscard]] HANDLE iocp_port_for_testing(const io_backend& iocp) noexcept;
 
 	/// How many packets the completion thread found no record for and ignored. Same precondition.
-	[[nodiscard]] std::size_t iocp_ignored_packets_for_testing(io_backend& iocp) noexcept;
+	[[nodiscard]] std::size_t iocp_ignored_packets_for_testing(const io_backend& iocp) noexcept;
 
 	/// The OVERLAPPED of the IOCP transfer @p token names while it is still registered, or null
 	/// once it has completed or if @p token is not an IOCP transfer's. Same precondition.
-	[[nodiscard]] const OVERLAPPED* iocp_pending_overlapped_for_testing(io_backend& iocp, io_token token) noexcept;
+	[[nodiscard]] const OVERLAPPED* iocp_pending_overlapped_for_testing(const io_backend& iocp, io_token token) noexcept;
 } // namespace alt::detail
 
 #endif
