@@ -124,6 +124,12 @@ if(ALT_CPPCHECK)
             # takes the file past the same default-level limit. Same reasoning as above:
             # it reports a limit on the analysis, and every other check still runs.
             --suppress=normalCheckLevelMaxBranches:*/src/async_file.cpp
+            # src/io_windows.cpp holds the Windows arms that phase 7c moved out of
+            # src/io_backend_thread_pool.cpp so the IOCP backend could share them, and the
+            # branches came with them: the file reaches the same default-level limit, which
+            # the source it came from was already suppressed for. Same reasoning as above:
+            # it reports a limit on the analysis, and every other check still runs.
+            --suppress=normalCheckLevelMaxBranches:*/src/io_windows.cpp
             -I ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/alt
             ${CMAKE_SOURCE_DIR}/src
