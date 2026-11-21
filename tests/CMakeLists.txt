@@ -88,6 +88,11 @@ target_link_libraries(alt_tests
         Threads::Threads
 )
 
+target_include_directories(alt_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+)
+
 alt_add_warnings(alt_tests)
 
 # MSVC's optimizer reports C4702 "unreachable code" after inlining, and test_scope.cpp
