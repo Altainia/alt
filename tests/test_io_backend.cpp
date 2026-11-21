@@ -168,6 +168,16 @@ TEST(IoBackendTest, CancelThenCompleteWithSuccessStillDeliversSuccess)
 	EXPECT_FALSE(rec.last.error);
 }
 
+TEST(IoBackendTest, TokensCompareByValue)
+{
+	const alt::io_token seven{7};
+
+	EXPECT_EQ(seven, alt::io_token{7});
+	EXPECT_NE(seven, alt::io_token{8});
+	EXPECT_NE(seven, alt::io_token{});
+	EXPECT_EQ(alt::io_token{}, alt::io_token{});
+}
+
 TEST(IoBackendTest, ManualBackendReportsItsKindAsManual)
 {
 	const alt::manual_io_backend backend;
@@ -541,6 +551,20 @@ TEST_F(ThreadPoolBackendTest, AReadPastTheEndReturnsAShortCount)
 	const auto beyond = run(positional(alt::io_op::read, **file, buffer_of(16), 100, 16));
 	EXPECT_FALSE(beyond.error);
 	EXPECT_EQ(beyond.bytes, 0U);
+}
+
+TEST_F(ThreadPoolBackendTest, AnOpenWithNeitherAccessBitFailsInsteadOfOpeningReadOnly)
+{
+	// The backend is a public seam, so it keeps the check the service performs first.
+	const auto path = write_file("data.txt", "x");
+
+	const auto none        = open_file(path, alt::flags<alt::open_flag>{});
+	const auto create_only = open_file(path, alt::flags(alt::open_flag::create));
+
+	ASSERT_FALSE(none.has_value());
+	EXPECT_EQ(none.error(), std::errc::invalid_argument);
+	ASSERT_FALSE(create_only.has_value());
+	EXPECT_EQ(create_only.error(), std::errc::invalid_argument);
 }
 
 TEST_F(ThreadPoolBackendTest, AReadOfAMissingPathReportsNoSuchFileOrDirectory)

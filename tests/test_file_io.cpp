@@ -1163,6 +1163,29 @@ TEST_F(FileIoRunTest, ACallableCancelledWhileRunningCompletesAndItsResultIsDisca
 	EXPECT_FALSE(state->finished) << "a cancelled chain is abandoned, not resumed";
 }
 
+TEST_F(FileIoRunTest, AStopRequestedAfterTheCallableCompletedAndWasDrainedChangesNothing)
+{
+	// The design table's "complete, then cancel" row, in the form that is reachable: the
+	// awaiter deregisters its stop callback in await_resume, so by now there is no callback
+	// left for the stop to find, which is stronger than a callback that finds `done`.
+	const auto invocations = std::make_shared<std::atomic<int>>(0);
+
+	const auto state = begin(io().run([invocations] { return invocations->fetch_add(1) + 41; }));
+	const auto value = finish(state);
+	home().drain();
+
+	chain(0).request_stop();
+	home().drain();
+
+	ASSERT_TRUE(value.has_value());
+	EXPECT_EQ(*value, 41);
+	EXPECT_EQ(invocations->load(), 1);
+	// The service is undamaged: a later operation still runs and delivers.
+	const auto later = run(io().run([] { return 5; }));
+	ASSERT_TRUE(later.has_value());
+	EXPECT_EQ(*later, 5);
+}
+
 TEST_F(FileIoRunTest, RunConsumesAnInFlightSlot)
 {
 	start_rig(2, 1);

@@ -116,6 +116,52 @@ TEST(IoBufferTest, BorrowUnsafeHoldsNothingAndStillExposesTheBytes)
 	EXPECT_TRUE(static_cast<bool>(buffer));
 }
 
+TEST(IoBufferTest, AllocatedStorageIsZeroInitializedAfterAnEarlierBufferOfTheSameSizeWasDirtiedAndReleased)
+{
+	constexpr std::size_t size = 4096;
+	// Dirty a block of this size and release it. The allocator is not obliged to hand the same
+	// memory back, so reuse is attempted here, not guaranteed: this guard has teeth only where
+	// it does (or where the allocator perturbs fresh memory, as MALLOC_PERTURB_ does). On glibc it
+	// does: with allocate() changed to not value-initialize, this fails with and without
+	// MALLOC_PERTURB_.
+	{
+		auto dirty = alt::io_buffer::allocate(size);
+		ASSERT_TRUE(dirty.has_value());
+		for(std::byte& byte: dirty->bytes())
+		{
+			byte = sentinel;
+		}
+	}
+
+	auto fresh = alt::io_buffer::allocate(size);
+
+	ASSERT_TRUE(fresh.has_value());
+	std::size_t nonzero = 0;
+	for(const std::byte byte: fresh->bytes())
+	{
+		nonzero += byte != std::byte{0} ? 1U : 0U;
+	}
+	EXPECT_EQ(nonzero, 0U);
+}
+
+TEST(IoBufferTest, BorrowWithANullKeepaliveBehavesLikeBorrowUnsafe)
+{
+	std::array<std::byte, 8> storage{};
+
+	const auto borrowed = alt::io_buffer::borrow(storage, nullptr);
+	const auto unsafe   = alt::io_buffer::borrow_unsafe(storage);
+
+	ASSERT_TRUE(static_cast<bool>(borrowed));
+	ASSERT_EQ(borrowed.size(), storage.size());
+	borrowed.bytes()[5] = sentinel;
+	EXPECT_EQ(static_cast<bool>(borrowed), static_cast<bool>(unsafe));
+	EXPECT_EQ(borrowed.bytes().data(), unsafe.bytes().data());
+	EXPECT_EQ(borrowed.size(), unsafe.size());
+	EXPECT_EQ(unsafe.bytes()[5], sentinel);
+	// io_buffer's owner is private and has no accessor, so what is compared is observable
+	// state only; a mutant that stored a non-null owner here would not be caught.
+}
+
 TEST(IoBufferTest, AMovedFromBufferIsEmptyAndFalsey)
 {
 	auto source = alt::io_buffer::allocate(32);

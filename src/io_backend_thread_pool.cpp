@@ -129,6 +129,12 @@ namespace alt
 			return std::min(request.size, request.buffer.size());
 		}
 
+		/// Whether @p how asks for at least one of read and write access; open() accepts nothing else.
+		bool requests_access(const flags<open_flag> how) noexcept
+		{
+			return how.has_any(flags(open_flag::read)) || how.has_any(flags(open_flag::write));
+		}
+
 		// ---------------------------------------------------------------------
 		// Per-platform primitives
 		// ---------------------------------------------------------------------
@@ -210,11 +216,7 @@ namespace alt
 			const auto how    = args.open_flags;
 			const bool reads  = how.has_any(flags(open_flag::read));
 			const bool writes = how.has_any(flags(open_flag::write));
-			if(!reads && !writes)
-			{
-				return invalid_argument_error();
-			}
-			DWORD access = 0;
+			DWORD      access = 0;
 			if(reads)
 			{
 				access |= GENERIC_READ;
@@ -363,11 +365,7 @@ namespace alt
 			const auto how    = args.open_flags;
 			const bool reads  = how.has_any(flags(open_flag::read));
 			const bool writes = how.has_any(flags(open_flag::write));
-			if(!reads && !writes)
-			{
-				return invalid_argument_error();
-			}
-			int native = O_RDONLY;
+			int        native = O_RDONLY;
 			if(reads && writes)
 			{
 				native = O_RDWR;
@@ -507,6 +505,13 @@ namespace alt
 				                            *static_cast<file_status*>(request.out));
 				break;
 			case io_op::open:
+				// Checked here, once, for both platforms: the POSIX arm starts from O_RDONLY, so
+				// without it a request with neither access bit would silently open read-only.
+				if(!requests_access(static_cast<const io_open_args*>(request.in)->open_flags))
+				{
+					result.error = invalid_argument_error();
+					break;
+				}
 				result.error = do_open(*static_cast<const io_open_args*>(request.in), *static_cast<native_handle*>(request.out));
 				break;
 			case io_op::rename:

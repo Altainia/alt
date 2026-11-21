@@ -155,6 +155,13 @@ namespace alt
 
 		task<std::expected<async_file, std::error_code>> open_file(std::shared_ptr<io_shared> owner, std::filesystem::path path, const open_flags how, const file_mode mode)
 		{
+			// Rejected before a permit is spent, as transfer() does for a bad descriptor or an
+			// oversized size. The backend repeats the check for callers that drive it directly.
+			if(!how.has_any(flags(open_flag::read)) && !how.has_any(flags(open_flag::write)))
+			{
+				co_return failure(std::errc::invalid_argument);
+			}
+
 			const std::shared_ptr<open_state> state = std::make_shared<open_state>(io_open_args{.path = std::move(path), .open_flags = how, .mode = mode});
 
 			auto permit = co_await acquire_permit(owner);

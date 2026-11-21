@@ -645,6 +645,59 @@ TEST_F(AsyncFileTest, OpenOfAMissingPathReportsNoSuchFileOrDirectory)
 	EXPECT_EQ(opened.error(), std::errc::no_such_file_or_directory);
 }
 
+namespace
+{
+	/** The error a finished open failed with; an empty code if it has not finished or succeeded. */
+	std::error_code failure_of(const outcome<std::expected<alt::async_file, std::error_code>>& finished)
+	{
+		if(!finished.result.has_value() || finished.result->has_value())
+		{
+			return {};
+		}
+		return finished.result->error();
+	}
+}
+
+TEST_F(AsyncFileTest, OpenWithNeitherAccessBitIsRejectedWithoutWaitingForAPermit)
+{
+	// One permit, held by a read in flight, so an open that tried to take a permit before
+	// validating would park behind it instead of answering.
+	const auto                 path = write_file("data.txt", "0123456789");
+	const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
+	const auto                 service = alt::file_io::create(alt::scheduler_ref{home()}, manual_backend(), options);
+	ASSERT_TRUE(service.has_value());
+	const alt::async_file file = alt::async_file::adopt(*service, open_native(path, alt::flags(alt::open_flag::read)));
+
+	using result_type                           = std::expected<std::size_t, std::error_code>;
+	using opened_type                           = std::expected<alt::async_file, std::error_code>;
+	const auto                     holder       = std::make_shared<outcome<result_type>>();
+	const alt::cancellation_handle holder_chain = alt::start(capture(file.read_at(buffer_of(4), 0, 4), holder));
+	ASSERT_EQ(manual_backend().pending(), 1U);
+	const auto shared = alt::detail::file_io_access::shared(*service);
+	ASSERT_EQ(shared->slots.available(), 0);
+
+	const auto                     none              = std::make_shared<outcome<opened_type>>();
+	const auto                     create_only       = std::make_shared<outcome<opened_type>>();
+	const alt::cancellation_handle none_chain        = alt::start(capture(service->open(path, alt::open_flags{}), none));
+	const alt::cancellation_handle create_only_chain = alt::start(capture(service->open(dir() / "made.txt", alt::flags(alt::open_flag::create)), create_only));
+	home().drain();
+
+	// Answered while the only permit is still held: nothing waited, nothing was submitted.
+	// An open that took its permit first would be parked here and neither would have finished.
+	ASSERT_TRUE(none->finished);
+	ASSERT_TRUE(create_only->finished);
+	EXPECT_EQ(failure_of(*none), std::errc::invalid_argument);
+	EXPECT_EQ(failure_of(*create_only), std::errc::invalid_argument);
+	EXPECT_EQ(manual_backend().pending(), 1U);
+	EXPECT_EQ(shared->slots.available(), 0);
+	EXPECT_FALSE(std::filesystem::exists(dir() / "made.txt"));
+
+	complete_by_hand(0, alt::io_completion{.bytes = 4, .error = {}});
+	home().drain();
+	EXPECT_TRUE(holder->finished);
+	EXPECT_EQ(shared->slots.available(), 1);
+}
+
 TEST_F(AsyncFileTest, ReadAtOnADirectoryReportsIsADirectory)
 {
 	// Opening a directory for reading succeeds on both platforms; it is the transfer that fails.

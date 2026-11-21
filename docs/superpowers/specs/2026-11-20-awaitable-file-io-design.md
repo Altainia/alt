@@ -829,7 +829,7 @@ the three-phase protocol gets a test that pins the ordering exactly:
 
 | Ordering | What must be true |
 |----------|-------------------|
-| complete, then cancel | the body ran; the stop callback finds `done` and does nothing |
+| complete, then cancel | the body ran, and a stop requested after the drain finds no stop callback at all, because `await_resume` deregisters it before the chain continues past the await; the handler's `state != phase::waiting` guard (which also covers `detached`) is the second line behind that |
 | cancel, then complete | the body never ran; the chain was abandoned; the completion finds `detached` and touches no frame |
 | cancel while the completion is mid-post | the resumption runs once, and takes the abandon branch |
 | cancel while parked on a slot | the operation never reaches the backend at all |
@@ -839,7 +839,7 @@ the three-phase protocol gets a test that pins the ordering exactly:
 | cancel, then the backend completes, then `async_file` is gone | the descriptor was still open for the backend's read, and is closed by the block that dropped the last reference |
 | two operations, one slot, one released | the second submits on a **home** thread — asserted by thread id, not inferred |
 | `run()` cancelled before `f` ran | `f` was never invoked, and its captures were destroyed on the worker |
-| `run()` cancelled while `f` ran | `f` completed; its result and its exception were both discarded with the block |
+| `run()` cancelled while `f` ran | `f` completed and its result was discarded with the block (its exception needs no test: the `exception_ptr` member dies with the invocation, so there is no path on which it survives) |
 
 **The buffer-survives-teardown test is the one that justifies the design.** A read into
 an `io_buffer::allocate` buffer, cancelled while in flight, with the backend writing
