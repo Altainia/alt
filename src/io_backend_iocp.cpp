@@ -77,6 +77,12 @@ namespace alt::detail
 			{
 				return result;
 			}
+			// Aborted by CancelIoEx, or by the consumer closing the handle: cancelled either way.
+			if(code == ERROR_OPERATION_ABORTED)
+			{
+				result.error = std::make_error_code(std::errc::operation_canceled);
+				return result;
+			}
 			const std::error_code error = normalize_error({static_cast<int>(code), std::system_category()});
 			result.error                = is_directory_handle(record.handle) ? std::make_error_code(std::errc::is_a_directory) : error;
 			return result;
@@ -219,8 +225,22 @@ namespace alt::detail
 					m_pool_backend->cancel(token);
 					return;
 				}
-				// An IOCP transfer is not cancelled yet. Ignoring the hint is within the contract:
-				// the transfer still completes exactly once, with its real result.
+				// CancelIoEx matches a request by handle and OVERLAPPED address, so it is called with
+				// the mutex held: completion withdraws a record under the same mutex before freeing
+				// it, so a record found here is still the kernel's, and its address cannot yet belong
+				// to a newer transfer on the same handle. A token not found has completed, or is
+				// completing, and there is nothing to cancel.
+				const std::scoped_lock lock(m_mutex);
+				const auto             found = m_by_token.find(token.value());
+				if(found == m_by_token.end())
+				{
+					return;
+				}
+				transfer_record& record = *found->second;
+				// A hint: the packet still comes, aborted or with the real result. FALSE with
+				// ERROR_NOT_FOUND means the kernel finished first and its packet is queued, or the
+				// call has not been issued yet; either way the transfer completes on its own.
+				static_cast<void>(::CancelIoEx(to_handle(record.handle), &record.overlapped));
 			}
 
 			[[nodiscard]] io_backend_kind kind() const noexcept override
@@ -388,7 +408,7 @@ namespace alt::detail
 			/**
 			 * Removes and returns the record whose OVERLAPPED is at @p key, or null if none is
 			 * registered there. Taking it out under the mutex is what makes a record completed at
-			 * most once, and what will let cancel() find only records the kernel still owns.
+			 * most once, and what lets cancel() find only records the kernel still owns.
 			 */
 			std::unique_ptr<transfer_record> withdraw(const OVERLAPPED* key) noexcept
 			{

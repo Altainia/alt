@@ -21,6 +21,7 @@
 #	include <fstream>
 #	include <iostream>
 #	include <iterator>
+#	include <latch>
 #	include <limits>
 #	include <memory>
 #	include <semaphore>
@@ -965,5 +966,245 @@ TEST(IocpBackendDeathTest, DestroyingTheBackendWithAForwardedOperationInFlightAb
 
 	const alt_test::scoped_death_test_style style{"threadsafe"};
 	EXPECT_DEATH(destroy_the_backend_with_a_forwarded_operation_in_flight(), "IOCP backend destroyed with forwarded operations in flight");
+}
+
+namespace
+{
+	/// How long a cancel test waits for a callback before it fails rather than hangs.
+	constexpr auto cancel_guard = std::chrono::seconds(5);
+
+	/// One read submitted by a cancel test: its callback state, and a view of its buffer.
+	struct pipe_read
+	{
+		alt::io_buffer view;
+		waiter         w;
+	};
+
+	/// Submits a read of @p size bytes on @p file into a fresh buffer, and marks it submitted.
+	std::expected<alt::io_token, std::error_code> submit_read(alt::io_backend& backend, const alt::detail::io_handle& file, pipe_read& read, std::size_t size)
+	{
+		auto buffer = alt::io_buffer::allocate(size);
+		if(!buffer)
+		{
+			return std::unexpected(buffer.error());
+		}
+		read.view        = *buffer;
+		const auto token = backend.submit(positional(alt::io_op::read, file, std::move(*buffer), 0, size), deliver, &read.w);
+		read.w.submitted.store(true);
+		return token;
+	}
+} // namespace
+
+TEST_F(IocpBackendTest, CancellingAPendingReadCompletesItOnceAsCancelled)
+{
+	served_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << ::GetLastError();
+	auto file = open_file(std::filesystem::path(pipe.name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	pipe.accept();
+
+	pipe_read  read;
+	const auto token = submit_read(backend(), **file, read, 8);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	pipe_releaser releaser(pipe, read.w);
+	EXPECT_EQ(read.w.calls.load(), 0) << "the read completed before anything was written to the pipe";
+
+	backend().cancel(*token);
+	ASSERT_TRUE(read.w.done.try_acquire_for(cancel_guard)) << "the cancelled read never completed";
+	releaser.completed = true;
+
+	EXPECT_EQ(read.w.result.error, std::errc::operation_canceled) << read.w.result.error.message();
+	EXPECT_EQ(read.w.result.bytes, 0U);
+	EXPECT_FALSE(read.w.ran_inline.load());
+	// A second callback, had there been one, would come from the completion thread soon after.
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	EXPECT_EQ(read.w.calls.load(), 1);
+}
+
+TEST_F(IocpBackendTest, CancellingAfterCompletionIsANoOp)
+{
+	served_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << ::GetLastError();
+	auto file = open_file(std::filesystem::path(pipe.name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	pipe.accept();
+
+	constexpr std::string_view payload = "finished";
+	pipe_read                  read;
+	const auto                 token = submit_read(backend(), **file, read, payload.size());
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	pipe_releaser releaser(pipe, read.w);
+	ASSERT_TRUE(pipe.write(payload));
+	ASSERT_TRUE(read.w.done.try_acquire_for(cancel_guard)) << "the read never completed";
+	releaser.completed       = true;
+	const std::size_t before = ignored_packets();
+
+	// The record is freed: a cancel that still reached it would touch freed memory, which is
+	// debug-asan's report. Twice, so a cancel that changed some state on the first is seen too.
+	backend().cancel(*token);
+	backend().cancel(*token);
+
+	EXPECT_EQ(settled_ignored_packets(), before);
+	EXPECT_EQ(read.w.calls.load(), 1);
+	EXPECT_FALSE(read.w.result.error) << read.w.result.error.message();
+	EXPECT_EQ(read.w.result.bytes, payload.size());
+	EXPECT_EQ(text_of(read.view, payload.size()), payload);
+}
+
+TEST_F(IocpBackendTest, ACancelForAFinishedTokenDoesNotCancelANewTransferOnTheSameHandle)
+{
+	// CancelIoEx matches by handle and OVERLAPPED address. A's record is freed when A completes,
+	// and B's, allocated next and of the same size, may well land at the same address: a cancel
+	// that kept A's address, or reached it after the free, would cancel B.
+	//
+	// What this guards, and what it does not: it catches a cancel that reaches a transfer by
+	// anything other than a live registry entry. It does NOT catch CancelIoEx being called
+	// outside the registry lock (looked up under it, called after releasing it). That mutant
+	// misfires only if A completes, is freed, and B is submitted at A's address inside the window
+	// between the lookup and the call; here A is cancelled only after it has completed, so the
+	// lookup finds nothing. Measured: with that mutant applied, this test and every other Cancel
+	// test passed 50 of 50 repeats under both debug and debug-asan. The lock is argued by the
+	// design's Cancellation section, not proven by a test.
+	served_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << ::GetLastError();
+	auto file = open_file(std::filesystem::path(pipe.name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	pipe.accept();
+
+	constexpr std::string_view first  = "first";
+	constexpr std::string_view second = "later";
+	for(int round = 0; round < 50; ++round)
+	{
+		SCOPED_TRACE("round " + std::to_string(round));
+		pipe_read  a;
+		const auto a_token = submit_read(backend(), **file, a, first.size());
+		ASSERT_TRUE(a_token.has_value()) << a_token.error().message();
+		{
+			pipe_releaser releaser(pipe, a.w);
+			ASSERT_TRUE(pipe.write(first));
+			ASSERT_TRUE(a.w.done.try_acquire_for(cancel_guard)) << "read A never completed";
+			releaser.completed = true;
+		}
+		ASSERT_FALSE(a.w.result.error) << a.w.result.error.message();
+
+		pipe_read  b;
+		const auto b_token = submit_read(backend(), **file, b, second.size());
+		ASSERT_TRUE(b_token.has_value()) << b_token.error().message();
+		pipe_releaser releaser(pipe, b.w);
+		EXPECT_EQ(b.w.calls.load(), 0) << "read B completed before anything was written to the pipe";
+
+		backend().cancel(*a_token);
+		ASSERT_TRUE(pipe.write(second));
+		ASSERT_TRUE(b.w.done.try_acquire_for(cancel_guard)) << "read B never completed";
+		releaser.completed = true;
+
+		EXPECT_EQ(b.w.calls.load(), 1);
+		ASSERT_FALSE(b.w.result.error) << "A's cancel reached B: " << b.w.result.error.message();
+		EXPECT_EQ(b.w.result.bytes, second.size());
+		EXPECT_EQ(text_of(b.view, second.size()), second);
+		EXPECT_EQ(a.w.calls.load(), 1);
+	}
+}
+
+TEST_F(IocpBackendTest, CancelRacingCompletionDeliversExactlyOnce)
+{
+	served_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << ::GetLastError();
+	auto file = open_file(std::filesystem::path(pipe.name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	pipe.accept();
+
+	constexpr std::string_view payload   = "raced";
+	int                        delivered = 0;
+	int                        cancelled = 0;
+	for(int round = 0; round < 200; ++round)
+	{
+		SCOPED_TRACE("round " + std::to_string(round));
+		pipe_read  read;
+		const auto token = submit_read(backend(), **file, read, payload.size());
+		ASSERT_TRUE(token.has_value()) << token.error().message();
+		pipe_releaser releaser(pipe, read.w);
+
+		// Released together, so the cancel and the data arrive in either order, or at once.
+		std::latch        start(2);
+		std::atomic<bool> wrote{false};
+		{
+			const std::jthread canceller([&] {
+				start.arrive_and_wait();
+				backend().cancel(*token);
+			});
+			const std::jthread writer([&] {
+				start.arrive_and_wait();
+				wrote.store(pipe.write(payload));
+			});
+		}
+		ASSERT_TRUE(wrote.load());
+		ASSERT_TRUE(read.w.done.try_acquire_for(cancel_guard)) << "the read never completed";
+		releaser.completed = true;
+
+		std::size_t consumed = 0;
+		if(read.w.result.error)
+		{
+			EXPECT_EQ(read.w.result.error, std::errc::operation_canceled) << read.w.result.error.message();
+			EXPECT_EQ(read.w.result.bytes, 0U);
+			++cancelled;
+		}
+		else
+		{
+			ASSERT_GT(read.w.result.bytes, 0U);
+			ASSERT_LE(read.w.result.bytes, payload.size());
+			EXPECT_EQ(text_of(read.view, read.w.result.bytes), payload.substr(0, read.w.result.bytes));
+			consumed = read.w.result.bytes;
+			++delivered;
+		}
+		// Whatever the read did not take is still in the pipe. Taking it leaves the pipe empty, so
+		// the next round's read starts pending.
+		while(consumed < payload.size())
+		{
+			const auto rest = run(positional(alt::io_op::read, **file, buffer_of(payload.size() - consumed), 0, payload.size() - consumed));
+			ASSERT_FALSE(rest.error) << rest.error.message();
+			ASSERT_GT(rest.bytes, 0U);
+			consumed += rest.bytes;
+		}
+		EXPECT_EQ(read.w.calls.load(), 1);
+	}
+	RecordProperty("delivered", delivered);
+	RecordProperty("cancelled", cancelled);
+	std::cout << "[          ] of 200 raced reads: " << delivered << " delivered, " << cancelled << " cancelled\n";
+	// Every read's packet found its record; a second completion of any of them would have been
+	// a packet for a withdrawn record, counted here.
+	EXPECT_EQ(settled_ignored_packets(), 0U);
+}
+
+TEST_F(IocpBackendTest, CancellingAPoolTokenReachesThePool)
+{
+	// Occupy the pool's only thread so the forwarded stat stays queued behind it.
+	blocker gate;
+	pool().post(alt::work_item{.invoke = block, .state = &gate});
+	gate.entered.acquire();
+
+	const std::filesystem::path where = dir();
+	alt::file_status            status;
+	alt::io_request             stat;
+	stat.op  = alt::io_op::stat_path;
+	stat.in  = &where;
+	stat.out = &status;
+	waiter     w;
+	const auto token = backend().submit(stat, deliver, &w);
+	w.submitted.store(true);
+	if(!token)
+	{
+		gate.release.release();
+	}
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	EXPECT_EQ(token->value() & alt::detail::iocp_token_tag, 0U) << "a forwarded operation's token carries the IOCP tag";
+
+	backend().cancel(*token);
+	gate.release.release();
+	ASSERT_TRUE(w.done.try_acquire_for(cancel_guard)) << "the cancelled stat never completed";
+
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_EQ(w.result.error, std::errc::operation_canceled) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, 0U);
 }
 #endif
