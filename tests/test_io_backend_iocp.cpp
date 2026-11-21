@@ -391,6 +391,25 @@ TEST_F(IocpBackendTest, AWriteAtPutsBytesAtTheOffset)
 	EXPECT_EQ(read_whole(path), "0123abc789");
 }
 
+TEST_F(IocpBackendTest, AnAppendWriteLandsAtTheEnd)
+{
+	const auto path = write_file("data.txt", "start");
+	auto       file = open_file(path, alt::flags(alt::open_flag::write) | alt::flags(alt::open_flag::append));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	// Both requests name offset 0: an append handle must ignore it.
+	for(const char* const text: {"-one", "-two"})
+	{
+		auto buffer = buffer_of(4);
+		std::memcpy(buffer.bytes().data(), text, 4);
+		const auto done = run(positional(alt::io_op::write, **file, std::move(buffer), 0, 4));
+		EXPECT_FALSE(done.error) << done.error.message();
+		EXPECT_EQ(done.bytes, 4U);
+	}
+	file->reset();
+	EXPECT_EQ(read_whole(path), "start-one-two");
+}
+
 TEST_F(IocpBackendTest, AReadPastTheEndReturnsAShortCount)
 {
 	const auto path = write_file("data.txt", "short");
