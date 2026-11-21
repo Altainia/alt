@@ -942,9 +942,12 @@ it first: it replaces `StoreWorker` and `CommitOnWorker` outright and makes the
 | **7b** | The io_uring backend behind the same interface: ring setup, runtime probe, per-operation fallback to the pool arm. No public API change. |
 | **7c** | The IOCP backend for read and write; everything else already runs on the pool arm. `automatic` selects it on Windows, and adopted files are routed to the pool arm (issue #53). One public API addition: `async_file::backend()`, which reports the backend serving a file; otherwise no public API change. |
 
-7b and 7c change no public surface, which is the test of whether 7a's interface was
-drawn in the right place. If either needs to widen it, that is a design error in 7a
-worth a revision rather than a leak.
+7b and 7c change no public surface beyond what the table states, which is the test of
+whether 7a's interface was drawn in the right place. If either needs to widen it, that is
+a design error in 7a worth a revision rather than a leak. 7c's one addition,
+`async_file::backend()`, is deliberate rather than such a leak: once an IOCP service
+routes adopted files to the pool arm (issue #53), one service no longer has one backend,
+and a caller can ask which serves a given file.
 
 ## Housekeeping
 

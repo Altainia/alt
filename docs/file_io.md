@@ -124,12 +124,22 @@ A fallback is never silent: a Windows `automatic` service that could not build I
 reports `thread_pool`.
 
 **The IOCP backend** performs an opened file's reads and writes as overlapped I/O,
-completed through a private completion port by one completion thread the backend owns;
-the resumption is still posted to `completion`, as for every backend. Every other
-operation (the opens, `sync`, `stat`, the path operations and `run()`) runs on the borrowed
-pool, exactly as on the thread-pool backend. Its open adds `FILE_FLAG_OVERLAPPED` and
-associates the handle with the port, which changes what
-[`async_file::handle()`](async_file.md#handle) hands out on Windows.
+completed through a private completion port by the IOCP backend's own completion thread
+(one thread, distinct from the `completion` scheduler); the resumption is still posted to
+`completion`, as for every backend. Every other operation (the opens, `sync`, `stat`, the
+path operations and `run()`) runs on the borrowed pool, exactly as on the thread-pool
+backend. Its open adds `FILE_FLAG_OVERLAPPED` and associates the handle with the port,
+which changes what [`async_file::handle()`](async_file.md#handle) hands out on Windows.
+
+**An IOCP service cannot open what cannot be associated with a port.** The open finishes
+the new handle's setup before it reports success: `FILE_FLAG_OVERLAPPED`, association with
+the port, and `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`. A path whose handle refuses any of
+those, as a device whose driver does not support overlapped I/O or completion ports can,
+fails to `open` on an IOCP service, with the error that step reported, where a thread-pool
+service would open it. (The console's `CONIN$` and `CONOUT$`, and `NUL`, are not such
+paths: on Windows 11 each takes all three.) For such a path, open the handle natively and
+bring it in with [`async_file::adopt()`](async_file.md#adopt), whose operations an IOCP
+service serves on the thread pool, or open it through a `thread_pool` service.
 
 **Adopted files on an IOCP service are served by the thread pool.** IOCP can transfer only
 on handles its own open prepared, so an IOCP service also owns a thread-pool backend on the
@@ -203,7 +213,10 @@ Two preconditions, stated rather than enforced, both with precedent in
    borrowed `thread_pool` for the built-in overload, or whichever pool an injected
    backend was built with, if any. It would wait for jobs queued behind itself. That is
    why the built-in overload borrows its pool rather than owning it: a precondition can be stated, an owned pool's last reference dying on its own
-   worker cannot be.
+   worker cannot be. **On an IOCP service, the IOCP backend's completion thread is
+   excluded too.** With a completion scheduler that runs a posted item where it is posted,
+   resumptions of IOCP transfers run on that thread, and a destructor run there would wait
+   for the very callback it is inside, and then join its own thread.
 
 There is deliberately no separate stop-accepting or drain API. One documented obligation
 beats a second shutdown protocol with different ergonomics from `thread_pool`'s.
@@ -220,7 +233,7 @@ from the backend's callback: `async_semaphore::release()` resumes a parked waite
 on the releasing thread, so releasing from the callback would put the next operation's
 submission on an I/O thread. Releasing on the home thread means **every submission
 happens on a thread the completion scheduler runs on, never on an I/O thread**, and a
-backend is never re-entered from its own completion thread. "Every" holds in practice
+backend is never re-entered from a thread it delivers completions on. "Every" holds in practice
 rather than absolutely: a chain's first submission happens on whichever thread awaits it.
 
 The consequence is worth stating rather than discovering: **slot handoff is serialized
@@ -279,7 +292,8 @@ What follows:
   worker, with its captures.
 - **Cancelled before submission** (parked on an in-flight slot, or the backend refused
   the submission): still never invoked and still destroyed, but **on the thread that
-  tears the chain down**, which may be the completion thread. This window is exactly
+  tears the chain down**, which may be a thread of the completion scheduler (the home
+  scheduler). This window is exactly
   what `max_in_flight` creates, so a caller that needs its captures destroyed on a worker
   cannot rely on it there.
 - **Cancelled while `f` runs:** it finishes, and its result is destroyed with the block.

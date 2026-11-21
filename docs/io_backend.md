@@ -259,12 +259,20 @@ handle would wait for a packet that never comes, which is why `file_io` routes a
 to a thread-pool backend.
 
 **Tokens.** A token for an IOCP transfer has bit 63 set; every other token came from the
-internal thread-pool backend, and `cancel` forwards it there. Cancelling an IOCP transfer is,
-for now, a hint the backend does not act on: the transfer completes once with its real
-result, which the contract allows. Tokens are ids, never record
+internal thread-pool backend, and `cancel` forwards it there. Tokens are ids, never record
 addresses, so a stale token cannot name a newer record at a reused address.
 
-### What runs on the completion thread
+**Cancellation.** `cancel` on an IOCP token takes the registry's mutex and, if the token is
+still registered, calls `CancelIoEx` on the record's handle and `OVERLAPPED` with the mutex
+held. Completion removes a record under the same mutex before freeing it, so a record found
+there is still the kernel's, and its address cannot yet belong to a newer transfer on the same
+handle, which `CancelIoEx`, matching by handle and address, would otherwise cancel instead. A
+token not found has completed, or is completing, and the call does nothing. It is still a
+hint: the packet comes either way, and the callback runs exactly once, with either the aborted
+result (`operation_canceled` and 0 bytes, even if part of the transfer had already been done)
+or the transfer's real one, if the kernel finished first.
+
+### What runs on the IOCP completion thread
 
 Every IOCP transfer's callback runs on the one completion thread, and the file layer drops
 an operation's backend reference there. For a cancelled operation, or a file whose

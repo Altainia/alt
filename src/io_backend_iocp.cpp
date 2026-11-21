@@ -117,6 +117,7 @@ namespace alt::detail
 		{
 			return code == ERROR_IO_PENDING || code == ERROR_MORE_DATA;
 		}
+
 		/// The open policy's prepare hook: associates a new handle with the port in @p context.
 		std::error_code associate_with_port(void* context, native_handle handle) noexcept
 		{

@@ -101,7 +101,10 @@ namespace alt
 	 *    injected backend was built with, if any. It would wait for jobs queued behind
 	 *    itself. That is why the built-in overload borrows its pool rather than owning it:
 	 *    a precondition can be stated, an owned pool's last reference dying on its own
-	 *    worker cannot be.
+	 *    worker cannot be. On an IOCP service the same holds for the IOCP backend's
+	 *    completion thread: with a completion scheduler that runs a posted item where it is
+	 *    posted, resumptions run on that thread, and a destructor run there would wait for
+	 *    the very callback it is inside, and then join its own thread.
 	 *
 	 * There is deliberately no separate stop-accepting/drain API: one documented
 	 * obligation beats a second shutdown protocol with different ergonomics from
@@ -124,7 +127,8 @@ namespace alt
 		 *                   thread-pool service, and on an IOCP service every operation
 		 *                   but an opened file's reads and writes. Borrowed: it must
 		 *                   outlive this object, and this object must not be destroyed
-		 *                   on one of its threads.
+		 *                   on one of its threads, nor, on an IOCP service, on the IOCP
+		 *                   backend's completion thread (see the class note).
 		 * @param completion Where every operation's awaiting coroutine is resumed. Must
 		 *                   not be empty, and must outlive every operation.
 		 * @param options    See file_io_options, which states how the backend is chosen.
@@ -281,8 +285,8 @@ namespace alt
 		 *    destroyed on the worker, taking its captures with it.
 		 *  - **Cancelled before submission:** while the operation is parked on an in-flight
 		 *    slot, or if the backend refused the submission. It is still never invoked and
-		 *    still destroyed, but on the thread that tears the chain down, which may be the
-		 *    completion thread. This window is exactly what max_in_flight creates, so a
+		 *    still destroyed, but on the thread that tears the chain down, which may be a
+		 *    thread of the completion scheduler. This window is exactly what max_in_flight creates, so a
 		 *    caller that needs its captures destroyed on a worker cannot rely on it there.
 		 *  - **Cancelled while @p f runs:** it finishes, and its result is destroyed with the
 		 *    block. Cancellation detaches; it does not abort.

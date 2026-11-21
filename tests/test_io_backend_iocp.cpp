@@ -572,6 +572,7 @@ TEST_F(IocpBackendTest, ASynchronousSuccessQueuesNoPacket)
 		EXPECT_EQ(w.calls.load(), 1);
 	}
 }
+
 TEST_F(IocpBackendTest, AReadOnAPipeIsPendingUntilDataArrives)
 {
 	served_pipe pipe;
@@ -635,6 +636,7 @@ TEST_F(IocpBackendTest, AMessageModePipeReadLargerThanItsBufferCompletesOnce)
 	EXPECT_EQ(w.result.bytes, 0U);
 	RecordProperty("ran_inline", w.ran_inline.load() ? 1 : 0);
 }
+
 TEST_F(IocpBackendTest, AnImmediateFailureCompletesInline)
 {
 	auto file = open_file(write_file("data.txt", "read only"), alt::flags(alt::open_flag::read));
@@ -843,6 +845,10 @@ TEST_F(IocpBackendTest, ATaggedOverlappedCallQueuesNothing)
 	const std::size_t before = ignored_packets();
 	EXPECT_EQ(foreign_read(win32(**file), pipe, "tagged", true), "tagged");
 
+	// The settled ignored count is the real discriminator: a packet the call queued would reach
+	// the completion thread, which waits on the port throughout, and be counted there. The
+	// port-emptiness check below is near-vacuous for the same reason, since that thread takes
+	// any packet before this one could look; it stays as a cheap second witness.
 	EXPECT_EQ(settled_ignored_packets(), before);
 	DWORD       bytes = 0;
 	ULONG_PTR   key   = 0;
@@ -880,6 +886,8 @@ TEST_F(IocpBackendTest, APoolTransferOnAPortAssociatedHandleQueuesNothing)
 	EXPECT_FALSE(w.result.error) << w.result.error.message();
 	EXPECT_EQ(w.result.bytes, payload.size());
 	EXPECT_EQ(text_of(view, payload.size()), payload);
+	// As in the tagged-call test: the settled ignored count is what would catch a packet, since
+	// the completion thread takes any packet off the port before the check below could see it.
 	EXPECT_EQ(settled_ignored_packets(), before);
 	DWORD       bytes = 0;
 	ULONG_PTR   key   = 0;
@@ -1119,7 +1127,10 @@ TEST_F(IocpBackendTest, ACancelForAFinishedTokenDoesNotCancelANewTransferOnTheSa
 	// that kept A's address, or reached it after the free, would cancel B.
 	//
 	// What this guards, and what it does not: it catches a cancel that reaches a transfer by
-	// anything other than a live registry entry. It does NOT catch CancelIoEx being called
+	// anything other than a live registry entry. Measured: a mutant that kept every record's
+	// handle and OVERLAPPED address in a side map never cleared, and cancelled through it,
+	// failed this test in 20 of 20 runs under debug, B reporting operation_canceled. It does
+	// NOT catch CancelIoEx being called
 	// outside the registry lock (looked up under it, called after releasing it). That mutant
 	// misfires only if A completes, is freed, and B is submitted at A's address inside the window
 	// between the lookup and the call; here A is cancelled only after it has completed, so the
