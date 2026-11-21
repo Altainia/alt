@@ -22,9 +22,10 @@ void drive_by_hand(alt::scheduler_ref loop)
 }
 ```
 
-This release ships one real backend, the thread-pool one, which `file_io::backend()`
-reports as `io_backend_kind::thread_pool`. The enumerators `io_uring` and `iocp` name
-backends this release does not provide.
+Every platform has the thread-pool backend, which `file_io::backend()` reports as
+`io_backend_kind::thread_pool`. Windows also has the [IOCP backend](#the-iocp-backend-windows),
+which reports `io_backend_kind::iocp`. The enumerator `io_uring` names a backend this
+release does not provide.
 
 ## Interface
 
@@ -197,3 +198,81 @@ completes with `std::errc::operation_canceled` **without doing the I/O**. A job 
 running runs to completion and reports its real result. Either way the callback runs
 exactly once, on a pool thread, and the job's `io_buffer` copy is held until it returns
 and then released on the worker.
+
+## The IOCP backend (Windows)
+
+Performs reads and writes as overlapped I/O completed through an I/O completion port, so a
+transfer in flight holds no thread at all. It is not public: its factory lives in a header
+under `src/`, and only `file_io::create(thread_pool&, ...)` builds one, because adopted
+files need a thread pool to be routed to.
+
+**What runs where.**
+
+| Operation | Where it runs |
+|-----------|---------------|
+| `read`, `write` | Submitted as overlapped `ReadFile`/`WriteFile` from the calling thread; completed on the backend's completion thread, or inline inside `submit()` (below) |
+| `open` | A pool worker, as on the thread-pool backend, with `FILE_FLAG_OVERLAPPED` added; the new handle is associated with the port and set to `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` before the open reports success. If either step fails the handle is closed and the open fails with that error |
+| everything else | A pool worker: `stat`, `sync`, `rename`, `unlink` and `list_directory` have no overlapped form on Windows, and `invoke` has no kernel form anywhere |
+
+The pool is borrowed, as for the thread-pool backend; the port and the completion thread
+belong to the backend, which starts the thread when it is built and joins it when it is
+destroyed. The thread runs nothing but completion dispatch.
+
+**Transfers.** Each read or write gets a heap record holding its `OVERLAPPED`, its copy of
+the request's `io_buffer` (which keeps the bytes alive while the kernel owns them), the
+callback and the token. The record is registered in an in-flight registry, indexed by token
+and by `OVERLAPPED` address under one mutex, *before* the `ReadFile`/`WriteFile` call. Then:
+
+- **Completed synchronously.** `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` means no packet will
+  come, so `submit()` completes it inline, before it returns. Named-pipe reads with data
+  waiting complete this way. Cached file reads may too, but on the Windows 11 machine the
+  backend was built on, every overlapped file read went pending, so do not count on it.
+- **`ERROR_IO_PENDING`.** The packet comes later, and the completion thread finishes it.
+- **Any other failure.** No packet is queued for an immediate failure, so it completes
+  inline with the error.
+
+"Completes" is always the same three steps, in order: remove the record from the registry,
+call the callback, free the record (and its buffer copy with it). `ERROR_HANDLE_EOF` on a
+read is a zero-byte success, wherever it surfaces; other errors are normalized as on the
+thread-pool backend, including `is_a_directory` for a transfer on a directory handle.
+
+**Packets that are not the backend's.** The completion thread looks each packet's
+`OVERLAPPED` address up in the registry and completes only a record it finds there. A packet
+whose address is not registered, such as one from a consumer's own untagged overlapped call
+on a handle this backend opened, is ignored: never cast to a record, never completed, never
+freed. A consumer who uses such a handle directly should set the low-order bit of `hEvent`,
+Windows' documented way of keeping a completion off the handle's port; the thread-pool
+backend's own transfers already do, so a pool transfer on one of these handles posts nothing.
+
+**Transfers need a handle this backend opened.** A handle must be opened with
+`FILE_FLAG_OVERLAPPED` and associated with the port for its completion to arrive, and a
+handle can be associated with only one port, for life. A transfer on any other overlapped
+handle would wait for a packet that never comes, which is why `file_io` routes adopted files
+to a thread-pool backend.
+
+**Tokens.** A token for an IOCP transfer has bit 63 set; every other token came from the
+internal thread-pool backend, and `cancel` forwards it there. Cancelling an IOCP transfer is,
+for now, a hint the backend does not act on: the transfer completes once with its real
+result, which the contract allows. Tokens are ids, never record
+addresses, so a stale token cannot name a newer record at a reused address.
+
+### What runs on the completion thread
+
+Every IOCP transfer's callback runs on the one completion thread, and the file layer drops
+an operation's backend reference there. For a cancelled operation, or a file whose
+`async_file` is already gone, that is often the last reference, so the operation's teardown
+runs on that thread too: the `io_buffer` release and, through the handle's owner,
+`CloseHandle`. **A close that blocks, as one on a network filesystem can, therefore delays
+every other transfer's completion on that `file_io` until it returns.** The thread-pool
+backend has the same property, spread across its workers. This is accepted rather than
+engineered around: local files close quickly, and `co_await file.close()` lets a caller who
+cares choose where the close happens.
+
+### Shutdown
+
+The destructor posts a packet with a reserved completion key, which the completion thread
+treats as "exit", joins the thread, closes the port, and then destroys the internal
+thread-pool backend. Destroying it with a transfer still in flight is a precondition
+violation: `file_io` never does, because it waits for every outstanding operation first. It
+asserts in debug builds and calls `std::terminate()` under `NDEBUG`, rather than free a
+record the kernel may still write into.
