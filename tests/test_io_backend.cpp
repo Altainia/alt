@@ -168,6 +168,16 @@ TEST(IoBackendTest, CancelThenCompleteWithSuccessStillDeliversSuccess)
 	EXPECT_FALSE(rec.last.error);
 }
 
+TEST(IoBackendTest, TokensCompareByValue)
+{
+	const alt::io_token seven{7};
+
+	EXPECT_EQ(seven, alt::io_token{7});
+	EXPECT_NE(seven, alt::io_token{8});
+	EXPECT_NE(seven, alt::io_token{});
+	EXPECT_EQ(alt::io_token{}, alt::io_token{});
+}
+
 TEST(IoBackendTest, ManualBackendReportsItsKindAsManual)
 {
 	const alt::manual_io_backend backend;
