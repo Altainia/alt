@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <string>
@@ -325,11 +326,28 @@ namespace std
 			return alt::detail::basic_string_clearing_alloc<CharT, Alloc>{a};
 		}
 
+		/**
+		 * Zeroes the characters @p s can still reach in place: its whole buffer, terminator
+		 * included, when that buffer is the SSO storage inside the object, and only its used
+		 * portion, terminator included, when the buffer is on the heap.
+		 *
+		 * The heap case stops at size() + 1 on purpose. The bytes beyond it are not left
+		 * behind: clearing_allocator::deallocate zeroes the whole block when it is released.
+		 * But until then they are capacity the standard library may have poisoned for
+		 * AddressSanitizer (MSVC's STL annotates a heap string's [size() + 1, capacity() + 1)
+		 * that way), and writing them is a container-overflow report wherever the write is
+		 * instrumented (issue #66). The SSO buffer is never annotated by MSVC's STL, and the
+		 * bytes past size() in it are exactly the stale ones that nothing else would clear.
+		 */
 		static void zero_sso(Spec& s) noexcept
 		{
-			alt::clear_memory(
-			  const_cast<CharT*>(s.StorageBase::data()),
-			  (s.StorageBase::capacity() + 1) * sizeof(CharT));
+			CharT* const               data   = const_cast<CharT*>(s.StorageBase::data());
+			unsigned char const* const object = reinterpret_cast<unsigned char const*>(std::addressof(s));
+			unsigned char const* const first  = reinterpret_cast<unsigned char const*>(data);
+			// std::less, not <, gives pointers into unrelated objects a defined order.
+			bool const in_object = !std::less<>{}(first, object) && std::less<>{}(first, object + sizeof(s));
+			auto const count     = in_object ? s.StorageBase::capacity() : s.StorageBase::size();
+			alt::clear_memory(data, (count + 1) * sizeof(CharT));
 		}
 
 	public:
