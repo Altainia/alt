@@ -219,7 +219,11 @@ All of them copy their paths into the operation, so a path need not outlive the 
   is unspecified. Each entry's kind describes the entry itself, so a symbolic link is
   `file_kind::symlink`; an entry whose kind could not be determined is
   `file_kind::unknown` rather than failing the listing. A file is
-  `std::errc::not_a_directory`.
+  `std::errc::not_a_directory`. Each entry's `name` is the filesystem's own bytes on
+  POSIX, which need not be UTF-8, and UTF-8 on Windows, converted from the native UTF-16
+  rather than to the ANSI code page; either way it names the same file again. A Windows
+  name that is not valid UTF-16 (an unpaired surrogate) has no UTF-8 form and fails the
+  listing with `std::errc::illegal_byte_sequence`.
 
 ## `run`, the escape hatch
 

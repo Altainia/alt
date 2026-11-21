@@ -112,19 +112,20 @@ namespace alt
 		 *               mean a double close, which can close a recycled descriptor.
 		 *               invalid_native_handle is allowed and yields a file on which
 		 *               every operation reports std::errc::bad_file_descriptor.
-		 *               Any other handle must be one on which a transfer blocks until
-		 *               it is done, and that is the caller's responsibility:
-		 *               a Windows HANDLE must NOT have been opened with
-		 *               FILE_FLAG_OVERLAPPED, because the transfer arm passes an
-		 *               OVERLAPPED only to carry the offset and treats
-		 *               ERROR_IO_PENDING as a failure, after which the operation
-		 *               completes and releases its buffer while the kernel may still
-		 *               be writing into it. A POSIX descriptor must be seekable,
-		 *               because positional transfers need that: a non-seekable one (a
-		 *               FIFO, socket or tty) reports std::errc::illegal_seek. Windows
-		 *               has no equivalent: a pipe handle ignores the offset rather than
-		 *               failing, so it is the caller's to avoid there. Handles
-		 *               opened by file_io::open satisfy both.
+		 *               A Windows HANDLE may have been opened for synchronous or for
+		 *               overlapped I/O (FILE_FLAG_OVERLAPPED): a transfer that goes
+		 *               pending is waited for on an event of its own, so the buffer is
+		 *               never released while the kernel still owns it, concurrent
+		 *               transfers on the handle do not wake one another, and none
+		 *               queues a packet to a completion port the handle is associated
+		 *               with. A pipe handle ignores the offset rather than failing, so
+		 *               it is the caller's to avoid. A POSIX descriptor must be
+		 *               seekable, because positional transfers need that: a
+		 *               non-seekable one (a FIFO, socket or tty) reports
+		 *               std::errc::illegal_seek. One in O_NONBLOCK mode on a device
+		 *               that honours it reports
+		 *               std::errc::resource_unavailable_try_again instead of waiting.
+		 *               Handles opened by file_io::open satisfy all of this.
 		 */
 		[[nodiscard]] static async_file adopt(const file_io& io, native_handle handle);
 

@@ -148,17 +148,20 @@ same one twice: two owners mean a double close, which can close a recycled descr
 `invalid_native_handle` is allowed and yields a file on which every operation reports
 `bad_file_descriptor`.
 
-Any other handle must be one on which a transfer **blocks until it is done**, which is
-the caller's responsibility to arrange:
+Any other handle must support positional transfers:
 
-- A Windows `HANDLE` must **not** have been opened with `FILE_FLAG_OVERLAPPED`. The
-  transfer arm passes an `OVERLAPPED` only to carry the offset and treats
-  `ERROR_IO_PENDING` as a failure, after which the operation completes and releases its
-  buffer while the kernel may still be writing into it.
+- A Windows `HANDLE` may have been opened for synchronous **or** for overlapped I/O
+  (`FILE_FLAG_OVERLAPPED`). A transfer that goes pending is waited for on an event of its
+  own, so its buffer is never released while the kernel still owns it, concurrent
+  transfers on one handle do not wake one another, and none queues a packet to a
+  completion port the handle is associated with. A pipe handle ignores the offset rather
+  than failing, so it is the caller's to avoid.
 - A POSIX descriptor must be **seekable**, because positional transfers need that: a
-  non-seekable one (a FIFO, socket or tty) reports `std::errc::illegal_seek`.
+  non-seekable one (a FIFO, socket or tty) reports `std::errc::illegal_seek`. One in
+  `O_NONBLOCK` mode on a device that honours it reports
+  `std::errc::resource_unavailable_try_again` instead of waiting.
 
-Handles opened by `file_io::open` satisfy both.
+Handles opened by `file_io::open` satisfy all of this.
 
 ## What a cancelled operation can still do
 

@@ -429,6 +429,12 @@ the offset and would otherwise report `ERROR_IO_PENDING` as a failure and releas
 the kernel still owns. A more robust arm (a per-transfer event in `position.hEvent`, then
 `GetOverlappedResult` waiting on `ERROR_IO_PENDING`) is the right eventual answer and is
 tracked as issue #52; it is untested here because no Windows host was available to run it.
+**Resolved by issue #52:** the arm now gives each transfer its own event, waits on it when
+the call goes pending, and tags the event's low-order bit so a handle the consumer has
+associated with a completion port gets no packet naming the worker's stack `OVERLAPPED`.
+The Windows half of the synchronous-handle precondition is lifted. The 7c question below
+is unchanged: the pool arm can now serve an overlapped handle, but that does not give an
+IOCP backend a way to prepare one.
 **7c must choose among three options, each with a cost (issue #53):**
 
 1. *Add a registration call to the seam.* Honest, and gives an IOCP backend its hook, but

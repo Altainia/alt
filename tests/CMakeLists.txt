@@ -37,6 +37,7 @@ add_executable(alt_tests
     test_memory_header_hygiene.cpp
     test_memory_header_no_glibc.cpp
     test_clearing_string.cpp
+    test_clearing_string_instrumented.cpp
     test_transcode.cpp
     test_projection.cpp
     test_concepts.cpp

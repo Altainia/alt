@@ -71,6 +71,16 @@ namespace alt
 	/** @brief One entry of a directory listing. `.` and `..` are never reported. */
 	struct directory_entry
 	{
+		/**
+		 * @brief The entry's file name, without its directory.
+		 *
+		 * On POSIX, the bytes the filesystem holds, unchanged: a POSIX name need not be valid
+		 * UTF-8, and is not converted. On Windows, the native UTF-16 name converted to UTF-8
+		 * (not to the ANSI code page), so either way `std::filesystem::path(std::u8string(...))`
+		 * of a UTF-8 name, or the bytes themselves on POSIX, name the same file again. A Windows
+		 * name that is not valid UTF-16 has no UTF-8 form, and fails the listing with
+		 * std::errc::illegal_byte_sequence.
+		 */
 		std::string name;
 		file_kind   kind = file_kind::unknown;
 	};

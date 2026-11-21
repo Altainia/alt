@@ -8,12 +8,15 @@
 #include <cassert>
 #include <cerrno>
 #include <cstdint>
+#include <exception>
+#include <expected>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -147,20 +150,93 @@ namespace alt
 			return ::GetFileInformationByHandle(to_handle(handle), &info) != FALSE && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 		}
 
+		/// A manual-reset event owned by one transfer, closed when the transfer is done with it.
+		class transfer_event
+		{
+		public:
+			transfer_event() noexcept: m_event(::CreateEventW(nullptr, TRUE, FALSE, nullptr))
+			{}
+
+			~transfer_event()
+			{
+				if(m_event != nullptr)
+				{
+					static_cast<void>(::CloseHandle(m_event));
+				}
+			}
+
+			transfer_event(const transfer_event&)            = delete;
+			transfer_event& operator=(const transfer_event&) = delete;
+
+			[[nodiscard]] HANDLE get() const noexcept
+			{
+				return m_event;
+			}
+
+		private:
+			HANDLE m_event;
+		};
+
+		/**
+		 * Moves bytes at the request's offset, and returns only once the kernel is done with the
+		 * buffer, whether the handle was opened for synchronous or for overlapped I/O.
+		 *
+		 * file_io::open never sets FILE_FLAG_OVERLAPPED, but async_file::adopt() accepts a handle
+		 * that has it, and on such a handle ReadFile and WriteFile may return ERROR_IO_PENDING with
+		 * the transfer still in flight. Returning then would release the job's io_buffer, and this
+		 * frame's OVERLAPPED, while the kernel still writes into them.
+		 *
+		 * So each transfer carries its own event, and waits on it when the call goes pending. The
+		 * event is per transfer, not per handle: async_file allows concurrent positional transfers
+		 * on one handle, and with no event GetOverlappedResult waits on the handle itself, which
+		 * any of them can signal. The event's low-order bit is set, which is Windows' documented
+		 * way of keeping the completion off a completion port the handle may be associated with:
+		 * a packet queued there would name this frame's OVERLAPPED after it is gone. Because the
+		 * tagged value is not itself a waitable handle, the wait is on the untagged event, and
+		 * GetOverlappedResult is only asked for the outcome of a transfer already known complete.
+		 */
 		io_completion do_transfer(const io_request& request, bool is_write) noexcept
 		{
-			io_completion result;
+			io_completion        result;
+			const transfer_event done;
+			if(done.get() == nullptr)
+			{
+				result.error = last_error();
+				return result;
+			}
 			// ReadFile and WriteFile take a 32-bit count; a short count is a normal result.
 			const auto count = static_cast<DWORD>(std::min<std::size_t>(transfer_size(request), std::numeric_limits<DWORD>::max()));
 			OVERLAPPED position{};
 			position.Offset     = static_cast<DWORD>(request.offset & 0xFFFFFFFFU);
 			position.OffsetHigh = static_cast<DWORD>(request.offset >> 32U);
-			DWORD       moved   = 0;
-			void* const data    = request.buffer.bytes().data();
-			const BOOL  ok      = is_write ? ::WriteFile(to_handle(request.handle), data, count, &moved, &position) : ::ReadFile(to_handle(request.handle), data, count, &moved, &position);
+			position.hEvent     = reinterpret_cast<HANDLE>(reinterpret_cast<std::uintptr_t>(done.get()) | 1U);
+			const HANDLE handle = to_handle(request.handle);
+			void* const  data   = request.buffer.bytes().data();
+			// The count is read from the OVERLAPPED once the transfer is complete, never from an
+			// out-parameter, which is not meaningful for a transfer that went pending.
+			BOOL ok = is_write ? ::WriteFile(handle, data, count, nullptr, &position) : ::ReadFile(handle, data, count, nullptr, &position);
+			if(ok == FALSE && ::GetLastError() == ERROR_IO_PENDING)
+			{
+				// Nothing may return from here until the kernel is done with the buffer, so a wait
+				// that fails is not survivable: returning would be the use-after-free this exists
+				// to prevent. On a valid event with no timeout it cannot fail.
+				if(::WaitForSingleObject(done.get(), INFINITE) != WAIT_OBJECT_0)
+				{
+					std::terminate();
+				}
+				ok = TRUE;
+			}
+			DWORD moved = 0;
+			if(ok != FALSE)
+			{
+				// Complete by now, so this reads the outcome without waiting. It reports a failure
+				// that surfaced only on completion, such as ERROR_HANDLE_EOF on an overlapped read.
+				ok = ::GetOverlappedResult(handle, &position, &moved, FALSE);
+			}
 			if(ok == FALSE)
 			{
-				// Reading at or past the end is a short count of zero, not a failure.
+				// Reading at or past the end is a short count of zero, not a failure. ReadFile
+				// reports it on a synchronous handle; on an overlapped one either call may.
 				if(!is_write && ::GetLastError() == ERROR_HANDLE_EOF)
 				{
 					return result;
@@ -202,12 +278,12 @@ namespace alt
 			}
 			constexpr std::int64_t windows_to_unix_100ns = 116444736000000000LL;
 			const auto             ticks                 = (static_cast<std::int64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
-			                   static_cast<std::int64_t>(info.ftLastWriteTime.dwLowDateTime);
-			out.size            = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-			out.mtime_ns        = (ticks - windows_to_unix_100ns) * 100;
-			out.kind            = kind_of(info.dwFileAttributes);
-			out.identity.device = info.dwVolumeSerialNumber;
-			out.identity.serial = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+			                                               static_cast<std::int64_t>(info.ftLastWriteTime.dwLowDateTime);
+			out.size                                     = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+			out.mtime_ns                                 = (ticks - windows_to_unix_100ns) * 100;
+			out.kind                                     = kind_of(info.dwFileAttributes);
+			out.identity.device                          = info.dwVolumeSerialNumber;
+			out.identity.serial                          = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
 			return {};
 		}
 
@@ -423,6 +499,59 @@ namespace alt
 			}
 		}
 
+		/**
+		 * The name directory_entry promises: the filesystem's own bytes on POSIX, UTF-8 on Windows.
+		 *
+		 * path::string() is not that on Windows: it converts the native UTF-16 to the ANSI code
+		 * page, which has no byte for most characters and a different one for many others, and
+		 * the conversion throws on a name it cannot represent, which fails the whole listing.
+		 *
+		 * The conversion to UTF-8 is WideCharToMultiByte's, called directly, rather than
+		 * path::u8string()'s. Neither the standard nor Microsoft documents what u8string() throws
+		 * when a name has no UTF-8 form; WideCharToMultiByte documents its failure: with
+		 * WC_ERR_INVALID_CHARS it returns 0 and sets ERROR_NO_UNICODE_TRANSLATION for invalid
+		 * input, where without the flag it would silently substitute U+FFFD.
+		 *
+		 * A Windows name that is not valid UTF-16 (an unpaired surrogate, which NTFS permits) is
+		 * that case, and is reported as illegal_byte_sequence rather than given a lossy name,
+		 * because a lossy name would not round-trip to the file.
+		 */
+		std::expected<std::string, std::error_code> entry_name(const std::filesystem::path& entry)
+		{
+#ifdef _WIN32
+			const std::filesystem::path name = entry.filename();
+			const std::wstring&         wide = name.native();
+			if(wide.empty())
+			{
+				return std::string();
+			}
+			// A file name is at most a few hundred UTF-16 units; the API's count is an int.
+			if(wide.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+			{
+				return std::unexpected(std::make_error_code(std::errc::filename_too_long));
+			}
+			const auto wide_count = static_cast<int>(wide.size());
+			const auto failure    = [] {
+				const DWORD code = ::GetLastError();
+				return code == ERROR_NO_UNICODE_TRANSLATION ? std::make_error_code(std::errc::illegal_byte_sequence) : last_error();
+			};
+			// The first call measures, the second converts; both reject invalid UTF-16 the same way.
+			const int size = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wide_count, nullptr, 0, nullptr, nullptr);
+			if(size == 0)
+			{
+				return std::unexpected(failure());
+			}
+			std::string utf8(static_cast<std::size_t>(size), '\0');
+			if(::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wide_count, utf8.data(), size, nullptr, nullptr) == 0)
+			{
+				return std::unexpected(failure());
+			}
+			return utf8;
+#else
+			return entry.filename().string();
+#endif
+		}
+
 		/// Lists @p path into @p out, replacing its contents only on success. Never reports . or ..
 		std::error_code do_list_directory(const std::filesystem::path& path, std::vector<directory_entry>& out)
 		{
@@ -443,7 +572,12 @@ namespace alt
 			{
 				std::error_code type_error;
 				const auto      type = it->symlink_status(type_error).type();
-				found.push_back(alt::directory_entry{.name = it->path().filename().string(), .kind = type_error ? file_kind::unknown : kind_of(type)});
+				auto            name = entry_name(it->path());
+				if(!name)
+				{
+					return name.error();
+				}
+				found.push_back(alt::directory_entry{.name = std::move(*name), .kind = type_error ? file_kind::unknown : kind_of(type)});
 			}
 			if(error)
 			{
@@ -616,9 +750,11 @@ namespace alt
 				catch(...)
 				{
 					// This function is noexcept and a worker has nobody to hand an exception to,
-					// so one would abort the process. The reachable source is a directory entry
-					// whose name cannot be converted to a narrow string (Windows), which is
-					// filesystem content the caller does not control. Report it instead.
+					// so one would abort the process. Nothing here is known to throw anything else:
+					// the one source there was, a Windows directory entry whose name the narrow
+					// conversion could not represent, no longer throws at all: entry_name()
+					// converts without exceptions and reports illegal_byte_sequence. This stays
+					// as the backstop.
 					result.error = std::make_error_code(std::errc::io_error);
 				}
 			}
