@@ -21,6 +21,7 @@
 #include <optional>
 #include <semaphore>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -28,7 +29,13 @@
 #include "coroutine_test_support.hpp"
 #include "death_test_support.hpp"
 
-#ifndef _WIN32
+#ifdef _WIN32
+// windows.h defines min and max as function-like macros; NOMINMAX is its documented switch to leave them out.
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include <windows.h>
+#else
 #	include <fcntl.h>
 #	include <sys/stat.h>
 #	include <sys/syscall.h>
@@ -601,14 +608,13 @@ TEST_F(ThreadPoolBackendTest, AJobCancelledBeforeItStartedNeverTouchesTheFile)
 	EXPECT_EQ(read_whole(path), "") << "the cancelled write reached the file";
 }
 
-#ifndef _WIN32
 namespace
 {
-	constexpr auto fifo_wait_budget = std::chrono::seconds(10);
+	constexpr auto mid_job_wait_budget = std::chrono::seconds(10);
 
 	/// Retries @p ready every millisecond until it holds or @p budget is spent.
 	template<typename Ready>
-	bool wait_until(Ready ready, std::chrono::steady_clock::duration budget = fifo_wait_budget)
+	bool wait_until(Ready ready, std::chrono::steady_clock::duration budget = mid_job_wait_budget)
 	{
 		const auto give_up = std::chrono::steady_clock::now() + budget;
 		while(!ready())
@@ -621,7 +627,104 @@ namespace
 		}
 		return true;
 	}
+} // namespace
 
+#ifdef _WIN32
+namespace
+{
+	/// Closes a Win32 handle on scope exit; a null handle is left alone.
+	struct scoped_handle
+	{
+		HANDLE value = nullptr;
+
+		scoped_handle() = default;
+		explicit scoped_handle(HANDLE owned): value(owned)
+		{}
+		scoped_handle(const scoped_handle&)            = delete;
+		scoped_handle& operator=(const scoped_handle&) = delete;
+
+		~scoped_handle()
+		{
+			reset();
+		}
+
+		void reset() noexcept
+		{
+			if(value != nullptr)
+			{
+				static_cast<void>(::CloseHandle(value));
+				value = nullptr;
+			}
+		}
+	};
+
+	struct thread_probe
+	{
+		std::binary_semaphore done{0};
+		HANDLE                thread = nullptr;
+	};
+
+	/// A handle to the pool's only worker that GetThreadIOPendingFlag can query, learned by running a job on it.
+	scoped_handle worker_thread(alt::thread_pool& pool)
+	{
+		thread_probe probe;
+		pool.post(alt::work_item{.invoke = +[](void* state) noexcept {
+			                         auto& p = *static_cast<thread_probe*>(state);
+			                         // GetCurrentThread() is a pseudo-handle that means "the caller" on
+			                         // every thread; duplicating it yields a real handle to this worker.
+			                         // GetThreadIOPendingFlag needs the full query right: with
+			                         // THREAD_QUERY_LIMITED_INFORMATION it fails with ERROR_ACCESS_DENIED.
+			                         if(::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(), &p.thread, THREAD_QUERY_INFORMATION, FALSE, 0) == FALSE)
+			                         {
+				                         p.thread = nullptr;
+			                         }
+			                         p.done.release();
+		                         },
+		                         .state = &probe});
+		probe.done.acquire();
+		return scoped_handle(probe.thread);
+	}
+
+	/// Whether @p thread has an I/O request outstanding: Windows' counterpart of reading wchan.
+	/// A thread blocked in a synchronous ReadFile has its request queued and reports TRUE.
+	/// Empty when the query itself fails, which must never read as "idle".
+	std::optional<bool> has_pending_io(HANDLE thread)
+	{
+		BOOL pending = FALSE;
+		if(::GetThreadIOPendingFlag(thread, &pending) == FALSE)
+		{
+			return std::nullopt;
+		}
+		return pending != FALSE;
+	}
+
+	/// Frees a worker still blocked in ReadFile when a failed assertion returns early, so the
+	/// fixture's pool join cannot hang on it: closing the write end fails the read with
+	/// ERROR_BROKEN_PIPE. Does nothing once the test saw the completion.
+	struct pipe_releaser
+	{
+		scoped_handle& writer;
+		waiter&        job;
+		bool           completed = false;
+
+		pipe_releaser(scoped_handle& write_end, waiter& pending): writer(write_end), job(pending)
+		{}
+		pipe_releaser(const pipe_releaser&)            = delete;
+		pipe_releaser& operator=(const pipe_releaser&) = delete;
+
+		~pipe_releaser()
+		{
+			if(!completed)
+			{
+				writer.reset();
+				job.done.acquire();
+			}
+		}
+	};
+} // namespace
+#else
+namespace
+{
 	/// Frees a reader still blocked in open() when a failed assertion returns early, so the
 	/// fixture's pool join cannot hang on it. Does nothing once the test saw the completion.
 	struct fifo_releaser
@@ -747,7 +850,50 @@ namespace
 TEST_F(ThreadPoolBackendTest, AJobCancelledAfterItStartedStillCompletesAndReportsItsResult)
 {
 #ifdef _WIN32
-	GTEST_SKIP() << "needs a call that blocks mid-job (a FIFO open); Windows has no equivalent this test can drive without a Windows host";
+	// A read on a pipe nobody has written to blocks inside ReadFile until data arrives. That
+	// holds the job in the middle of its I/O, which no regular-file operation can do, so the
+	// cancel lands strictly after the job started and strictly before it finished.
+	HANDLE read_end  = nullptr;
+	HANDLE write_end = nullptr;
+	ASSERT_NE(::CreatePipe(&read_end, &write_end, nullptr, 0), FALSE) << "CreatePipe failed: " << ::GetLastError();
+	scoped_handle reader(read_end);
+	scoped_handle writer(write_end);
+
+	// GetThreadIOPendingFlag plays wchan's role: it reports whether the worker has an I/O
+	// request outstanding. It must read FALSE while the worker is idle, or a TRUE later would
+	// not prove the job is inside its read.
+	const auto worker = worker_thread(pool());
+	ASSERT_NE(worker.value, nullptr) << "could not obtain a handle to the pool's worker";
+	const auto idle = has_pending_io(worker.value);
+	ASSERT_TRUE(idle.has_value()) << "GetThreadIOPendingFlag failed: " << ::GetLastError();
+	ASSERT_FALSE(*idle) << "the idle worker already reports pending I/O; the probe cannot tell anything apart";
+
+	constexpr std::string_view payload = "mid-job";
+	alt::io_request            request;
+	request.op                = alt::io_op::read;
+	request.handle            = reinterpret_cast<alt::native_handle>(reader.value);
+	request.buffer            = buffer_of(payload.size());
+	request.size              = payload.size();
+	const alt::io_buffer view = request.buffer; // the job holds its own copy; this one reads the bytes back
+
+	waiter     w;
+	const auto token = backend().submit(request, deliver, &w);
+	ASSERT_TRUE(token.has_value());
+	pipe_releaser releaser(writer, w);
+
+	ASSERT_TRUE(wait_until([&] { return has_pending_io(worker.value).value_or(false); }))
+	  << "the worker never blocked in its read; the job never started";
+	backend().cancel(*token);
+	DWORD written = 0;
+	ASSERT_NE(::WriteFile(writer.value, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr), FALSE);
+	ASSERT_EQ(written, payload.size());
+	w.done.acquire();
+	releaser.completed = true;
+
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_FALSE(w.result.error) << "a cancel after the job started changed its outcome: " << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, payload.size()) << "the read completed but its byte count was discarded";
+	EXPECT_EQ(text_of(view, payload.size()), payload) << "the read completed but its data never reached the buffer";
 #else
 	// Opening a FIFO for reading blocks inside the syscall until a writer appears. That
 	// holds the job in the middle of its I/O, which no regular-file operation can do, so
