@@ -940,7 +940,7 @@ it first: it replaces `StoreWorker` and `CommitOnWorker` outright and makes the
 |-------|----------|
 | **7a** | `io_buffer`, `io_backend`, `manual_io_backend`, the operation block and awaiter, `file_io`, `async_file`, the thread-pool backend, the escape hatch, and the whole test suite above. |
 | **7b** | The io_uring backend behind the same interface: ring setup, runtime probe, per-operation fallback to the pool arm. No public API change. |
-| **7c** | The IOCP backend for read and write; everything else already runs on the pool arm. No public API change. |
+| **7c** | The IOCP backend for read and write; everything else already runs on the pool arm. `automatic` selects it on Windows, and adopted files are routed to the pool arm (issue #53). One public API addition: `async_file::backend()`, which reports the backend serving a file; otherwise no public API change. |
 
 7b and 7c change no public surface, which is the test of whether 7a's interface was
 drawn in the right place. If either needs to widen it, that is a design error in 7a

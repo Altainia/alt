@@ -176,8 +176,10 @@ namespace alt
 			}
 
 			// state->created is cleared only once adopt() has succeeded: if it throws, the
-			// state's destructor still closes the descriptor.
-			std::shared_ptr<io_handle> file = io_handle::adopt(state->created);
+			// state's destructor still closes the descriptor. The one caller that passes
+			// `opened`: this handle came from the service's own backend, prepared for it, so
+			// its operations may go there. Every other adopt() keeps the safe default.
+			std::shared_ptr<io_handle> file = io_handle::adopt(state->created, detail::handle_origin::opened);
 			state->created                  = invalid_native_handle;
 			co_return detail::async_file_access::make(std::move(file), std::move(owner));
 		}
@@ -233,6 +235,17 @@ namespace alt
 	native_handle async_file::handle() const noexcept
 	{
 		return m_file ? m_file->native() : invalid_native_handle;
+	}
+
+	io_backend_kind async_file::backend() const noexcept
+	{
+		// Read from the kinds io_shared stored at construction, never through a backend
+		// pointer: the service may be gone and its backends with it, while this state lives on.
+		if(!m_owner)
+		{
+			return io_backend_kind::thread_pool;
+		}
+		return m_file && m_file->origin() == detail::handle_origin::adopted ? m_owner->adopted_kind : m_owner->primary_kind;
 	}
 
 	task<std::expected<async_file, std::error_code>> file_io::open(const std::filesystem::path& path, const open_flags how, const file_mode mode) const

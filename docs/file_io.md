@@ -102,12 +102,44 @@ thread:
   first operation on a permit that can never exist), for an empty `completion` (posting
   to an empty `scheduler_ref` asserts on whichever I/O thread finishes first, far from
   the mistake), and for `io_backend_kind::manual`, which cannot be selected by value;
-- `std::errc::not_supported` for a kind this build does not provide;
+- `std::errc::not_supported` for a kind this build does not provide (`iocp` off Windows,
+  `io_uring` everywhere in this release);
+- the operating system's error for an explicit `iocp` on Windows whose completion port or
+  completion thread cannot be created;
 - `std::errc::not_enough_memory` if constructing the service throws `std::bad_alloc`.
 
-`automatic` asks the factory to pick. In this release that is always
-`io_backend_kind::thread_pool`, and `backend()` reports what was chosen; it never reports
-`automatic`. The overload that is handed an [`io_backend`](io_backend.md) is how a test
+### Which backend
+
+`backend()` reports what was chosen; it never reports `automatic`.
+
+| Requested | Windows | Elsewhere |
+|-----------|---------|-----------|
+| `automatic` | `iocp`; `thread_pool` if the port or its thread cannot be created | `thread_pool` |
+| `thread_pool` | `thread_pool` | `thread_pool` |
+| `iocp` | `iocp`, or `create` fails with the reason | `not_supported` |
+| `io_uring` | `not_supported` | `not_supported` |
+| `manual` | `invalid_argument` | `invalid_argument` |
+
+A fallback is never silent: a Windows `automatic` service that could not build IOCP
+reports `thread_pool`.
+
+**The IOCP backend** performs an opened file's reads and writes as overlapped I/O,
+completed through a private completion port by one completion thread the backend owns;
+the resumption is still posted to `completion`, as for every backend. Every other
+operation (the opens, `sync`, `stat`, the path operations and `run()`) runs on the borrowed
+pool, exactly as on the thread-pool backend. Its open adds `FILE_FLAG_OVERLAPPED` and
+associates the handle with the port, which changes what
+[`async_file::handle()`](async_file.md#handle) hands out on Windows.
+
+**Adopted files on an IOCP service are served by the thread pool.** IOCP can transfer only
+on handles its own open prepared, so an IOCP service also owns a thread-pool backend on the
+same pool and sends every operation on a file from
+[`async_file::adopt()`](async_file.md#adopt) there.
+[`async_file::backend()`](async_file.md#backend) reports which backend serves a given
+file. Both backends count against the one `max_in_flight`, and the destructor waits for
+both.
+
+The overload that is handed an [`io_backend`](io_backend.md) is how a test
 drives the service with a `manual_io_backend`: `options.backend` must then be `automatic`
 or equal to that backend's `kind()`, and a mismatch is `invalid_argument` rather than a
 silent substitution.

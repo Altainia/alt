@@ -54,6 +54,7 @@ namespace alt
         [[nodiscard]] task<std::expected<file_status, std::error_code>> stat() const;
         [[nodiscard]] task<std::expected<void, std::error_code>>        close();
         [[nodiscard]] native_handle handle() const noexcept;
+        [[nodiscard]] io_backend_kind backend() const noexcept;
     };
 }
 ```
@@ -161,7 +162,48 @@ Any other handle must support positional transfers:
   `O_NONBLOCK` mode on a device that honours it reports
   `std::errc::resource_unavailable_try_again` instead of waiting.
 
-Handles opened by `file_io::open` satisfy all of this.
+Handles opened by `file_io::open` satisfy all of this. On Windows, one opened by an IOCP
+service is overlapped and associated with that service's completion port (see
+[`handle`](#handle)); adopting it elsewhere is fine, since a pool transfer on it queues no
+packet to the port.
+
+**On an IOCP service, an adopted file is served by the thread pool.** IOCP can transfer
+only on handles its own open prepared, overlapped and associated with its port, and an
+adopted handle is neither as far as the library knows. So an IOCP `file_io` also owns a
+thread-pool backend on the same pool, and every operation on an adopted file goes there.
+`backend()` reports it, so the routing is visible rather than silent. On every other
+service an adopted file is served by the service's own backend.
+
+## `backend`
+
+The backend that serves this file's operations. It equals the producing service's
+`file_io::backend()`, except that an adopted file on an IOCP service reports
+`io_backend_kind::thread_pool` (see [`adopt`](#adopt)). A file with no service, because
+it was moved from or closed, reports `io_backend_kind::thread_pool`; a file adopted with
+`invalid_native_handle` reports what any adopted file on its service would. It reads
+values fixed when the service was created, so it is valid even after the service is gone,
+and it is never `automatic`.
+
+## `handle`
+
+The underlying descriptor, or `invalid_native_handle` once closed or moved from. Do not
+close it, and do not use it after `close()` or once the file is destroyed.
+
+**On Windows, a file from `file_io::open` on an IOCP service has an overlapped,
+port-associated handle, and `handle()` returns exactly that.** Two consequences:
+
+- A **synchronous** call on it, a `ReadFile` or `WriteFile` with no `OVERLAPPED`
+  (typically inside `file_io::run()`), is not valid on an overlapped handle. A consumer
+  that needs the handle for transfers of its own must use overlapped calls with an event of
+  its own, and should set the low-order bit of `hEvent`, so that the completion is not
+  queued to the service's port.
+- Such a call **cannot corrupt the library**. A packet that reaches the port anyway is one
+  the completion thread has no record for, and it is ignored; the consumer's own wait on
+  its event is unaffected.
+
+This is a change for Windows users of `handle()` from earlier releases, where `automatic`
+meant the thread pool and the handle was synchronous. An adopted file's handle is returned
+as it was adopted.
 
 ## What a cancelled operation can still do
 

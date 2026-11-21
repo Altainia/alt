@@ -2,10 +2,28 @@
 
 #include <alt/io_backend.hpp>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 
 namespace alt::detail
 {
+
+	/**
+	 * @brief Where an io_handle's handle came from, which decides the backend that serves it.
+	 *
+	 * Only the IOCP backend tells the two apart: it can transfer only on a handle it opened
+	 * itself, overlapped and associated with its port, so alt::detail::io_shared::backend_for()
+	 * sends a file of any other origin to the thread-pool backend an IOCP service also owns.
+	 * Every other backend serves both alike.
+	 */
+	enum class handle_origin : std::uint8_t
+	{
+		/** Produced by the service's own open, and so prepared for its backend. */
+		opened,
+
+		/** Brought in from outside (alt::async_file::adopt), with no promise about how it was opened. */
+		adopted,
+	};
 
 	/**
 	 * @brief A refcounted owner of one operating-system file handle.
@@ -54,11 +72,14 @@ namespace alt::detail
 		 * closes nothing.
 		 *
 		 * @param handle A descriptor on POSIX, a HANDLE on Windows.
+		 * @param origin Where @p handle came from; see handle_origin. The default is the safe
+		 *               one: only the file layer's own open, which knows its backend prepared
+		 *               the handle, passes handle_origin::opened.
 		 */
-		[[nodiscard]] static std::shared_ptr<io_handle> adopt(native_handle handle);
+		[[nodiscard]] static std::shared_ptr<io_handle> adopt(native_handle handle, handle_origin origin = handle_origin::adopted);
 
 		/** @brief Constructor reserved for adopt(); the token makes it uncallable elsewhere. */
-		io_handle(private_token /*token*/, native_handle handle) noexcept;
+		io_handle(private_token /*token*/, native_handle handle, handle_origin origin) noexcept;
 
 		/**
 		 * @brief Closes the descriptor if one was adopted. The only place it is closed.
@@ -85,6 +106,12 @@ namespace alt::detail
 			return m_handle != invalid_native_handle;
 		}
 
+		/** @brief Where the handle came from, as given to adopt(). A constant after construction. */
+		[[nodiscard]] handle_origin origin() const noexcept
+		{
+			return m_origin;
+		}
+
 		/**
 		 * @brief Records that the owner asked to close, without closing.
 		 *
@@ -103,8 +130,9 @@ namespace alt::detail
 		}
 
 	private:
-		native_handle     m_handle;
-		std::atomic<bool> m_close_requested{false};
+		native_handle       m_handle;
+		const handle_origin m_origin;
+		std::atomic<bool>   m_close_requested{false};
 	};
 
 }

@@ -30,6 +30,13 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#ifdef _WIN32
+// windows.h defines min and max as macros otherwise; see src/io_windows.hpp.
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include <windows.h>
+#endif
 
 namespace
 {
@@ -147,9 +154,11 @@ namespace
 	}
 
 	/**
-	 * The service twice over: one on the real thread-pool backend, which does real I/O, and
-	 * one on a manual backend, which lets a test see exactly what was submitted and when.
-	 * Both complete onto the same manual scheduler, which a test drives itself.
+	 * The service twice over: one on the backend `automatic` selects, which does real I/O
+	 * (IOCP on Windows, the thread pool elsewhere), and one on a manual backend, which lets a
+	 * test see exactly what was submitted and when. Both complete onto the same manual
+	 * scheduler, which a test drives itself. A test that needs one particular real backend
+	 * builds it with make_service().
 	 */
 	class AsyncFileTest: public ::testing::Test
 	{
@@ -188,6 +197,15 @@ namespace
 		alt::file_io& real_io()
 		{
 			return *m_real;
+		}
+
+		/**
+		 * A further real service on the fixture's pool and scheduler, on the backend @p kind
+		 * names. The caller keeps it in a local, so it is destroyed before the fixture's pool.
+		 */
+		std::expected<alt::file_io, std::error_code> make_service(const alt::io_backend_kind kind)
+		{
+			return alt::file_io::create(*m_pool, alt::scheduler_ref{m_home}, alt::file_io_options{.backend = kind, .max_in_flight = 64, .queue_depth = 0});
 		}
 
 		/** The service whose backend does nothing until the test completes an operation by hand. */
@@ -783,3 +801,393 @@ TEST_F(AsyncFileTest, AStopWhileParkedOnTheBackpressureLimitDeliversNothingAndLe
 	const auto shared = alt::detail::file_io_access::shared(*service);
 	EXPECT_EQ(shared->slots.available(), 1);
 }
+
+TEST_F(AsyncFileTest, AnAdoptedFileReportsTheServicesBackend)
+{
+	// Only an IOCP service routes adopted files elsewhere; on every other backend an adopted file
+	// is served, and reported, exactly as an opened one is.
+	const auto path   = write_file("data.txt", "0123456789");
+	const auto pooled = make_service(alt::io_backend_kind::thread_pool);
+	ASSERT_TRUE(pooled.has_value());
+
+	const alt::async_file adopted = alt::async_file::adopt(*pooled, open_native(path, alt::flags(alt::open_flag::read)));
+	EXPECT_EQ(adopted.backend(), alt::io_backend_kind::thread_pool);
+
+	auto opened = run(pooled->open(path, alt::flags(alt::open_flag::read)));
+	ASSERT_TRUE(opened.has_value());
+	EXPECT_EQ(opened->backend(), alt::io_backend_kind::thread_pool);
+
+	const alt::async_file on_manual = alt::async_file::adopt(manual_io(), open_native(path, alt::flags(alt::open_flag::read)));
+	EXPECT_EQ(on_manual.backend(), alt::io_backend_kind::manual);
+
+	const alt::async_file empty = alt::async_file::adopt(*pooled, alt::invalid_native_handle);
+	EXPECT_EQ(empty.backend(), alt::io_backend_kind::thread_pool);
+
+	// And it is served where it says it is.
+	alt::io_buffer       buffer = buffer_of(4);
+	const alt::io_buffer view   = buffer;
+	const auto           read   = run(adopted.read_at(std::move(buffer), 2, 4));
+	ASSERT_TRUE(read.has_value()) << read.error().message();
+	EXPECT_EQ(text_of(view, *read), "2345");
+}
+
+#ifdef _WIN32
+namespace
+{
+	/** A Win32 handle the test owns until it hands it to adopt(), which then owns it. */
+	class win32_handle
+	{
+	public:
+		explicit win32_handle(const HANDLE value) noexcept: m_value(value == INVALID_HANDLE_VALUE ? nullptr : value)
+		{}
+
+		win32_handle(const win32_handle&)            = delete;
+		win32_handle& operator=(const win32_handle&) = delete;
+		win32_handle(win32_handle&&)                 = delete;
+		win32_handle& operator=(win32_handle&&)      = delete;
+
+		~win32_handle()
+		{
+			reset();
+		}
+
+		[[nodiscard]] HANDLE get() const noexcept
+		{
+			return m_value;
+		}
+
+		[[nodiscard]] bool valid() const noexcept
+		{
+			return m_value != nullptr;
+		}
+
+		/** Gives the handle up to an owner that will close it. */
+		[[nodiscard]] alt::native_handle release() noexcept
+		{
+			return reinterpret_cast<alt::native_handle>(std::exchange(m_value, nullptr));
+		}
+
+		void reset() noexcept
+		{
+			if(m_value != nullptr)
+			{
+				static_cast<void>(::CloseHandle(m_value));
+				m_value = nullptr;
+			}
+		}
+
+	private:
+		HANDLE m_value;
+	};
+
+	/** Opens @p path for reading and writing, as a consumer bringing its own handle might; @p extra is OR'd into the flags. */
+	win32_handle open_for_adoption(const std::filesystem::path& path, const DWORD extra)
+	{
+		return win32_handle{::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | extra, nullptr)};
+	}
+
+	/** A pipe name no other test, and no other process, is using. */
+	std::wstring unique_pipe_name()
+	{
+		static std::atomic<int> counter{0};
+		return L"\\\\.\\pipe\\alt_async_file_" + std::to_wstring(::GetCurrentProcessId()) + L"_" + std::to_wstring(counter.fetch_add(1));
+	}
+
+	/**
+	 * A named pipe whose server end is opened with FILE_FLAG_OVERLAPPED, for the test to adopt,
+	 * and whose client end is synchronous and stays with the test. A read on the server end with
+	 * nothing written goes pending every time, which a regular file does not promise: a cached
+	 * read on an overlapped file handle usually completes synchronously.
+	 */
+	struct overlapped_pipe
+	{
+		std::wstring name = unique_pipe_name();
+		win32_handle server{::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 4096, 0, nullptr)};
+		// Opening the client end after the server exists connects the pipe; no ConnectNamedPipe is needed.
+		win32_handle client{::CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr)};
+
+		[[nodiscard]] bool valid() const
+		{
+			return server.valid() && client.valid();
+		}
+
+		/** Writes @p bytes into the pipe from the client end. */
+		[[nodiscard]] bool write(const std::string& bytes) const
+		{
+			DWORD written = 0;
+			return ::WriteFile(client.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) != FALSE && written == bytes.size();
+		}
+
+		/** Reads exactly @p size bytes at the client end, or what arrived before the pipe failed. */
+		[[nodiscard]] std::string read(const std::size_t size) const
+		{
+			std::string bytes(size, '\0');
+			std::size_t got = 0;
+			while(got < size)
+			{
+				DWORD count = 0;
+				if(::ReadFile(client.get(), bytes.data() + got, static_cast<DWORD>(size - got), &count, nullptr) == FALSE || count == 0)
+				{
+					break;
+				}
+				got += count;
+			}
+			bytes.resize(got);
+			return bytes;
+		}
+	};
+
+	/** What only_worker_of() learns on the worker. Shared, so the job can finish after the wait returns. */
+	struct worker_probe
+	{
+		HANDLE                handle = nullptr;
+		std::binary_semaphore done{0};
+	};
+
+	/**
+	 * A handle to the only worker of @p pool that GetThreadIOPendingFlag can query, learned by
+	 * running one job on it. GetCurrentThread() is a pseudo-handle; duplicating it yields a real
+	 * one, and the query needs THREAD_QUERY_INFORMATION rather than the limited right.
+	 */
+	win32_handle only_worker_of(alt::thread_pool& pool)
+	{
+		const auto probe = std::make_shared<worker_probe>();
+		pool.post(alt::work_item{.invoke = +[](void* state) noexcept {
+			                         const std::unique_ptr<std::shared_ptr<worker_probe>> owner(static_cast<std::shared_ptr<worker_probe>*>(state));
+			                         worker_probe&                                        p = **owner;
+			                         if(::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(), &p.handle, THREAD_QUERY_INFORMATION, FALSE, 0) == FALSE)
+			                         {
+				                         p.handle = nullptr;
+			                         }
+			                         p.done.release();
+		                         },
+		                         .state = new std::shared_ptr<worker_probe>(probe)});
+		probe->done.acquire();
+		return win32_handle{probe->handle};
+	}
+
+	/** Whether @p thread has an I/O request outstanding. Empty when the query fails, which must never read as idle. */
+	std::optional<bool> has_pending_io(const HANDLE thread)
+	{
+		BOOL pending = FALSE;
+		if(::GetThreadIOPendingFlag(thread, &pending) == FALSE)
+		{
+			return std::nullopt;
+		}
+		return pending != FALSE;
+	}
+
+	/** Opens a gate a pool job spins on when the test leaves, however it leaves, so the pool can join. */
+	struct open_on_exit
+	{
+		std::shared_ptr<std::atomic<bool>> gate;
+
+		explicit open_on_exit(std::shared_ptr<std::atomic<bool>> opened) noexcept: gate(std::move(opened))
+		{}
+
+		open_on_exit(const open_on_exit&)            = delete;
+		open_on_exit& operator=(const open_on_exit&) = delete;
+		open_on_exit(open_on_exit&&)                 = delete;
+		open_on_exit& operator=(open_on_exit&&)      = delete;
+
+		~open_on_exit()
+		{
+			gate->store(true);
+		}
+	};
+}
+
+TEST_F(AsyncFileTest, AnOpenedFileReportsIocp)
+{
+	const auto service = make_service(alt::io_backend_kind::iocp);
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+
+	auto opened = run(service->open(dir() / "opened.txt", alt::flags(alt::open_flag::read) | alt::flags(alt::open_flag::write) | alt::flags(alt::open_flag::create)));
+	ASSERT_TRUE(opened.has_value()) << opened.error().message();
+	EXPECT_EQ(opened->backend(), alt::io_backend_kind::iocp);
+
+	const auto wrote = run(opened->write_at(buffer_holding("opened"), 0, 6));
+	ASSERT_TRUE(wrote.has_value()) << wrote.error().message();
+	alt::io_buffer       buffer = buffer_of(6);
+	const alt::io_buffer view   = buffer;
+	const auto           read   = run(opened->read_at(std::move(buffer), 0, 6));
+	ASSERT_TRUE(read.has_value()) << read.error().message();
+	EXPECT_EQ(text_of(view, *read), "opened");
+}
+
+TEST_F(AsyncFileTest, AnAdoptedSynchronousHandleReportsThreadPoolAndWorks)
+{
+	// This guards the report, not the routing: a transfer on a synchronous handle completes
+	// inline even on the IOCP backend, so it would pass with every adopted file sent there.
+	const auto service = make_service(alt::io_backend_kind::iocp);
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+	win32_handle handle = open_for_adoption(dir() / "synchronous.txt", 0);
+	ASSERT_TRUE(handle.valid()) << ::GetLastError();
+
+	const alt::async_file file = alt::async_file::adopt(*service, handle.release());
+	EXPECT_EQ(file.backend(), alt::io_backend_kind::thread_pool);
+	EXPECT_EQ(service->backend(), alt::io_backend_kind::iocp) << "the service reports its own backend, not the file's";
+
+	const auto wrote = run(file.write_at(buffer_holding("synchronous"), 0, 11));
+	ASSERT_TRUE(wrote.has_value()) << wrote.error().message();
+	EXPECT_EQ(*wrote, 11U);
+	alt::io_buffer       buffer = buffer_of(11);
+	const alt::io_buffer view   = buffer;
+	const auto           read   = run(file.read_at(std::move(buffer), 0, 11));
+	ASSERT_TRUE(read.has_value()) << read.error().message();
+	EXPECT_EQ(text_of(view, *read), "synchronous");
+}
+
+TEST_F(AsyncFileTest, AnAdoptedOverlappedFileHandleReportsThreadPoolAndWorks)
+{
+	// The regular-file variant. A cached read on an overlapped file usually completes
+	// synchronously, so this can pass with the routing wrong; the pipe test below cannot.
+	const auto service = make_service(alt::io_backend_kind::iocp);
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+	win32_handle handle = open_for_adoption(dir() / "overlapped.txt", FILE_FLAG_OVERLAPPED);
+	ASSERT_TRUE(handle.valid()) << ::GetLastError();
+
+	const alt::async_file file = alt::async_file::adopt(*service, handle.release());
+	EXPECT_EQ(file.backend(), alt::io_backend_kind::thread_pool);
+
+	const auto wrote = run(file.write_at(buffer_holding("overlapped"), 0, 10));
+	ASSERT_TRUE(wrote.has_value()) << wrote.error().message();
+	EXPECT_EQ(*wrote, 10U);
+	alt::io_buffer       buffer = buffer_of(10);
+	const alt::io_buffer view   = buffer;
+	const auto           read   = run(file.read_at(std::move(buffer), 0, 10));
+	ASSERT_TRUE(read.has_value()) << read.error().message();
+	EXPECT_EQ(text_of(view, *read), "overlapped");
+}
+
+TEST_F(AsyncFileTest, AnAdoptedOverlappedHandleReportsThreadPoolAndWorks)
+{
+	// The routing itself. An adopted handle is not associated with the IOCP backend's port, so
+	// an overlapped read the IOCP backend issued on it would go pending and its packet would
+	// never come. A read on an empty pipe always goes pending, so this read completes only if it
+	// went to the thread pool, which waits for it on an event of its own.
+	const auto service = make_service(alt::io_backend_kind::iocp);
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+	overlapped_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << "could not create the pipe: " << ::GetLastError();
+	const win32_handle worker = only_worker_of(pool());
+	ASSERT_TRUE(worker.valid()) << ::GetLastError();
+	const std::optional<bool> idle = has_pending_io(worker.get());
+	ASSERT_TRUE(idle.has_value()) << "GetThreadIOPendingFlag failed: " << ::GetLastError();
+	ASSERT_FALSE(*idle) << "the idle worker already reports pending I/O; the probe cannot tell anything apart";
+
+	const alt::async_file file = alt::async_file::adopt(*service, pipe.server.release());
+	EXPECT_EQ(file.backend(), alt::io_backend_kind::thread_pool);
+
+	const std::string    payload         = "pending";
+	alt::io_buffer       buffer          = buffer_of(payload.size());
+	const alt::io_buffer view            = buffer;
+	using result_type                    = std::expected<std::size_t, std::error_code>;
+	const auto                     read  = std::make_shared<outcome<result_type>>();
+	const alt::cancellation_handle chain = alt::start(capture(file.read_at(std::move(buffer), 0, payload.size()), read));
+
+	// Written only once the read is outstanding on the pool's worker, so it cannot have
+	// completed synchronously.
+	EXPECT_TRUE(pump_until([&] { return read->finished || has_pending_io(worker.get()).value_or(false); }))
+	  << "the read never became outstanding on the pool's worker: it was not routed to the thread pool";
+	EXPECT_FALSE(read->finished) << "the read finished before anything was written into the pipe";
+	ASSERT_TRUE(pipe.write(payload)) << ::GetLastError();
+
+	if(!pump_until([&] { return read->finished; }))
+	{
+		ADD_FAILURE() << "the read did not finish within " << deadline.count() << " seconds";
+		// Closing the client end fails a read the pool is waiting on with ERROR_BROKEN_PIPE, so the
+		// service can go quiet. A read stranded at the IOCP backend never finishes, and then the
+		// service's destructor waits for it until the test's timeout ends the process.
+		pipe.client.reset();
+		static_cast<void>(pump_until([&] { return read->finished; }));
+		return;
+	}
+	ASSERT_TRUE(read->result.has_value());
+	const result_type& got = *read->result;
+	ASSERT_TRUE(got.has_value()) << got.error().message();
+	EXPECT_EQ(*got, payload.size());
+	EXPECT_EQ(text_of(view, payload.size()), payload);
+
+	// And the other direction. A pipe ignores the offset.
+	const auto wrote = run(file.write_at(buffer_holding("reply"), 0, 5));
+	ASSERT_TRUE(wrote.has_value()) << wrote.error().message();
+	EXPECT_EQ(*wrote, 5U);
+	EXPECT_EQ(pipe.read(5), "reply");
+}
+
+TEST_F(AsyncFileTest, CancellingAnAdoptedFilesQueuedReadReachesThePool)
+{
+	// The cancel must go to the backend the submission went to. Sent to the IOCP backend instead,
+	// a pool token names nothing there (or another operation), the queued jobs run once the
+	// worker frees up, and the read fills its buffer and the write reaches the file.
+	const auto path    = write_file("data.txt", "0123456789");
+	const auto service = make_service(alt::io_backend_kind::iocp);
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+	win32_handle handle = open_for_adoption(path, 0);
+	ASSERT_TRUE(handle.valid()) << ::GetLastError();
+	const alt::async_file file = alt::async_file::adopt(*service, handle.release());
+	ASSERT_EQ(file.backend(), alt::io_backend_kind::thread_pool);
+
+	// Occupy the pool's only worker, so the read and the write queue behind it.
+	const auto         gate    = std::make_shared<std::atomic<bool>>(false);
+	const auto         entered = std::make_shared<std::atomic<bool>>(false);
+	const open_on_exit release{gate};
+	using void_type    = std::expected<void, std::error_code>;
+	const auto blocker = std::make_shared<outcome<void_type>>();
+	const auto hold    = [gate, entered] {
+		entered->store(true);
+		while(!gate->load())
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds{1});
+		}
+	};
+	const alt::cancellation_handle blocker_chain = alt::start(capture(service->run(hold), blocker));
+	ASSERT_TRUE(pump_until([&] { return entered->load(); }));
+
+	using count_type                     = std::expected<std::size_t, std::error_code>;
+	alt::io_buffer           target      = buffer_holding("zzzz");
+	const alt::io_buffer     view        = target;
+	const auto               read        = std::make_shared<outcome<count_type>>();
+	const auto               wrote       = std::make_shared<outcome<count_type>>();
+	alt::cancellation_handle read_chain  = alt::start(capture(file.read_at(std::move(target), 0, 4), read));
+	alt::cancellation_handle write_chain = alt::start(capture(file.write_at(buffer_holding("XXXX"), 0, 4), wrote));
+	EXPECT_TRUE(read_chain.request_stop());
+	EXPECT_TRUE(write_chain.request_stop());
+
+	// Queued after the cancels, so it takes no token a misdirected cancel could have named. The
+	// pool runs its queue in FIFO order, so this running means both cancelled jobs had their turn.
+	const auto                     behind       = std::make_shared<std::atomic<bool>>(false);
+	const auto                     marker       = std::make_shared<outcome<void_type>>();
+	const alt::cancellation_handle marker_chain = alt::start(capture(service->run([behind] { behind->store(true); }), marker));
+
+	gate->store(true);
+	ASSERT_TRUE(pump_until([&] { return blocker->finished && marker->finished; }));
+	home().drain();
+
+	// A cancelled chain is abandoned rather than resumed, so neither reports anything.
+	EXPECT_FALSE(read->finished);
+	EXPECT_FALSE(wrote->finished);
+	EXPECT_TRUE(behind->load());
+	EXPECT_EQ(text_of(view, 4), "zzzz") << "the cancelled read ran: its cancel did not reach the pool";
+	EXPECT_EQ(read_whole(path), "0123456789") << "the cancelled write ran: its cancel did not reach the pool";
+}
+
+TEST_F(AsyncFileTest, AMovedFromFileReportsThreadPool)
+{
+	const auto path    = write_file("data.txt", "0123456789");
+	const auto service = make_service(alt::io_backend_kind::iocp);
+	ASSERT_TRUE(service.has_value()) << service.error().message();
+
+	auto opened = run(service->open(path, alt::flags(alt::open_flag::read)));
+	ASSERT_TRUE(opened.has_value()) << opened.error().message();
+	alt::async_file moved = std::move(*opened);
+
+	EXPECT_EQ(moved.backend(), alt::io_backend_kind::iocp);
+	EXPECT_EQ(opened->backend(), alt::io_backend_kind::thread_pool); // NOLINT(bugprone-use-after-move): checking the moved-from state
+
+	// A closed file has no service either.
+	EXPECT_TRUE(run(moved.close()).has_value());
+	EXPECT_EQ(moved.backend(), alt::io_backend_kind::thread_pool);
+}
+#endif

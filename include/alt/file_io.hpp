@@ -35,10 +35,18 @@ namespace alt
 	{
 		/**
 		 * Which built-in backend to use. `automatic` probes the platform and settles on
-		 * the best one it can run; in this release that is always
-		 * io_backend_kind::thread_pool, and file_io::backend() reports what was chosen.
-		 * Naming a kind this build does not provide, or `manual`, which cannot be
-		 * selected by value, fails create() rather than silently substituting another.
+		 * the best one it can run, and file_io::backend() reports what was chosen: on
+		 * Windows that is io_backend_kind::iocp, or io_backend_kind::thread_pool if the
+		 * completion port or its thread cannot be created; on every other platform in
+		 * this release it is io_backend_kind::thread_pool. Naming a kind this build does
+		 * not provide (`iocp` off Windows, `io_uring` everywhere in this release), or
+		 * `manual`, which cannot be selected by value, fails create() rather than
+		 * silently substituting another; an explicit `iocp` on Windows that cannot be
+		 * built fails create() with the reason.
+		 *
+		 * On an IOCP service, files brought in with async_file::adopt() are served by a
+		 * thread-pool backend on the same pool instead, because IOCP can transfer only on
+		 * handles its own open prepared; async_file::backend() reports which serves a file.
 		 * With the overload that is handed a backend, `automatic` means that backend and any
 		 * other value must match its kind().
 		 */
@@ -112,19 +120,23 @@ namespace alt
 		/**
 		 * @brief Creates a service on a built-in backend, or reports why it could not.
 		 *
-		 * @param workers    The pool the thread-pool arm runs on. Borrowed: it must
+		 * @param workers    The pool the thread-pool arm runs on: every operation of a
+		 *                   thread-pool service, and on an IOCP service every operation
+		 *                   but an opened file's reads and writes. Borrowed: it must
 		 *                   outlive this object, and this object must not be destroyed
 		 *                   on one of its threads.
 		 * @param completion Where every operation's awaiting coroutine is resumed. Must
 		 *                   not be empty, and must outlive every operation.
-		 * @param options    See file_io_options.
+		 * @param options    See file_io_options, which states how the backend is chosen.
 		 *
 		 * Fails with std::errc::invalid_argument for a zero max_in_flight, an empty
 		 * @p completion (reported here, because posting to an empty scheduler_ref
 		 * asserts on whichever I/O thread finishes first, far from the mistake), or
 		 * io_backend_kind::manual; with std::errc::not_supported for a kind this build
-		 * does not provide; and with std::errc::not_enough_memory if constructing the
-		 * service throws std::bad_alloc.
+		 * does not provide; with the operating system's error for an explicit
+		 * io_backend_kind::iocp whose completion port or thread cannot be created; and
+		 * with std::errc::not_enough_memory if constructing the service throws
+		 * std::bad_alloc.
 		 */
 		[[nodiscard]] static std::expected<file_io, std::error_code> create(thread_pool& workers, scheduler_ref completion, const file_io_options& options = {});
 
@@ -144,8 +156,14 @@ namespace alt
 		 */
 		[[nodiscard]] static std::expected<file_io, std::error_code> create(scheduler_ref completion, io_backend& backend, const file_io_options& options = {});
 
-		/** Called only by create(). The passkey is private, so nothing else can. */
-		file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, io_backend& backend, scheduler_ref completion, std::size_t max_in_flight);
+		/**
+		 * Called only by create(). The passkey is private, so nothing else can.
+		 *
+		 * @p owned and @p owned_adopted are what this object built, each null when it built
+		 * nothing; @p adopted_backend is the backend an adopted file's operations go to,
+		 * which is @p backend itself unless that is IOCP.
+		 */
+		file_io(passkey /*unused*/, std::unique_ptr<io_backend> owned, std::unique_ptr<io_backend> owned_adopted, io_backend& backend, io_backend& adopted_backend, scheduler_ref completion, std::size_t max_in_flight);
 
 		file_io()                          = delete;
 		file_io(const file_io&)            = delete;
@@ -156,7 +174,13 @@ namespace alt
 		/** Blocks until the backend is quiet. See the class note for what that excludes. */
 		~file_io();
 
-		/** @brief Which backend is actually in use. Never io_backend_kind::automatic. */
+		/**
+		 * @brief Which backend is actually in use. Never io_backend_kind::automatic.
+		 *
+		 * The service's own backend, which serves every operation but one class: on an IOCP
+		 * service, a file brought in with async_file::adopt() is served by a thread-pool
+		 * backend instead. async_file::backend() reports the backend for one file.
+		 */
 		[[nodiscard]] io_backend_kind backend() const noexcept;
 
 		/**
@@ -288,7 +312,13 @@ namespace alt
 		friend struct detail::file_io_access;
 
 		/** The backend this object built, or null when the caller supplied one. */
-		std::unique_ptr<io_backend>        m_owned_backend;
+		std::unique_ptr<io_backend> m_owned_backend;
+		/**
+		 * The thread-pool backend that serves adopted files, built only when the probe chose
+		 * IOCP; null otherwise. Like m_owned_backend, destroyed only after ~file_io's wait for
+		 * quiescence, which counts its operations too.
+		 */
+		std::unique_ptr<io_backend>        m_owned_adopted_backend;
 		std::shared_ptr<detail::io_shared> m_shared;
 		io_backend_kind                    m_kind;
 	};

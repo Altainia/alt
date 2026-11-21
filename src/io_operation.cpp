@@ -45,8 +45,9 @@ namespace alt::detail
 
 		assert(self->alive() && "detaching an alt file I/O operation on a destroyed block");
 
-		io_token to_cancel{};
-		bool     post_now = false;
+		io_token    to_cancel{};
+		io_backend* cancel_at = nullptr;
+		bool        post_now  = false;
 		{
 			const std::scoped_lock lock{self->mutex};
 
@@ -59,6 +60,8 @@ namespace alt::detail
 
 			self->state = phase::detached;
 			to_cancel   = self->token;
+			// The backend that issued the token; see `submitted_to`. Set before the token is.
+			cancel_at = self->submitted_to;
 
 			// Deferred to io_awaiter::start while that function is still on the stack,
 			// which is what keeps this from freeing the frame it is still writing to. See
@@ -76,7 +79,8 @@ namespace alt::detail
 		// only inversion available and it costs nothing to avoid.
 		if(to_cancel)
 		{
-			self->owner->backend->cancel(to_cancel);
+			assert(cancel_at != nullptr && "an alt file I/O operation holds a token but no backend that issued it");
+			cancel_at->cancel(to_cancel);
 		}
 
 		if(post_now)
@@ -301,11 +305,16 @@ namespace alt::detail
 			}
 		}
 
+		// Chosen once and kept, so every cancel below and in the stop callback goes to the
+		// backend this submission does. See `submitted_to`.
+		io_backend& target = owner.backend_for(block->file.get());
+
 		// The reference the seam's void* stands for, parked before the submission because
 		// the completion may fire inline inside submit() and takes it straight back out.
 		{
 			const std::scoped_lock lock{block->mutex};
-			block->backend_ref = block;
+			block->backend_ref  = block;
+			block->submitted_to = &target;
 		}
 
 		owner.enter_backend();
@@ -313,7 +322,7 @@ namespace alt::detail
 		std::expected<io_token, std::error_code> submitted;
 		try
 		{
-			submitted = owner.backend->submit(block->request, &io_operation::on_backend_complete, block.get());
+			submitted = target.submit(block->request, &io_operation::on_backend_complete, block.get());
 		}
 		catch(...)
 		{
@@ -419,7 +428,7 @@ namespace alt::detail
 
 		if(to_cancel)
 		{
-			owner.backend->cancel(to_cancel);
+			target.cancel(to_cancel);
 		}
 
 		if(post_now)

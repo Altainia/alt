@@ -262,7 +262,8 @@ namespace
 	}
 
 	/**
-	 * A real service on the thread-pool backend, completing onto a scheduler the test
+	 * A real service on the backend `automatic` selects (IOCP on Windows, the thread pool
+	 * elsewhere; path operations run on the pool under both), completing onto a scheduler the test
 	 * drives itself, plus a scratch directory removed afterwards.
 	 */
 	class FileIoPathTest: public ::testing::Test
@@ -593,7 +594,7 @@ TEST(FileIoPathLifetimeTest, ACancelledRenameStillHasBothPathsWhenTheBackendFini
 	EXPECT_EQ(seen, "/rename/from/that/outlives/the/frame>/rename/to/that/outlives/the/frame");
 }
 
-TEST(FileIoTest, CreateSucceedsAndReportsTheThreadPoolBackend)
+TEST(FileIoTest, CreateSucceedsAndReportsTheAutomaticallySelectedBackend)
 {
 	auto                  created = alt::thread_pool::create(1);
 	alt::thread_pool&     pool    = pool_of(created);
@@ -602,8 +603,55 @@ TEST(FileIoTest, CreateSucceedsAndReportsTheThreadPoolBackend)
 	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home});
 
 	ASSERT_TRUE(io.has_value());
+#ifdef _WIN32
+	EXPECT_EQ(io->backend(), alt::io_backend_kind::iocp);
+#else
 	EXPECT_EQ(io->backend(), alt::io_backend_kind::thread_pool);
+#endif
 }
+
+#ifdef _WIN32
+TEST(FileIoTest, AutomaticSelectsIocpOnWindows)
+{
+	auto                  created = alt::thread_pool::create(1);
+	alt::thread_pool&     pool    = pool_of(created);
+	alt::manual_scheduler home;
+
+	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::automatic});
+
+	ASSERT_TRUE(io.has_value());
+	EXPECT_EQ(io->backend(), alt::io_backend_kind::iocp);
+}
+
+TEST(FileIoTest, AnExplicitIocpRequestSucceedsOnWindows)
+{
+	auto                  created = alt::thread_pool::create(1);
+	alt::thread_pool&     pool    = pool_of(created);
+	alt::manual_scheduler home;
+
+	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::iocp});
+
+	ASSERT_TRUE(io.has_value()) << io.error().message();
+	EXPECT_EQ(io->backend(), alt::io_backend_kind::iocp);
+
+	// A thread-pool request still gets the thread pool: IOCP is the default, not a substitute.
+	const auto pooled = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::thread_pool});
+	ASSERT_TRUE(pooled.has_value());
+	EXPECT_EQ(pooled->backend(), alt::io_backend_kind::thread_pool);
+}
+#else
+TEST(FileIoTest, AnExplicitIocpRequestIsNotSupported)
+{
+	auto                  created = alt::thread_pool::create(1);
+	alt::thread_pool&     pool    = pool_of(created);
+	alt::manual_scheduler home;
+
+	// A kind this build cannot provide is an error, not a silent substitution.
+	const auto iocp = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::iocp});
+	ASSERT_FALSE(iocp.has_value());
+	EXPECT_EQ(iocp.error(), std::errc::not_supported);
+}
+#endif
 
 TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 {
@@ -785,7 +833,11 @@ TEST(FileIoDeathTest, DestroyingAFileIoWithAnOperationParkedOnASlotAborts)
 namespace
 {
 
-	/** A pool, a completion scheduler and a service over them, sized by the test that needs it. */
+	/**
+	 * A pool, a completion scheduler and a service over them, sized by the test that needs it.
+	 * The service is `automatic` on purpose, so IOCP on Windows: run() executes on the pool under
+	 * every built-in backend, and these tests hold for each.
+	 */
 	struct run_rig
 	{
 		run_rig(const std::size_t threads, const std::size_t max_in_flight): pool(alt::thread_pool::create(threads)), io(make_io(max_in_flight))
@@ -1196,9 +1248,9 @@ TEST_F(FileIoRunTest, RunConsumesAnInFlightSlot)
 
 	const auto first = occupy_the_worker(hold, worker, entered);
 	const auto next  = begin(io().run([second] {
-    second->store(true);
-    return 7;
-  }));
+		second->store(true);
+		return 7;
+	}));
 
 	// A second worker is idle, so only the slot bound can be what holds the second job back.
 	std::this_thread::sleep_for(std::chrono::milliseconds{100});
