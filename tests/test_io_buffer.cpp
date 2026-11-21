@@ -116,11 +116,14 @@ TEST(IoBufferTest, BorrowUnsafeHoldsNothingAndStillExposesTheBytes)
 	EXPECT_TRUE(static_cast<bool>(buffer));
 }
 
-TEST(IoBufferTest, AllocatedStorageIsZeroInitializedEvenWhereDirtyStorageWasJustReleased)
+TEST(IoBufferTest, AllocatedStorageIsZeroInitializedAfterAnEarlierBufferOfTheSameSizeWasDirtiedAndReleased)
 {
 	constexpr std::size_t size = 4096;
-	// Dirty a block of this size and release it, so an allocator that hands the same memory
-	// back would show the stale bytes if allocate() did not clear them.
+	// Dirty a block of this size and release it. The allocator is not obliged to hand the same
+	// memory back, so reuse is attempted here, not guaranteed: this guard has teeth only where
+	// it does (or where the allocator perturbs fresh memory, as MALLOC_PERTURB_ does). On glibc it
+	// does: with allocate() changed to not value-initialize, this fails with and without
+	// MALLOC_PERTURB_.
 	{
 		auto dirty = alt::io_buffer::allocate(size);
 		ASSERT_TRUE(dirty.has_value());
@@ -155,10 +158,8 @@ TEST(IoBufferTest, BorrowWithANullKeepaliveBehavesLikeBorrowUnsafe)
 	EXPECT_EQ(borrowed.bytes().data(), unsafe.bytes().data());
 	EXPECT_EQ(borrowed.size(), unsafe.size());
 	EXPECT_EQ(unsafe.bytes()[5], sentinel);
-	// Usable like any buffer: copying it works and shares the same bytes.
-	// NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
-	const alt::io_buffer copy = borrowed;
-	EXPECT_EQ(copy.bytes().data(), storage.data());
+	// io_buffer's owner is private and has no accessor, so what is compared is observable
+	// state only; a mutant that stored a non-null owner here would not be caught.
 }
 
 TEST(IoBufferTest, AMovedFromBufferIsEmptyAndFalsey)

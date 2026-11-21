@@ -829,7 +829,7 @@ the three-phase protocol gets a test that pins the ordering exactly:
 
 | Ordering | What must be true |
 |----------|-------------------|
-| complete, then cancel | the body ran, and a stop requested after the drain finds no stop callback at all, because `await_resume` deregisters it before the body runs; the `done` guard in the handler is the second line behind that |
+| complete, then cancel | the body ran, and a stop requested after the drain finds no stop callback at all, because `await_resume` deregisters it before the chain continues past the await; the handler's `state != phase::waiting` guard (which also covers `detached`) is the second line behind that |
 | cancel, then complete | the body never ran; the chain was abandoned; the completion finds `detached` and touches no frame |
 | cancel while the completion is mid-post | the resumption runs once, and takes the abandon branch |
 | cancel while parked on a slot | the operation never reaches the backend at all |

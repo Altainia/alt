@@ -645,23 +645,46 @@ TEST_F(AsyncFileTest, OpenOfAMissingPathReportsNoSuchFileOrDirectory)
 	EXPECT_EQ(opened.error(), std::errc::no_such_file_or_directory);
 }
 
-TEST_F(AsyncFileTest, OpenWithNeitherAccessBitIsRejectedBeforeAnythingIsSubmitted)
+TEST_F(AsyncFileTest, OpenWithNeitherAccessBitIsRejectedWithoutWaitingForAPermit)
 {
-	// The path exists, so only the missing access bit can be what is wrong with the request.
-	const auto path = write_file("data.txt", "x");
+	// One permit, held by a read in flight, so an open that tried to take a permit before
+	// validating would park behind it instead of answering.
+	const auto                 path = write_file("data.txt", "0123456789");
+	const alt::file_io_options options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 1, .queue_depth = 0};
+	const auto                 service = alt::file_io::create(alt::scheduler_ref{home()}, manual_backend(), options);
+	ASSERT_TRUE(service.has_value());
+	const alt::async_file file = alt::async_file::adopt(*service, open_native(path, alt::flags(alt::open_flag::read)));
 
-	const auto opened      = run(manual_io().open(path, alt::open_flags{}));
-	const auto create_only = run(manual_io().open(dir() / "made.txt", alt::flags(alt::open_flag::create)));
+	using result_type                           = std::expected<std::size_t, std::error_code>;
+	using opened_type                           = std::expected<alt::async_file, std::error_code>;
+	const auto                     holder       = std::make_shared<outcome<result_type>>();
+	const alt::cancellation_handle holder_chain = alt::start(capture(file.read_at(buffer_of(4), 0, 4), holder));
+	ASSERT_EQ(manual_backend().pending(), 1U);
+	const auto shared = alt::detail::file_io_access::shared(*service);
+	ASSERT_EQ(shared->slots.available(), 0);
 
-	ASSERT_FALSE(opened.has_value());
-	EXPECT_EQ(opened.error(), std::errc::invalid_argument);
-	ASSERT_FALSE(create_only.has_value());
-	EXPECT_EQ(create_only.error(), std::errc::invalid_argument);
-	// The manual backend completes nothing by itself, so a request that reached it would
-	// still be pending (and run() would never return); an empty backend is the proof that
-	// the rejection came before the submission, and so before a permit was spent.
-	EXPECT_EQ(manual_backend().pending(), 0U);
+	const auto                     none              = std::make_shared<outcome<opened_type>>();
+	const auto                     create_only       = std::make_shared<outcome<opened_type>>();
+	const alt::cancellation_handle none_chain        = alt::start(capture(service->open(path, alt::open_flags{}), none));
+	const alt::cancellation_handle create_only_chain = alt::start(capture(service->open(dir() / "made.txt", alt::flags(alt::open_flag::create)), create_only));
+	home().drain();
+
+	// Answered while the only permit is still held: nothing waited, nothing was submitted.
+	// An open that took its permit first would be parked here and neither would have finished.
+	ASSERT_TRUE(none->finished);
+	ASSERT_TRUE(create_only->finished);
+	ASSERT_FALSE(none->result->has_value());
+	EXPECT_EQ(none->result->error(), std::errc::invalid_argument);
+	ASSERT_FALSE(create_only->result->has_value());
+	EXPECT_EQ(create_only->result->error(), std::errc::invalid_argument);
+	EXPECT_EQ(manual_backend().pending(), 1U);
+	EXPECT_EQ(shared->slots.available(), 0);
 	EXPECT_FALSE(std::filesystem::exists(dir() / "made.txt"));
+
+	complete_by_hand(0, alt::io_completion{.bytes = 4, .error = {}});
+	home().drain();
+	EXPECT_TRUE(holder->finished);
+	EXPECT_EQ(shared->slots.available(), 1);
 }
 
 TEST_F(AsyncFileTest, ReadAtOnADirectoryReportsIsADirectory)
