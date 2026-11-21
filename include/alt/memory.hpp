@@ -14,6 +14,10 @@
 // and left as the includer's definition if the includer had already included <windows.h>.
 // Prefer this to defining NOMINMAX, which would change what the includer sees afterward,
 // and to a bare #undef, which would remove macros the includer may have wanted.
+// Microsoft's documentation for pop_macro does not say what happens to a macro that was
+// undefined at push time, which is the case this relies on. GCC and clang leave it
+// undefined, verified locally; tests/test_memory_header_hygiene.cpp is what verifies MSVC
+// does, and would fail with C4003 there if it did not.
 #	pragma push_macro("min")
 #	pragma push_macro("max")
 #	include <windows.h>
