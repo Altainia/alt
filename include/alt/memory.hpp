@@ -6,7 +6,23 @@
 #include <string>
 #include <string_view>
 
-#if (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
+// Selects the explicit_bzero arm of clear_memory; undefined again after it so this
+// public header leaves no macro behind.
+//
+// The glibc test is nested on purpose. __GLIBC_PREREQ is a function-like macro that only
+// glibc's <features.h> supplies, and the preprocessor must parse a whole #if expression
+// before it evaluates it, so "defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)" in one
+// expression does not compile where the macro is absent: MSVC reports C7780 and C1017.
+// Flattening this back into one expression reintroduces that failure.
+#if defined(__APPLE__)
+#	define ALT_DETAIL_HAS_EXPLICIT_BZERO 1
+#elif defined(__GLIBC__)
+#	if __GLIBC_PREREQ(2, 25)
+#		define ALT_DETAIL_HAS_EXPLICIT_BZERO 1
+#	endif
+#endif
+
+#ifdef ALT_DETAIL_HAS_EXPLICIT_BZERO
 #	include <string.h>
 #endif
 
@@ -32,7 +48,7 @@ namespace alt
 		// implemented inline with volatile accesses, so it guarantees nothing the loop does
 		// not. Including <windows.h> for it would also define the min and max macros in
 		// every translation unit that includes this header.
-#if (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
+#ifdef ALT_DETAIL_HAS_EXPLICIT_BZERO
 		explicit_bzero(p, n);
 #else
 		auto* vp = static_cast<volatile unsigned char*>(p);
@@ -40,6 +56,8 @@ namespace alt
 			vp[i] = 0u;
 #endif
 	}
+
+#undef ALT_DETAIL_HAS_EXPLICIT_BZERO
 
 	/**
 	 * @brief Allocator adaptor that zeroes memory before releasing it.
