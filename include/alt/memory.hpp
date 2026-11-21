@@ -6,6 +6,21 @@
 #include <string>
 #include <string_view>
 
+#ifdef _WIN32
+// <windows.h> is needed only for SecureZeroMemory, but it defines the function-like macros
+// min and max, which would break std::min, std::max and std::numeric_limits<>::max() in
+// every translation unit that includes this header (issue #58). push_macro and pop_macro
+// restore each macro to exactly the state it had before: left undefined if it was undefined,
+// and left as the includer's definition if the includer had already included <windows.h>.
+// Prefer this to defining NOMINMAX, which would change what the includer sees afterward,
+// and to a bare #undef, which would remove macros the includer may have wanted.
+#	pragma push_macro("min")
+#	pragma push_macro("max")
+#	include <windows.h>
+#	pragma pop_macro("max")
+#	pragma pop_macro("min")
+#endif
+
 // Selects the explicit_bzero arm of clear_memory; undefined again after it so this
 // public header leaves no macro behind.
 //
@@ -13,7 +28,9 @@
 // glibc's <features.h> supplies, and the preprocessor must parse a whole #if expression
 // before it evaluates it, so "defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)" in one
 // expression does not compile where the macro is absent: MSVC reports C7780 and C1017.
-// Flattening this back into one expression reintroduces that failure.
+// Flattening this back into one expression reintroduces that failure. The _WIN32 arm of
+// clear_memory means MSVC never evaluates this on its own, which would hide the defect
+// there; it still applies to any non-glibc toolchain without the _WIN32 arm, such as musl.
 #if defined(__APPLE__)
 #	define ALT_DETAIL_HAS_EXPLICIT_BZERO 1 // NOLINT(cppcoreguidelines-macro-usage)
 #elif defined(__GLIBC__)
@@ -32,10 +49,11 @@ namespace alt
 	/**
 	 * @brief Zeroes n bytes starting at p in a way the compiler will not optimize away.
 	 *
-	 * Uses @c explicit_bzero where the platform provides it and a volatile byte-write
-	 * loop elsewhere, Windows included. This header does not include @c <windows.h>,
-	 * so it does not define the Win32 @c min and @c max macros in the including
-	 * translation unit.
+	 * Uses @c SecureZeroMemory on Windows, @c explicit_bzero where the platform provides
+	 * it, and a volatile byte-write loop elsewhere. On Windows this header includes
+	 * @c <windows.h> for @c SecureZeroMemory but restores the @c min and @c max macros
+	 * to their prior state afterward, so it leaves no Win32 @c min or @c max macro in
+	 * the including translation unit.
 	 *
 	 * @param p  Pointer to memory to zero. Must point to at least n addressable bytes.
 	 *           May be null only when n == 0.
@@ -43,12 +61,9 @@ namespace alt
 	 */
 	inline void clear_memory(void* p, std::size_t n) noexcept
 	{
-		// Windows deliberately has no arm of its own: it takes the volatile loop below.
-		// SecureZeroMemory is defined as RtlSecureZeroMemory, which Microsoft documents as
-		// implemented inline with volatile accesses, so it guarantees nothing the loop does
-		// not. Including <windows.h> for it would also define the min and max macros in
-		// every translation unit that includes this header.
-#ifdef ALT_DETAIL_HAS_EXPLICIT_BZERO
+#ifdef _WIN32
+		SecureZeroMemory(p, n);
+#elif defined(ALT_DETAIL_HAS_EXPLICIT_BZERO)
 		explicit_bzero(p, n);
 #else
 		auto* vp = static_cast<volatile unsigned char*>(p);
