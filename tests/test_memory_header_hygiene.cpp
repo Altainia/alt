@@ -10,9 +10,15 @@
 //  - On Linux and macOS it is vacuous. <windows.h> is never included there, so it
 //    cannot fail whatever this header does.
 //
-// <alt/memory.hpp> must stay the first include, and the macro-sensitive code must
-// precede <gtest/gtest.h>, which itself includes <windows.h> on Windows and would
-// otherwise mask the header under test.
+// Ordering is deliberate. <gtest/gtest.h> must come after <alt/memory.hpp> and after the
+// macro-sensitive code (the #error check and the helpers below), because gtest includes
+// <windows.h> on Windows, which defines min and max itself and would mask a leak from
+// the header under test. Do not move the gtest include up: the suite would stay green
+// everywhere, since this guard is vacuous off MSVC, while it silently stopped guarding.
+// .clang-format sorts includes within each contiguous block only (SortIncludes with
+// IncludeBlocks: Regroup), so the gtest include is held apart from the first block by the
+// code between them. Keep non-include code between the blocks; adjacent includes would be
+// merged and re-sorted. <alt/memory.hpp> need not be first in its block, only before gtest.
 #include <algorithm>
 #include <alt/memory.hpp>
 #include <limits>
