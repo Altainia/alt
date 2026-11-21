@@ -173,6 +173,31 @@ gtest_discover_tests(alt_tests
     PROPERTIES TIMEOUT 60
 )
 
+# Compile checks for alt::task's [[nodiscard]] await_resume (issue #61). A diagnostic is
+# not observable from a running test, so these build a probe and judge the build: the
+# discarding variant must fail and the cast-to-void control must succeed, and the control
+# is what lets the first mean "the discard warned" rather than "the probe is broken".
+# Only that one diagnostic is made an error, so an unrelated warning cannot decide either
+# result. EXCLUDE_FROM_ALL keeps them out of the normal build, and out of the clang-tidy
+# gate, which builds without running ctest.
+if(MSVC)
+    set(_alt_discard_as_error /we4834)
+else()
+    set(_alt_discard_as_error -Werror=unused-result)
+endif()
+foreach(_alt_variant IN ITEMS discard control)
+    add_library(task_await_discard_${_alt_variant} OBJECT EXCLUDE_FROM_ALL compile_checks/task_await_discard.cpp)
+    target_link_libraries(task_await_discard_${_alt_variant} PRIVATE alt)
+    target_compile_options(task_await_discard_${_alt_variant} PRIVATE ${_alt_discard_as_error})
+    add_test(NAME task_await_discard_${_alt_variant}
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target task_await_discard_${_alt_variant} --config $<CONFIG>
+    )
+    # Two builds of one tree at once would contend for the generator's own lock.
+    set_tests_properties(task_await_discard_${_alt_variant} PROPERTIES RESOURCE_LOCK alt_build_tree TIMEOUT 300)
+endforeach()
+target_compile_definitions(task_await_discard_discard PRIVATE ALT_PROBE_DISCARD)
+set_tests_properties(task_await_discard_discard PROPERTIES WILL_FAIL TRUE)
+
 # A CMake-level test rather than a GoogleTest case, because what it exercises is not
 # reachable from C++: find_package's version comparison, and the explanatory note that
 # the root CMakeLists.txt appends to the generated AltConfigVersion.cmake. It installs
