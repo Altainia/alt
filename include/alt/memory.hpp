@@ -15,10 +15,10 @@
 // expression does not compile where the macro is absent: MSVC reports C7780 and C1017.
 // Flattening this back into one expression reintroduces that failure.
 #if defined(__APPLE__)
-#	define ALT_DETAIL_HAS_EXPLICIT_BZERO 1
+#	define ALT_DETAIL_HAS_EXPLICIT_BZERO 1 // NOLINT(cppcoreguidelines-macro-usage)
 #elif defined(__GLIBC__)
 #	if __GLIBC_PREREQ(2, 25)
-#		define ALT_DETAIL_HAS_EXPLICIT_BZERO 1
+#		define ALT_DETAIL_HAS_EXPLICIT_BZERO 1 // NOLINT(cppcoreguidelines-macro-usage)
 #	endif
 #endif
 
@@ -53,7 +53,9 @@ namespace alt
 #else
 		auto* vp = static_cast<volatile unsigned char*>(p);
 		for(std::size_t i = 0; i < n; ++i)
+		{
 			vp[i] = 0u;
+		}
 #endif
 	}
 

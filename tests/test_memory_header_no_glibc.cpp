@@ -35,5 +35,7 @@ TEST(MemoryHeaderNoGlibc, ClearMemoryZeroesWithoutGlibcMacros)
 	buf.fill(0xAB);
 	alt::clear_memory(buf.data(), buf.size());
 	for(unsigned char const b: buf)
+	{
 		EXPECT_EQ(b, 0u);
+	}
 }
