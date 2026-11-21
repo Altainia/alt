@@ -645,6 +645,19 @@ TEST_F(AsyncFileTest, OpenOfAMissingPathReportsNoSuchFileOrDirectory)
 	EXPECT_EQ(opened.error(), std::errc::no_such_file_or_directory);
 }
 
+namespace
+{
+	/** The error a finished open failed with; an empty code if it has not finished or succeeded. */
+	std::error_code failure_of(const outcome<std::expected<alt::async_file, std::error_code>>& finished)
+	{
+		if(!finished.result.has_value() || finished.result->has_value())
+		{
+			return {};
+		}
+		return finished.result->error();
+	}
+}
+
 TEST_F(AsyncFileTest, OpenWithNeitherAccessBitIsRejectedWithoutWaitingForAPermit)
 {
 	// One permit, held by a read in flight, so an open that tried to take a permit before
@@ -673,10 +686,8 @@ TEST_F(AsyncFileTest, OpenWithNeitherAccessBitIsRejectedWithoutWaitingForAPermit
 	// An open that took its permit first would be parked here and neither would have finished.
 	ASSERT_TRUE(none->finished);
 	ASSERT_TRUE(create_only->finished);
-	ASSERT_FALSE(none->result->has_value());
-	EXPECT_EQ(none->result->error(), std::errc::invalid_argument);
-	ASSERT_FALSE(create_only->result->has_value());
-	EXPECT_EQ(create_only->result->error(), std::errc::invalid_argument);
+	EXPECT_EQ(failure_of(*none), std::errc::invalid_argument);
+	EXPECT_EQ(failure_of(*create_only), std::errc::invalid_argument);
 	EXPECT_EQ(manual_backend().pending(), 1U);
 	EXPECT_EQ(shared->slots.available(), 0);
 	EXPECT_FALSE(std::filesystem::exists(dir() / "made.txt"));
