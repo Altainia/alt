@@ -9,12 +9,14 @@
 #include <cerrno>
 #include <cstdint>
 #include <exception>
+#include <expected>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -497,6 +499,35 @@ namespace alt
 			}
 		}
 
+		/**
+		 * The name directory_entry promises: the filesystem's own bytes on POSIX, UTF-8 on Windows.
+		 *
+		 * path::string() is not that on Windows: it converts the native UTF-16 to the ANSI code
+		 * page, which has no byte for most characters and a different one for many others, and
+		 * the conversion throws on a name it cannot represent, which fails the whole listing.
+		 * u8string() converts to UTF-8; the result is copied byte for byte into the std::string.
+		 *
+		 * A Windows name that is not valid UTF-16 (an unpaired surrogate, which NTFS permits) has
+		 * no UTF-8 form, and u8string() throws on it. That is reported as illegal_byte_sequence
+		 * rather than given a lossy name, because a lossy name would not round-trip to the file.
+		 */
+		std::expected<std::string, std::error_code> entry_name(const std::filesystem::path& entry)
+		{
+#ifdef _WIN32
+			try
+			{
+				const std::u8string utf8 = entry.filename().u8string();
+				return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+			}
+			catch(const std::system_error&)
+			{
+				return std::unexpected(std::make_error_code(std::errc::illegal_byte_sequence));
+			}
+#else
+			return entry.filename().string();
+#endif
+		}
+
 		/// Lists @p path into @p out, replacing its contents only on success. Never reports . or ..
 		std::error_code do_list_directory(const std::filesystem::path& path, std::vector<directory_entry>& out)
 		{
@@ -517,7 +548,12 @@ namespace alt
 			{
 				std::error_code type_error;
 				const auto      type = it->symlink_status(type_error).type();
-				found.push_back(alt::directory_entry{.name = it->path().filename().string(), .kind = type_error ? file_kind::unknown : kind_of(type)});
+				auto            name = entry_name(it->path());
+				if(!name)
+				{
+					return name.error();
+				}
+				found.push_back(alt::directory_entry{.name = std::move(*name), .kind = type_error ? file_kind::unknown : kind_of(type)});
 			}
 			if(error)
 			{
@@ -690,9 +726,10 @@ namespace alt
 				catch(...)
 				{
 					// This function is noexcept and a worker has nobody to hand an exception to,
-					// so one would abort the process. The reachable source is a directory entry
-					// whose name cannot be converted to a narrow string (Windows), which is
-					// filesystem content the caller does not control. Report it instead.
+					// so one would abort the process. Nothing here is known to throw anything else:
+					// the one source there was, a Windows directory entry whose name the narrow
+					// conversion could not represent, is now caught where it happens and reported
+					// as illegal_byte_sequence (see entry_name()). This stays as the backstop.
 					result.error = std::make_error_code(std::errc::io_error);
 				}
 			}

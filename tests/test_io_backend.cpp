@@ -1273,6 +1273,65 @@ TEST_F(ThreadPoolBackendTest, ListDirectoryReportsEntriesWithoutDotAndDotDot)
 	EXPECT_EQ(run(request).error, std::errc::not_a_directory);
 }
 
+TEST_F(ThreadPoolBackendTest, ListDirectoryReportsNonAsciiNamesAsUtf8)
+{
+	// On POSIX the name is the filesystem's bytes, which for these files are the UTF-8 they
+	// were created from. On Windows it is converted from UTF-16, and must be converted to UTF-8
+	// rather than to the ANSI code page (issue #59): é is a different byte there, and CJK and
+	// anything outside the BMP have no representation at all. The emoji is a surrogate pair.
+	const std::u8string      names[] = {u8"café.txt", u8"日本.txt", u8"\U0001F4C1.txt"};
+	std::vector<std::string> expected;
+	for(const auto& name: names)
+	{
+		std::ofstream(dir() / std::filesystem::path(name), std::ios::binary) << "x";
+		expected.emplace_back(reinterpret_cast<const char*>(name.data()), name.size());
+	}
+
+	std::vector<alt::directory_entry> entries;
+	alt::io_request                   request;
+	request.op      = alt::io_op::list_directory;
+	request.in      = &dir();
+	request.out     = &entries;
+	const auto done = run(request);
+	ASSERT_FALSE(done.error) << done.error.message();
+
+	std::vector<std::string> listed;
+	for(const auto& entry: entries)
+	{
+		listed.push_back(entry.name);
+	}
+	std::ranges::sort(listed);
+	std::ranges::sort(expected);
+	EXPECT_EQ(listed, expected);
+
+	// The promise is that a name round-trips: rebuilt as a UTF-8 path, it names the same file.
+	for(const auto& name: listed)
+	{
+		const std::u8string utf8(reinterpret_cast<const char8_t*>(name.data()), name.size());
+		EXPECT_TRUE(std::filesystem::exists(dir() / std::filesystem::path(utf8))) << "listed name does not round-trip: " << name;
+	}
+}
+
+#ifdef _WIN32
+TEST_F(ThreadPoolBackendTest, ListDirectoryReportsANameThatIsNotValidUtf16AsAnIllegalByteSequence)
+{
+	// NTFS permits an unpaired surrogate in a name. It has no UTF-8 form, so the listing reports
+	// that precisely instead of a lossy name that would not round-trip, or a generic io_error.
+	const std::wstring name = (dir() / L"bad").wstring() + L"\xD800" + L"name.txt";
+	const HANDLE       file = ::CreateFileW(name.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+	ASSERT_NE(file, INVALID_HANDLE_VALUE) << "could not create the file: " << ::GetLastError();
+	::CloseHandle(file);
+
+	std::vector<alt::directory_entry> entries;
+	alt::io_request                   request;
+	request.op  = alt::io_op::list_directory;
+	request.in  = &dir();
+	request.out = &entries;
+	EXPECT_EQ(run(request).error, std::errc::illegal_byte_sequence);
+	EXPECT_TRUE(entries.empty()) << "a failed listing must leave the output untouched";
+}
+#endif
+
 TEST_F(ThreadPoolBackendTest, BothSyncModesSucceedOnAnOpenFile)
 {
 	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
