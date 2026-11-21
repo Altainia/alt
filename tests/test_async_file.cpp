@@ -645,6 +645,25 @@ TEST_F(AsyncFileTest, OpenOfAMissingPathReportsNoSuchFileOrDirectory)
 	EXPECT_EQ(opened.error(), std::errc::no_such_file_or_directory);
 }
 
+TEST_F(AsyncFileTest, OpenWithNeitherAccessBitIsRejectedBeforeAnythingIsSubmitted)
+{
+	// The path exists, so only the missing access bit can be what is wrong with the request.
+	const auto path = write_file("data.txt", "x");
+
+	const auto opened      = run(manual_io().open(path, alt::open_flags{}));
+	const auto create_only = run(manual_io().open(dir() / "made.txt", alt::flags(alt::open_flag::create)));
+
+	ASSERT_FALSE(opened.has_value());
+	EXPECT_EQ(opened.error(), std::errc::invalid_argument);
+	ASSERT_FALSE(create_only.has_value());
+	EXPECT_EQ(create_only.error(), std::errc::invalid_argument);
+	// The manual backend completes nothing by itself, so a request that reached it would
+	// still be pending (and run() would never return); an empty backend is the proof that
+	// the rejection came before the submission, and so before a permit was spent.
+	EXPECT_EQ(manual_backend().pending(), 0U);
+	EXPECT_FALSE(std::filesystem::exists(dir() / "made.txt"));
+}
+
 TEST_F(AsyncFileTest, ReadAtOnADirectoryReportsIsADirectory)
 {
 	// Opening a directory for reading succeeds on both platforms; it is the transfer that fails.

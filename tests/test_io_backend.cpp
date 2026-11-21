@@ -543,6 +543,20 @@ TEST_F(ThreadPoolBackendTest, AReadPastTheEndReturnsAShortCount)
 	EXPECT_EQ(beyond.bytes, 0U);
 }
 
+TEST_F(ThreadPoolBackendTest, AnOpenWithNeitherAccessBitFailsInsteadOfOpeningReadOnly)
+{
+	// The backend is a public seam, so it keeps the check the service performs first.
+	const auto path = write_file("data.txt", "x");
+
+	const auto none        = open_file(path, alt::flags<alt::open_flag>{});
+	const auto create_only = open_file(path, alt::flags(alt::open_flag::create));
+
+	ASSERT_FALSE(none.has_value());
+	EXPECT_EQ(none.error(), std::errc::invalid_argument);
+	ASSERT_FALSE(create_only.has_value());
+	EXPECT_EQ(create_only.error(), std::errc::invalid_argument);
+}
+
 TEST_F(ThreadPoolBackendTest, AReadOfAMissingPathReportsNoSuchFileOrDirectory)
 {
 	const auto file = open_file(dir() / "missing.txt", alt::flags(alt::open_flag::read));
