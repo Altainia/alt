@@ -31,8 +31,11 @@ namespace alt::detail
 	 * synchronously. Its open adds FILE_FLAG_OVERLAPPED and associates the new handle with the
 	 * port, so its transfers are valid only on handles it opened itself.
 	 *
-	 * Destroying it with a transfer in flight is a precondition violation: it asserts, and
-	 * under NDEBUG terminates rather than free a record the kernel may still own.
+	 * Destroying it with ANY operation in flight is a precondition violation: a transfer, or an
+	 * operation forwarded to the pool whose callback has not yet run. It asserts, and under NDEBUG
+	 * terminates, rather than free a record the kernel may still own, or let a queued open
+	 * associate its handle with a port that is already closed. Unlike the thread-pool backend,
+	 * this one is NOT safe to destroy with operations queued; file_io never does.
 	 *
 	 * @return The backend, or why the port or its thread could not be created.
 	 */

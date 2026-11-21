@@ -900,4 +900,70 @@ TEST(IocpBackendDeathTest, DestroyingTheBackendWithATransferInFlightAborts)
 	EXPECT_DEATH(destroy_the_backend_with_a_read_in_flight(), "IOCP backend destroyed with transfers in flight");
 }
 
+namespace
+{
+	/// Blocks a pool thread until the test lets it go.
+	struct blocker
+	{
+		std::binary_semaphore entered{0};
+		std::binary_semaphore release{0};
+	};
+
+	void block(void* state) noexcept
+	{
+		auto& b = *static_cast<blocker*>(state);
+		b.entered.release();
+		b.release.acquire();
+	}
+
+	/// The second death test's body: a stat forwarded to the pool, still queued behind a blocked
+	/// worker, when the backend is destroyed. A queued open would run its prepare hook against the
+	/// closed port later, so any forwarded operation in flight is a precondition violation.
+	void destroy_the_backend_with_a_forwarded_operation_in_flight()
+	{
+		auto pool = alt::thread_pool::create(1);
+		if(!pool)
+		{
+			std::abort();
+		}
+		auto made = alt::detail::make_iocp_backend(*pool);
+		if(!made)
+		{
+			std::abort();
+		}
+		std::unique_ptr<alt::io_backend> backend = std::move(*made);
+		blocker                          gate;
+		pool->post(alt::work_item{.invoke = block, .state = &gate});
+		gate.entered.acquire();
+
+		const std::filesystem::path where = std::filesystem::temp_directory_path();
+		alt::file_status            status;
+		alt::io_request             stat;
+		stat.op  = alt::io_op::stat_path;
+		stat.in  = &where;
+		stat.out = &status;
+		waiter queued;
+		if(!backend->submit(stat, deliver, &queued))
+		{
+			std::abort();
+		}
+		backend.reset(); // the stat is still queued behind the blocked worker
+		// Reached only if the destructor did not stop the process: let the pool drain so the child
+		// exits normally, which is what fails the expectation.
+		gate.release.release();
+		queued.done.acquire();
+	}
+} // namespace
+
+TEST(IocpBackendDeathTest, DestroyingTheBackendWithAForwardedOperationInFlightAborts)
+{
+	if(!alt_test::asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << "the in-flight check is an assert in debug builds and std::terminate() under NDEBUG; "
+		                "the death test pins the assert's message, so it runs only where the assert is compiled in.";
+	}
+
+	const alt_test::scoped_death_test_style style{"threadsafe"};
+	EXPECT_DEATH(destroy_the_backend_with_a_forwarded_operation_in_flight(), "IOCP backend destroyed with forwarded operations in flight");
+}
 #endif

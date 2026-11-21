@@ -158,6 +158,15 @@ namespace alt::detail
 				{
 					std::terminate();
 				}
+				// The same for an operation forwarded to the pool and not yet done with this backend:
+				// a queued open would run its prepare hook later against the port closed below, whose
+				// handle value may by then name another port.
+				const bool forwarding = m_forwarded.load() != 0;
+				assert(!forwarding && "IOCP backend destroyed with forwarded operations in flight");
+				if(forwarding)
+				{
+					std::terminate();
+				}
 				if(m_thread.joinable())
 				{
 					// Without the wake-up the join below never returns.
@@ -196,9 +205,7 @@ namespace alt::detail
 				}
 				// Everything else has no overlapped form on Windows, open included: the pool
 				// backend's open policy is what makes the handles it returns fit for the port.
-				auto token = m_pool_backend->submit(request, on_done, state);
-				assert((!token || (token->value() & iocp_token_tag) == 0) && "a pool token collides with the IOCP tag");
-				return token;
+				return submit_forwarded(request, on_done, state);
 			}
 
 			void cancel(io_token token) noexcept override
@@ -293,6 +300,60 @@ namespace alt::detail
 				}
 				const io_completion result = ok != FALSE ? settle(*mine) : failed(*mine, code);
 				complete(std::move(mine), result);
+				return token;
+			}
+
+			/// What a forwarded operation's trampoline needs: the caller's callback, and the count it lowers.
+			struct forwarded_operation
+			{
+				io_completion_fn          on_done     = nullptr;
+				void*                     state       = nullptr;
+				std::atomic<std::size_t>* outstanding = nullptr;
+			};
+
+			/**
+			 * Runs on the pool worker when a forwarded operation completes.
+			 *
+			 * The count is lowered BEFORE the caller's callback runs, and that decrement is this
+			 * trampoline's last access to the backend. The other order cannot work: file_io's
+			 * callback lowers its own quiescence count as its last act, after which ~file_io may
+			 * destroy this backend at once, so a decrement after it would write into a destroyed
+			 * backend, or race the destructor's check and stop the process for an operation that was
+			 * already finished. Lowering it first is enough, because by the time the callback runs the
+			 * operation is done with the backend: an open's prepare hook, the one step that uses the
+			 * port, has already run, and the pool job holds everything else it needs.
+			 */
+			static void forwarded_done(void* raw, io_completion result) noexcept
+			{
+				const std::unique_ptr<forwarded_operation> operation(static_cast<forwarded_operation*>(raw));
+				operation->outstanding->fetch_sub(1);
+				operation->on_done(operation->state, result);
+			}
+
+			/// Hands @p request to the pool backend through forwarded_done(), counting it while it is in flight.
+			std::expected<io_token, std::error_code> submit_forwarded(const io_request& request, io_completion_fn on_done, void* state)
+			{
+				std::unique_ptr<forwarded_operation> operation;
+				try
+				{
+					operation = std::make_unique<forwarded_operation>(forwarded_operation{.on_done = on_done, .state = state, .outstanding = &m_forwarded});
+				}
+				catch(const std::bad_alloc&)
+				{
+					return std::unexpected(bad_alloc_error());
+				}
+				// Raised before the submission, which may complete inline and lower it again.
+				m_forwarded.fetch_add(1);
+				auto token = m_pool_backend->submit(request, forwarded_done, operation.get());
+				if(!token)
+				{
+					// A refused submission never runs its callback, so the trampoline is still ours.
+					m_forwarded.fetch_sub(1);
+					return token;
+				}
+				// From here the trampoline owns itself; it may already have run and freed it.
+				static_cast<void>(operation.release());
+				assert((token->value() & iocp_token_tag) == 0 && "a pool token collides with the IOCP tag");
 				return token;
 			}
 
@@ -399,7 +460,9 @@ namespace alt::detail
 
 			std::atomic<std::uint64_t> m_next_id{1};
 			std::atomic<std::size_t>   m_ignored{0};
-			std::thread                m_thread;
+			/// Operations forwarded to the pool backend whose trampoline has not yet run.
+			std::atomic<std::size_t> m_forwarded{0};
+			std::thread              m_thread;
 		};
 	} // namespace
 

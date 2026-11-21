@@ -275,7 +275,15 @@ cares choose where the close happens.
 
 The destructor posts a packet with a reserved completion key, which the completion thread
 treats as "exit", joins the thread, closes the port, and then destroys the internal
-thread-pool backend. Destroying it with a transfer still in flight is a precondition
-violation: `file_io` never does, because it waits for every outstanding operation first. It
+thread-pool backend. Destroying it with **any** operation still in flight is a precondition
+violation: a transfer, or an operation forwarded to the thread pool whose callback has not
+yet run. `file_io` never does, because it waits for every outstanding operation first. It
 asserts in debug builds and calls `std::terminate()` under `NDEBUG`, rather than free a
-record the kernel may still write into.
+record the kernel may still write into, or let a queued `open` associate its new handle with
+a port that is already closed (whose handle value may by then name another port). This is
+unlike the thread-pool backend, which may be destroyed with operations queued.
+
+Forwarded operations are counted through a small trampoline around the caller's callback.
+It lowers the count *before* calling the caller's callback, and that is its last access to
+the backend: by then the operation is done with the backend, and `file_io`'s callback may
+end by letting `~file_io` destroy the backend at once.
