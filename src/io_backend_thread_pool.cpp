@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cerrno>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -147,20 +148,93 @@ namespace alt
 			return ::GetFileInformationByHandle(to_handle(handle), &info) != FALSE && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 		}
 
+		/// A manual-reset event owned by one transfer, closed when the transfer is done with it.
+		class transfer_event
+		{
+		public:
+			transfer_event() noexcept: m_event(::CreateEventW(nullptr, TRUE, FALSE, nullptr))
+			{}
+
+			~transfer_event()
+			{
+				if(m_event != nullptr)
+				{
+					static_cast<void>(::CloseHandle(m_event));
+				}
+			}
+
+			transfer_event(const transfer_event&)            = delete;
+			transfer_event& operator=(const transfer_event&) = delete;
+
+			[[nodiscard]] HANDLE get() const noexcept
+			{
+				return m_event;
+			}
+
+		private:
+			HANDLE m_event;
+		};
+
+		/**
+		 * Moves bytes at the request's offset, and returns only once the kernel is done with the
+		 * buffer, whether the handle was opened for synchronous or for overlapped I/O.
+		 *
+		 * file_io::open never sets FILE_FLAG_OVERLAPPED, but async_file::adopt() accepts a handle
+		 * that has it, and on such a handle ReadFile and WriteFile may return ERROR_IO_PENDING with
+		 * the transfer still in flight. Returning then would release the job's io_buffer, and this
+		 * frame's OVERLAPPED, while the kernel still writes into them.
+		 *
+		 * So each transfer carries its own event, and waits on it when the call goes pending. The
+		 * event is per transfer, not per handle: async_file allows concurrent positional transfers
+		 * on one handle, and with no event GetOverlappedResult waits on the handle itself, which
+		 * any of them can signal. The event's low-order bit is set, which is Windows' documented
+		 * way of keeping the completion off a completion port the handle may be associated with:
+		 * a packet queued there would name this frame's OVERLAPPED after it is gone. Because the
+		 * tagged value is not itself a waitable handle, the wait is on the untagged event, and
+		 * GetOverlappedResult is only asked for the outcome of a transfer already known complete.
+		 */
 		io_completion do_transfer(const io_request& request, bool is_write) noexcept
 		{
-			io_completion result;
+			io_completion        result;
+			const transfer_event done;
+			if(done.get() == nullptr)
+			{
+				result.error = last_error();
+				return result;
+			}
 			// ReadFile and WriteFile take a 32-bit count; a short count is a normal result.
 			const auto count = static_cast<DWORD>(std::min<std::size_t>(transfer_size(request), std::numeric_limits<DWORD>::max()));
 			OVERLAPPED position{};
 			position.Offset     = static_cast<DWORD>(request.offset & 0xFFFFFFFFU);
 			position.OffsetHigh = static_cast<DWORD>(request.offset >> 32U);
-			DWORD       moved   = 0;
-			void* const data    = request.buffer.bytes().data();
-			const BOOL  ok      = is_write ? ::WriteFile(to_handle(request.handle), data, count, &moved, &position) : ::ReadFile(to_handle(request.handle), data, count, &moved, &position);
+			position.hEvent     = reinterpret_cast<HANDLE>(reinterpret_cast<std::uintptr_t>(done.get()) | 1U);
+			const HANDLE handle = to_handle(request.handle);
+			void* const  data   = request.buffer.bytes().data();
+			// The count is read from the OVERLAPPED once the transfer is complete, never from an
+			// out-parameter, which is not meaningful for a transfer that went pending.
+			BOOL ok = is_write ? ::WriteFile(handle, data, count, nullptr, &position) : ::ReadFile(handle, data, count, nullptr, &position);
+			if(ok == FALSE && ::GetLastError() == ERROR_IO_PENDING)
+			{
+				// Nothing may return from here until the kernel is done with the buffer, so a wait
+				// that fails is not survivable: returning would be the use-after-free this exists
+				// to prevent. On a valid event with no timeout it cannot fail.
+				if(::WaitForSingleObject(done.get(), INFINITE) != WAIT_OBJECT_0)
+				{
+					std::terminate();
+				}
+				ok = TRUE;
+			}
+			DWORD moved = 0;
+			if(ok != FALSE)
+			{
+				// Complete by now, so this reads the outcome without waiting. It reports a failure
+				// that surfaced only on completion, such as ERROR_HANDLE_EOF on an overlapped read.
+				ok = ::GetOverlappedResult(handle, &position, &moved, FALSE);
+			}
 			if(ok == FALSE)
 			{
-				// Reading at or past the end is a short count of zero, not a failure.
+				// Reading at or past the end is a short count of zero, not a failure. ReadFile
+				// reports it on a synchronous handle; on an overlapped one either call may.
 				if(!is_write && ::GetLastError() == ERROR_HANDLE_EOF)
 				{
 					return result;
@@ -202,12 +276,12 @@ namespace alt
 			}
 			constexpr std::int64_t windows_to_unix_100ns = 116444736000000000LL;
 			const auto             ticks                 = (static_cast<std::int64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
-			                   static_cast<std::int64_t>(info.ftLastWriteTime.dwLowDateTime);
-			out.size            = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-			out.mtime_ns        = (ticks - windows_to_unix_100ns) * 100;
-			out.kind            = kind_of(info.dwFileAttributes);
-			out.identity.device = info.dwVolumeSerialNumber;
-			out.identity.serial = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+			                                               static_cast<std::int64_t>(info.ftLastWriteTime.dwLowDateTime);
+			out.size                                     = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+			out.mtime_ns                                 = (ticks - windows_to_unix_100ns) * 100;
+			out.kind                                     = kind_of(info.dwFileAttributes);
+			out.identity.device                          = info.dwVolumeSerialNumber;
+			out.identity.serial                          = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
 			return {};
 		}
 

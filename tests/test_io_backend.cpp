@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <latch>
 #include <memory>
 #include <optional>
 #include <semaphore>
@@ -642,6 +643,9 @@ namespace
 		{}
 		scoped_handle(const scoped_handle&)            = delete;
 		scoped_handle& operator=(const scoped_handle&) = delete;
+		scoped_handle(scoped_handle&& other) noexcept: value(std::exchange(other.value, nullptr))
+		{}
+		scoped_handle& operator=(scoped_handle&&) = delete;
 
 		~scoped_handle()
 		{
@@ -658,31 +662,54 @@ namespace
 		}
 	};
 
-	struct thread_probe
+	struct threads_probe
 	{
-		std::binary_semaphore done{0};
-		HANDLE                thread = nullptr;
+		explicit threads_probe(std::ptrdiff_t count): arrived(count), handles(static_cast<std::size_t>(count), nullptr)
+		{}
+
+		std::latch          arrived;
+		std::atomic<int>    next{0};
+		std::vector<HANDLE> handles;
 	};
 
-	/// A handle to the pool's only worker that GetThreadIOPendingFlag can query, learned by running a job on it.
+	/// Handles to @p count distinct pool workers that GetThreadIOPendingFlag can query, learned by
+	/// running one job on each: every job waits until all have arrived, so no thread runs two.
+	/// @p count must not exceed the pool's thread count, or this never returns.
+	std::vector<scoped_handle> worker_threads(alt::thread_pool& pool, std::ptrdiff_t count)
+	{
+		threads_probe probe(count);
+		for(std::ptrdiff_t i = 0; i < count; ++i)
+		{
+			pool.post(alt::work_item{.invoke = +[](void* state) noexcept {
+				                         auto&      p    = *static_cast<threads_probe*>(state);
+				                         const auto slot = static_cast<std::size_t>(p.next.fetch_add(1));
+				                         // GetCurrentThread() is a pseudo-handle that means "the caller" on
+				                         // every thread; duplicating it yields a real handle to this worker.
+				                         // GetThreadIOPendingFlag needs the full query right: with
+				                         // THREAD_QUERY_LIMITED_INFORMATION it fails with ERROR_ACCESS_DENIED.
+				                         if(::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(), &p.handles[slot], THREAD_QUERY_INFORMATION, FALSE, 0) == FALSE)
+				                         {
+					                         p.handles[slot] = nullptr;
+				                         }
+				                         p.arrived.arrive_and_wait();
+			                         },
+			                         .state = &probe});
+		}
+		probe.arrived.wait();
+		std::vector<scoped_handle> workers;
+		workers.reserve(probe.handles.size());
+		for(HANDLE handle: probe.handles)
+		{
+			workers.emplace_back(handle);
+		}
+		return workers;
+	}
+
+	/// A handle to the pool's only worker that GetThreadIOPendingFlag can query.
 	scoped_handle worker_thread(alt::thread_pool& pool)
 	{
-		thread_probe probe;
-		pool.post(alt::work_item{.invoke = +[](void* state) noexcept {
-			                         auto& p = *static_cast<thread_probe*>(state);
-			                         // GetCurrentThread() is a pseudo-handle that means "the caller" on
-			                         // every thread; duplicating it yields a real handle to this worker.
-			                         // GetThreadIOPendingFlag needs the full query right: with
-			                         // THREAD_QUERY_LIMITED_INFORMATION it fails with ERROR_ACCESS_DENIED.
-			                         if(::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(), &p.thread, THREAD_QUERY_INFORMATION, FALSE, 0) == FALSE)
-			                         {
-				                         p.thread = nullptr;
-			                         }
-			                         p.done.release();
-		                         },
-		                         .state = &probe});
-		probe.done.acquire();
-		return scoped_handle(probe.thread);
+		auto workers = worker_threads(pool, 1);
+		return std::move(workers.front());
 	}
 
 	/// Whether @p thread has an I/O request outstanding: Windows' counterpart of reading wchan.
@@ -932,6 +959,221 @@ TEST_F(ThreadPoolBackendTest, AJobCancelledAfterItStartedStillCompletesAndReport
 	EXPECT_TRUE(reader->has_handle()) << "the open completed but its handle was discarded";
 #endif
 }
+
+#ifdef _WIN32
+namespace
+{
+	/// A named pipe whose server (read) end is opened with FILE_FLAG_OVERLAPPED and whose client
+	/// (write) end is synchronous. A read on the server end with nothing written goes pending
+	/// every time, which a regular file does not promise: cached reads and extending writes
+	/// usually complete synchronously even on an overlapped handle.
+	struct overlapped_pipe
+	{
+		scoped_handle server;
+		scoped_handle client;
+
+		overlapped_pipe()
+		{
+			static std::atomic<int> counter{0};
+			const std::wstring      name = L"\\\\.\\pipe\\alt_io_backend_" + std::to_wstring(::GetCurrentProcessId()) + L"_" +
+			                               std::to_wstring(counter.fetch_add(1));
+			server.value                 = ::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 0, 4096, 0, nullptr);
+			if(server.value == INVALID_HANDLE_VALUE)
+			{
+				server.value = nullptr;
+				return;
+			}
+			client.value = ::CreateFileW(name.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+			if(client.value == INVALID_HANDLE_VALUE)
+			{
+				client.value = nullptr;
+			}
+		}
+
+		[[nodiscard]] bool valid() const
+		{
+			return server.value != nullptr && client.value != nullptr;
+		}
+
+		bool write(std::string_view bytes) const
+		{
+			DWORD written = 0;
+			return ::WriteFile(client.value, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) != FALSE && written == bytes.size();
+		}
+	};
+
+	/// Opens @p path for overlapped I/O, as a consumer bringing its own handle to adopt() might.
+	scoped_handle open_overlapped(const std::filesystem::path& path)
+	{
+		const HANDLE handle = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
+		return scoped_handle(handle == INVALID_HANDLE_VALUE ? nullptr : handle);
+	}
+
+	alt::io_request transfer_on(HANDLE handle, alt::io_op op, alt::io_buffer buffer, std::uint64_t offset, std::size_t size)
+	{
+		alt::io_request request;
+		request.op     = op;
+		request.handle = reinterpret_cast<alt::native_handle>(handle);
+		request.buffer = std::move(buffer);
+		request.offset = offset;
+		request.size   = size;
+		return request;
+	}
+} // namespace
+
+TEST_F(ThreadPoolBackendTest, AReadThatGoesPendingOnAnOverlappedHandleCompletesWithItsData)
+{
+	// The defect this pins (issue #52): the transfer arm treated ERROR_IO_PENDING as a failure,
+	// so the job completed and released its buffer while the kernel still owned it.
+	overlapped_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << "could not create the pipe: " << ::GetLastError();
+	const auto worker = worker_thread(pool());
+	ASSERT_NE(worker.value, nullptr);
+
+	constexpr std::string_view payload = "pending";
+	auto                       request = transfer_on(pipe.server.value, alt::io_op::read, buffer_of(payload.size()), 0, payload.size());
+	const alt::io_buffer       view    = request.buffer;
+	waiter                     w;
+	ASSERT_TRUE(backend().submit(request, deliver, &w).has_value());
+	pipe_releaser releaser(pipe.client, w);
+
+	// Write only once the read is outstanding, so it cannot have completed synchronously. A job
+	// that gave up on ERROR_IO_PENDING finishes first, and the assertions below report it.
+	bool finished_early = false;
+	ASSERT_TRUE(wait_until([&] {
+		finished_early = w.calls.load() != 0;
+		return finished_early || has_pending_io(worker.value).value_or(false);
+	}));
+	if(!finished_early)
+	{
+		ASSERT_TRUE(pipe.write(payload));
+	}
+	w.done.acquire();
+	releaser.completed = true;
+
+	EXPECT_FALSE(finished_early) << "the job completed before anything was written to the pipe";
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_FALSE(w.result.error) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, payload.size());
+	EXPECT_EQ(text_of(view, payload.size()), payload);
+}
+
+TEST(ThreadPoolBackendConcurrencyTest, OneOverlappedTransferCompletingDoesNotFinishAnotherPendingOnTheSameHandle)
+{
+	// async_file allows concurrent positional transfers on one handle. A transfer that waited on
+	// the handle rather than on an event of its own would wake when any of them completed, and
+	// report a result that is not its own while the kernel still owned its buffer.
+	auto pool = alt::thread_pool::create(2);
+	ASSERT_TRUE(pool.has_value());
+	const auto backend = alt::make_thread_pool_backend(*pool);
+	const auto workers = worker_threads(*pool, 2);
+	ASSERT_NE(workers[0].value, nullptr);
+	ASSERT_NE(workers[1].value, nullptr);
+	const auto pending_count = [&] {
+		return static_cast<int>(has_pending_io(workers[0].value).value_or(false)) + static_cast<int>(has_pending_io(workers[1].value).value_or(false));
+	};
+
+	overlapped_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << "could not create the pipe: " << ::GetLastError();
+	auto first_buffer  = alt::io_buffer::allocate(4);
+	auto second_buffer = alt::io_buffer::allocate(4);
+	ASSERT_TRUE(first_buffer.has_value());
+	ASSERT_TRUE(second_buffer.has_value());
+	const alt::io_buffer first_view  = *first_buffer;
+	const alt::io_buffer second_view = *second_buffer;
+
+	// The two reads are submitted one at a time so that the pipe serves them in that order.
+	waiter first;
+	ASSERT_TRUE(backend->submit(transfer_on(pipe.server.value, alt::io_op::read, std::move(*first_buffer), 0, 4), deliver, &first).has_value());
+	pipe_releaser first_releaser(pipe.client, first);
+	ASSERT_TRUE(wait_until([&] { return first.calls.load() != 0 || pending_count() == 1; }));
+	waiter second;
+	ASSERT_TRUE(backend->submit(transfer_on(pipe.server.value, alt::io_op::read, std::move(*second_buffer), 0, 4), deliver, &second).has_value());
+	pipe_releaser second_releaser(pipe.client, second);
+	ASSERT_TRUE(wait_until([&] { return first.calls.load() != 0 || second.calls.load() != 0 || pending_count() == 2; }));
+	ASSERT_EQ(first.calls.load(), 0) << "the first read finished before anything was written";
+	ASSERT_EQ(second.calls.load(), 0) << "the second read finished before anything was written";
+
+	ASSERT_TRUE(pipe.write("AAAA"));
+	first.done.acquire();
+	first_releaser.completed = true;
+	// Give a transfer wrongly woken by the first one's completion every chance to report.
+	EXPECT_FALSE(second.done.try_acquire_for(std::chrono::milliseconds(250))) << "the second read finished when only the first had data";
+
+	ASSERT_TRUE(pipe.write("BBBB"));
+	if(second.calls.load() == 0)
+	{
+		second.done.acquire();
+	}
+	second_releaser.completed = true;
+
+	EXPECT_FALSE(first.result.error) << first.result.error.message();
+	EXPECT_EQ(first.result.bytes, 4U);
+	EXPECT_EQ(text_of(first_view, 4), "AAAA");
+	EXPECT_FALSE(second.result.error) << second.result.error.message();
+	EXPECT_EQ(second.result.bytes, 4U);
+	EXPECT_EQ(text_of(second_view, 4), "BBBB");
+}
+
+TEST_F(ThreadPoolBackendTest, AnOverlappedTransferQueuesNothingToACompletionPortTheHandleIsAssociatedWith)
+{
+	// A consumer may adopt a handle it has already associated with its own completion port.
+	// The transfer's OVERLAPPED lives on a worker's stack, so a packet queued for it would hand
+	// that port a dangling pointer. A transfer must keep its completion to itself.
+	overlapped_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << "could not create the pipe: " << ::GetLastError();
+	const scoped_handle port(::CreateIoCompletionPort(pipe.server.value, nullptr, 0, 1));
+	ASSERT_NE(port.value, nullptr) << "could not associate the pipe with a completion port: " << ::GetLastError();
+
+	ASSERT_TRUE(pipe.write("port"));
+	auto       request = transfer_on(pipe.server.value, alt::io_op::read, buffer_of(4), 0, 4);
+	const auto done    = run(request);
+	ASSERT_FALSE(done.error) << done.error.message();
+	EXPECT_EQ(done.bytes, 4U);
+
+	DWORD       bytes = 0;
+	ULONG_PTR   key   = 0;
+	OVERLAPPED* entry = nullptr;
+	EXPECT_EQ(::GetQueuedCompletionStatus(port.value, &bytes, &key, &entry, 0), FALSE);
+	EXPECT_EQ(entry, nullptr) << "the transfer queued a completion packet for an OVERLAPPED that no longer exists";
+}
+
+TEST_F(ThreadPoolBackendTest, PositionalTransfersOnAnAdoptedOverlappedFileHandleWork)
+{
+	const auto path = dir() / "overlapped.bin";
+	auto       file = open_overlapped(path);
+	ASSERT_NE(file.value, nullptr) << "could not open the file for overlapped I/O: " << ::GetLastError();
+
+	auto write_buffer = buffer_of(5);
+	std::memcpy(write_buffer.bytes().data(), "world", 5);
+	auto written = run(transfer_on(file.value, alt::io_op::write, std::move(write_buffer), 6, 5));
+	auto hello   = buffer_of(6);
+	std::memcpy(hello.bytes().data(), "hello ", 6);
+	const auto first = run(transfer_on(file.value, alt::io_op::write, std::move(hello), 0, 6));
+	ASSERT_FALSE(written.error) << written.error.message();
+	ASSERT_FALSE(first.error) << first.error.message();
+	EXPECT_EQ(written.bytes, 5U);
+	EXPECT_EQ(first.bytes, 6U);
+
+	auto                 read_buffer = buffer_of(5);
+	const alt::io_buffer view        = read_buffer;
+	const auto           read        = run(transfer_on(file.value, alt::io_op::read, std::move(read_buffer), 6, 5));
+	ASSERT_FALSE(read.error) << read.error.message();
+	EXPECT_EQ(read.bytes, 5U);
+	EXPECT_EQ(text_of(view, 5), "world");
+
+	// At and past the end is a short count of zero, as on a synchronous handle, whichever of
+	// ReadFile and the wait for its completion reports ERROR_HANDLE_EOF.
+	for(const std::uint64_t offset: {std::uint64_t{11}, std::uint64_t{4096}})
+	{
+		const auto at_end = run(transfer_on(file.value, alt::io_op::read, buffer_of(4), offset, 4));
+		EXPECT_FALSE(at_end.error) << "offset " << offset << ": " << at_end.error.message();
+		EXPECT_EQ(at_end.bytes, 0U) << "offset " << offset;
+	}
+	file.reset();
+	EXPECT_EQ(read_whole(path), "hello world");
+}
+#endif
 
 TEST_F(ThreadPoolBackendTest, AReadOrWriteOnAClosedDescriptorReportsTheOperatingSystemsError)
 {
