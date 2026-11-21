@@ -243,8 +243,25 @@ set_tests_properties(task_await_discard_discard PROPERTIES WILL_FAIL TRUE)
 # where one fresh consumer configure measures 0.19s. The timeout is set far above that
 # rather than near it, because a cold CI runner performing full compiler-ABI detection
 # per case is a different number and this measurement says nothing about it.
+#
+# The same driver also builds a consumer that links alt::alt, because configuring one
+# cannot detect a package config that fails to define a dependency the export names.
+# A static alt keeps its sanitizer and coverage link options PRIVATE, so the flags the
+# consumer needs to resolve them are passed in.
+set(alt_consumer_link_flags "")
+if(ALT_SANITIZE STREQUAL "address")
+    list(APPEND alt_consumer_link_flags -fsanitize=address,undefined)
+elseif(ALT_SANITIZE STREQUAL "thread")
+    list(APPEND alt_consumer_link_flags -fsanitize=thread)
+elseif(ALT_SANITIZE STREQUAL "memory")
+    list(APPEND alt_consumer_link_flags -fsanitize=memory)
+endif()
+if(ALT_COVERAGE)
+    list(APPEND alt_consumer_link_flags --coverage)
+endif()
 add_test(NAME package_version_gate
     COMMAND ${CMAKE_COMMAND}
+        "-DALT_CONSUMER_LINK_FLAGS=${alt_consumer_link_flags}"
         -DALT_BUILD_DIR=${CMAKE_BINARY_DIR}
         -DALT_BUILD_CONFIG=$<CONFIG>
         -DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/package/consumer

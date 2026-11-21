@@ -386,10 +386,14 @@ and not an error path.
   config must find liburing again on Linux, beside the existing `find_dependency(Threads)`.
   This is easy to get wrong and invisible in-tree; a consumer-side `find_package(Alt)`
   check belongs in the plan.
-- `packaging/`: the `.deb` gains a runtime dependency on `liburing2` beside `libc6`, and a
-  build dependency on `liburing-dev` if the control template carries one. `liburing2` is
-  the package name from Ubuntu 22.04 and Debian 12 onward; older releases ship `liburing1`
-  and are out of scope, which is moot anyway since they cannot provide GCC 13.
+- `packaging/`: the `.deb` gains dependencies on `liburing-dev` and `pkg-config` beside
+  `libc6`, because the package ships a static library and a CMake config, so its
+  dependencies are development-level: the installed config calls `pkg_check_modules`, which
+  needs `liburing.pc`, and the link needs the `liburing.so` symlink, both of which only
+  `liburing-dev` provides (`liburing2` carries the shared object alone, and `liburing-dev`
+  pulls it in). `liburing2` is the runtime package name from Ubuntu 22.04 and Debian 12
+  onward; older releases ship `liburing1` and are out of scope, which is moot anyway since
+  they cannot provide GCC 13.
 - `.github/workflows/ci.yml`: `liburing-dev` installed in each of the eight Linux jobs,
   including `clang-tidy`, `cppcheck` and `Coverage`, which all configure the project.
 - `CLAUDE.md` and `README.md`: record liburing as a Linux build prerequisite.

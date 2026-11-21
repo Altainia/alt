@@ -225,6 +225,11 @@ across a minor release, update the version your project requests.
 A refused request prints which minor series the installed package accepts and why, so a
 deliberate refusal is distinguishable from a broken install.
 
+On Linux a consumer needs `liburing-dev` and `pkg-config` installed too, not only the
+machine that built alt. alt is a static library, so it passes its liburing link
+dependency on to your target, and the package config rediscovers it through
+`pkg-config` when `find_package(Alt)` runs.
+
 ## Coding guidelines
 
 **Naming**
