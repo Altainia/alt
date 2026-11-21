@@ -1,8 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <alt/detail/file_types.hpp>
 #include <alt/io_backend.hpp>
 #include <alt/thread_pool.hpp>
+#include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <system_error>
@@ -27,4 +30,18 @@ namespace alt::detail
 
 	/// A thread-pool backend whose io_op::open follows @p policy; otherwise identical to alt::make_thread_pool_backend().
 	std::unique_ptr<io_backend> make_thread_pool_backend(thread_pool& pool, const pool_open_policy& policy);
+
+	/// The byte count a positional transfer may move: never more than the buffer holds. Shared by every backend so they clamp alike.
+	inline std::size_t transfer_size(const io_request& request) noexcept
+	{
+		return std::min(request.size, request.buffer.size());
+	}
+
+#ifndef _WIN32
+	/// The current errno as an error_code in the system category. Shared by the POSIX backends so they report errors alike.
+	inline std::error_code errno_error() noexcept
+	{
+		return {errno, std::system_category()};
+	}
+#endif
 } // namespace alt::detail
