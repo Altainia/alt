@@ -95,6 +95,22 @@ namespace alt::detail
 			return io_completion{.bytes = moved, .error = {}};
 		}
 
+		/**
+		 * Whether a ReadFile or WriteFile that returned FALSE with @p code still queues a packet.
+		 *
+		 * ERROR_IO_PENDING does, by definition. So does ERROR_MORE_DATA: it is the documented
+		 * failure of a message-mode pipe read shorter than the message, and it maps a warning-class
+		 * status (STATUS_BUFFER_OVERFLOW), which unlike an error completes the request and queues
+		 * its packet. Completing such a call inline as well would leave that packet to arrive after
+		 * the record is freed, where it could match a newer record at the reused address. Measured
+		 * on Windows 11: on an overlapped handle kernel32 reports that case as ERROR_IO_PENDING
+		 * anyway and the packet carries ERROR_MORE_DATA, so this is defense against the documented
+		 * form rather than a path observed here. Every other failure queues nothing.
+		 */
+		bool will_queue_a_packet(DWORD code) noexcept
+		{
+			return code == ERROR_IO_PENDING || code == ERROR_MORE_DATA;
+		}
 		/// The open policy's prepare hook: associates a new handle with the port in @p context.
 		std::error_code associate_with_port(void* context, native_handle handle) noexcept
 		{
@@ -256,7 +272,7 @@ namespace alt::detail
 				// finds its record.
 				const BOOL  ok   = is_write ? ::WriteFile(handle, data, count, nullptr, &record->overlapped) : ::ReadFile(handle, data, count, nullptr, &record->overlapped);
 				const DWORD code = ok != FALSE ? static_cast<DWORD>(ERROR_SUCCESS) : ::GetLastError();
-				if(ok == FALSE && code == ERROR_IO_PENDING)
+				if(ok == FALSE && will_queue_a_packet(code))
 				{
 					// The packet will come and the completion thread finishes it. The record is not
 					// this thread's to touch any more.

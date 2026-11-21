@@ -582,6 +582,39 @@ TEST_F(IocpBackendTest, AReadOnAPipeIsPendingUntilDataArrives)
 	EXPECT_EQ(text_of(view, payload.size()), payload);
 }
 
+TEST_F(IocpBackendTest, AMessageModePipeReadLargerThanItsBufferCompletesOnce)
+{
+	// A message-mode read shorter than the message fails with ERROR_MORE_DATA, a warning-class
+	// status: unlike an error, it still queues a packet. Completing it inline as well would run
+	// the callback here and leave the packet to be ignored, or worse, to match a newer record at
+	// a reused address. The result must be the pool arm's: the error, and no bytes.
+	static std::atomic<int> counter{0};
+	const std::wstring      name = L"\\\\.\\pipe\\alt_iocp_message_" + std::to_wstring(::GetCurrentProcessId()) + L"_" + std::to_wstring(counter.fetch_add(1));
+	// Duplex, so the client can be opened with the write access SetNamedPipeHandleState needs.
+	scoped_handle server(::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 4096, 0, nullptr));
+	ASSERT_NE(server.value, nullptr) << ::GetLastError();
+	auto client = open_file(std::filesystem::path(name), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(client.has_value()) << client.error().message();
+	static_cast<void>(::ConnectNamedPipe(server.value, nullptr));
+	DWORD mode = PIPE_READMODE_MESSAGE;
+	ASSERT_NE(::SetNamedPipeHandleState(win32(**client), &mode, nullptr, nullptr), FALSE) << ::GetLastError();
+
+	constexpr std::string_view message = "sixteen byte msg";
+	DWORD                      written = 0;
+	ASSERT_NE(::WriteFile(server.value, message.data(), static_cast<DWORD>(message.size()), &written, nullptr), FALSE) << ::GetLastError();
+
+	const std::size_t before = ignored_packets();
+	waiter            w;
+	ASSERT_TRUE(backend().submit(positional(alt::io_op::read, **client, buffer_of(4), 0, 4), deliver, &w).has_value());
+	w.submitted.store(true);
+	ASSERT_TRUE(w.done.try_acquire_for(std::chrono::seconds(10))) << "the read never completed";
+
+	EXPECT_EQ(settled_ignored_packets(), before) << "a packet came for a read already completed inline";
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_EQ(w.result.error, std::error_code(ERROR_MORE_DATA, std::system_category())) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, 0U);
+	RecordProperty("ran_inline", w.ran_inline.load() ? 1 : 0);
+}
 TEST_F(IocpBackendTest, AnImmediateFailureCompletesInline)
 {
 	auto file = open_file(write_file("data.txt", "read only"), alt::flags(alt::open_flag::read));

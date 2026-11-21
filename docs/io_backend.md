@@ -227,7 +227,10 @@ and by `OVERLAPPED` address under one mutex, *before* the `ReadFile`/`WriteFile`
   come, so `submit()` completes it inline, before it returns. Named-pipe reads with data
   waiting complete this way. Cached file reads may too, but on the Windows 11 machine the
   backend was built on, every overlapped file read went pending, so do not count on it.
-- **`ERROR_IO_PENDING`.** The packet comes later, and the completion thread finishes it.
+- **`ERROR_IO_PENDING`, or `ERROR_MORE_DATA`.** The packet comes later, and the completion
+  thread finishes it. `ERROR_MORE_DATA` (a message-mode pipe read shorter than its message)
+  is a warning-class status, which still queues a packet, so it is never completed inline.
+  It is reported as the thread-pool backend reports it: that error, with 0 bytes.
 - **Any other failure.** No packet is queued for an immediate failure, so it completes
   inline with the error.
 
