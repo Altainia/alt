@@ -620,6 +620,73 @@ namespace
 			scheduler.release();
 		}
 	};
+
+	/** @p count bytes, byte i holding i truncated to a char, so every read can name what it should see. */
+	std::string numbered_bytes(const std::size_t count)
+	{
+		std::string content;
+		for(std::size_t index = 0; index < count; ++index)
+		{
+			content.push_back(static_cast<char>(index));
+		}
+		return content;
+	}
+
+	/** One-byte reads of a file, each at its own offset, and what each produced. */
+	struct concurrent_reads
+	{
+		using result_type = std::expected<std::size_t, std::error_code>;
+
+		std::vector<alt::io_buffer>                        buffers;
+		std::vector<std::shared_ptr<outcome<result_type>>> results;
+		std::vector<alt::cancellation_handle>              chains;
+
+		[[nodiscard]] bool all_finished() const
+		{
+			return std::ranges::all_of(results, [](const auto& result) { return result->finished; });
+		}
+
+		/** Why read @p index is not the byte at its offset, or empty if it is. */
+		[[nodiscard]] std::string failure_of(const std::size_t index) const
+		{
+			const std::optional<result_type>& read = results.at(index)->result;
+			if(!read.has_value())
+			{
+				return "no result";
+			}
+			if(!read->has_value())
+			{
+				return read->error().message();
+			}
+			if(**read != 1U)
+			{
+				return "read " + std::to_string(**read) + " bytes";
+			}
+			if(text_of(buffers.at(index), 1) != std::string(1, static_cast<char>(index)))
+			{
+				return "the wrong byte";
+			}
+			return {};
+		}
+	};
+
+	/**
+	 * Starts @p count one-byte reads of @p file while @p completions is held, so that on the
+	 * IOCP backend every packet queues behind the completion thread's first post.
+	 */
+	concurrent_reads start_reads_while_held(const alt::async_file& file, holdable_scheduler& completions, const std::size_t count)
+	{
+		concurrent_reads reads;
+		completions.hold();
+		const release_on_exit released{completions};
+		for(std::size_t index = 0; index < count; ++index)
+		{
+			reads.buffers.push_back(buffer_of(1));
+			reads.results.push_back(std::make_shared<outcome<concurrent_reads::result_type>>());
+			reads.chains.push_back(alt::start(capture(file.read_at(reads.buffers.back(), index, 1), reads.results.back())));
+		}
+		return reads;
+	}
 } // namespace
 
 TEST_F(AsyncFileTest, ManyConcurrentReadsAllComplete)
@@ -635,41 +702,19 @@ TEST_F(AsyncFileTest, ManyConcurrentReadsAllComplete)
 	// packets pile up behind it, so a wake that fills its whole batch and must go round again
 	// for the rest really happens. On the thread-pool backend the hold only delays the worker.
 	constexpr std::size_t count = 300;
-	std::string           content;
-	for(std::size_t index = 0; index < count; ++index)
-	{
-		content.push_back(static_cast<char>(index));
-	}
-	const auto         path = write_file("many.bin", content);
-	holdable_scheduler completions{home()};
-	auto               service = alt::file_io::create(pool(), alt::scheduler_ref{completions}, alt_test::file_io_options_under_test({.backend = alt::io_backend_kind::automatic, .max_in_flight = 256, .queue_depth = 0}));
+	const auto            path  = write_file("many.bin", numbered_bytes(count));
+	holdable_scheduler    completions{home()};
+	auto                  service = alt::file_io::create(pool(), alt::scheduler_ref{completions}, alt_test::file_io_options_under_test({.backend = alt::io_backend_kind::automatic, .max_in_flight = 256, .queue_depth = 0}));
 	ASSERT_TRUE(service.has_value()) << service.error().message();
-	auto file = run(service->open(path, alt::flags(alt::open_flag::read)));
+	const auto file = run(service->open(path, alt::flags(alt::open_flag::read)));
 	ASSERT_TRUE(file.has_value());
 
-	using result_type = std::expected<std::size_t, std::error_code>;
-	std::vector<alt::io_buffer>                        buffers;
-	std::vector<std::shared_ptr<outcome<result_type>>> results;
-	std::vector<alt::cancellation_handle>              chains;
-	{
-		completions.hold();
-		const release_on_exit released{completions};
-		for(std::size_t index = 0; index < count; ++index)
-		{
-			buffers.push_back(buffer_of(1));
-			results.push_back(std::make_shared<outcome<result_type>>());
-			chains.push_back(alt::start(capture(file->read_at(buffers.back(), index, 1), results.back())));
-		}
-	}
-	ASSERT_TRUE(pump_until([&] { return std::ranges::all_of(results, [](const auto& result) { return result->finished; }); }));
+	const concurrent_reads reads = start_reads_while_held(*file, completions, count);
+	ASSERT_TRUE(pump_until([&] { return reads.all_finished(); }));
 
 	for(std::size_t index = 0; index < count; ++index)
 	{
-		const std::optional<result_type>& read = results[index]->result;
-		ASSERT_TRUE(read.has_value()) << "read " << index;
-		ASSERT_TRUE(read->has_value()) << "read " << index << ": " << read->error().message();
-		EXPECT_EQ(**read, 1U) << "read " << index;
-		EXPECT_EQ(text_of(buffers[index], 1), std::string(1, static_cast<char>(index))) << "read " << index;
+		EXPECT_EQ(reads.failure_of(index), "") << "read " << index;
 	}
 }
 
