@@ -6,9 +6,7 @@
 #include <string>
 #include <string_view>
 
-#ifdef _WIN32
-#	include <windows.h>
-#elif (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
+#if (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
 #	include <string.h>
 #endif
 
@@ -17,15 +15,24 @@ namespace alt
 
 	/**
 	 * @brief Zeroes n bytes starting at p in a way the compiler will not optimize away.
+	 *
+	 * Uses @c explicit_bzero where the platform provides it and a volatile byte-write
+	 * loop elsewhere, Windows included. This header does not include @c <windows.h>,
+	 * so it does not define the Win32 @c min and @c max macros in the including
+	 * translation unit.
+	 *
 	 * @param p  Pointer to memory to zero. Must point to at least n addressable bytes.
 	 *           May be null only when n == 0.
 	 * @param n  Number of bytes to zero. A value of 0 is a no-op.
 	 */
 	inline void clear_memory(void* p, std::size_t n) noexcept
 	{
-#ifdef _WIN32
-		SecureZeroMemory(p, n);
-#elif (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
+		// Windows deliberately has no arm of its own: it takes the volatile loop below.
+		// SecureZeroMemory is defined as RtlSecureZeroMemory, which Microsoft documents as
+		// implemented inline with volatile accesses, so it guarantees nothing the loop does
+		// not. Including <windows.h> for it would also define the min and max macros in
+		// every translation unit that includes this header.
+#if (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
 		explicit_bzero(p, n);
 #else
 		auto* vp = static_cast<volatile unsigned char*>(p);
