@@ -278,21 +278,22 @@ namespace alt
 				return handle;
 			}
 
-			// Why this is suppressed rather than marked [[nodiscard]]. A coroutine that is not an
-			// alt::task (a test driver, a consumer's own type) may legitimately await a non-void
-			// task only to observe that it completed or threw; tests/test_task.cpp's
-			// run_throwing_result does exactly that, and the attribute would make it warn, which is
-			// an error under a consumer's -Werror. Inside an alt::task coroutine the library has
-			// already decided the other way, by design: detail::cancellation_checked::await_resume
-			// is [[nodiscard]] (see detail/cancellation.hpp), so a discarded await there warns.
-			// The suppression is latent rather than constantly reported: the check runs over this
-			// header only in a translation unit that instantiates it under the root .clang-tidy,
-			// and no compiled one awaited a non-void task when this was written (src/file_io.cpp
-			// and src/async_file.cpp await only the permit and io awaiters), while
-			// tests/.clang-tidy disables the check for the suite. The first src/ file to await
-			// one would otherwise fail the clang-tidy gate on the line below.
-			// NOLINTNEXTLINE(modernize-use-nodiscard): plain coroutines may discard a non-void await to observe completion or an exception; alt::task coroutines already warn through cancellation_checked. See the comment above.
-			decltype(auto) await_resume() const
+			/**
+			 * Marked [[nodiscard]] so that discarding an awaited value warns in every awaiting
+			 * coroutine, not only in an alt::task one (issue #61). Inside an alt::task the await
+			 * is already wrapped by detail::cancellation_checked, whose await_resume carries the
+			 * same attribute; a plain coroutine, a sync_wait-style driver or a test is not
+			 * wrapped, and before this a discarded task<std::expected<T, E>> there dropped the
+			 * only report of a failure silently.
+			 *
+			 * This is a deliberate source-compatibility break for warnings-as-errors builds. An
+			 * await that discards a value on purpose, to observe only that the task completed
+			 * or threw, now says so with a cast: `static_cast<void>(co_await std::move(t));`.
+			 * Prefer that to binding the result to a variable, which moves the value out and
+			 * runs its move constructor. Awaiting a task<void> is unaffected: there is no value
+			 * to discard.
+			 */
+			[[nodiscard]] decltype(auto) await_resume() const
 			{
 				if constexpr(Move)
 				{

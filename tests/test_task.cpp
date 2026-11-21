@@ -160,7 +160,10 @@ namespace
 	{
 		try
 		{
-			co_await std::move(t);
+			// Discarded on purpose: only the exception is wanted. The cast, not a binding,
+			// because binding would move the value, and a move that throws would satisfy this
+			// test even if the stored exception were never rethrown.
+			static_cast<void>(co_await std::move(t));
 		}
 		catch(...)
 		{

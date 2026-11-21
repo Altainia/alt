@@ -116,6 +116,31 @@ primitives, so a build that was clean before it may now warn — including one
 with warnings-as-errors, as this project's own clang-tidy gate is. The fix is to
 use the value, or to drop it deliberately with a cast to `void`.
 
+### Outside an `alt::task` as well
+
+Awaiting a task from any other coroutine — a plain coroutine type with no
+`await_transform`, a `sync_wait`-style driver, a test — reaches the task's own
+awaiter rather than the cancellation layer's, and that awaiter's `await_resume`
+is `[[nodiscard]]` too (issue #61). So discarding the value of an awaited
+`alt::task<T>` warns wherever it is awaited. That matters most for
+`task<std::expected<T, E>>`, which every file I/O operation returns: there the
+discarded value is the only report of a failure.
+
+```cpp
+plain_coroutine driver(alt::task<int> first, alt::task<int> second)
+{
+    co_await std::move(first);                     // warns: the result is dropped
+    static_cast<void>(co_await std::move(second)); // deliberate: only completion, or a throw, is wanted
+}
+```
+
+This is a source-compatibility break for builds with warnings as errors, taken
+deliberately. Prefer the cast to binding the result to an unused variable:
+binding moves the value out and runs its move constructor, which a cast does not.
+Awaiting a `task<void>` is unaffected. `tests/compile_checks/task_await_discard.cpp`
+pins both halves on every compiler CI builds with: the discard must fail to
+compile when that diagnostic is an error, and the cast must not.
+
 Which compilers act on it was measured rather than assumed, with `-Wall
 -Wextra` on GCC 15.2.0 and Clang 21.1.8:
 
