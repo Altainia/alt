@@ -505,24 +505,48 @@ namespace alt
 		 * path::string() is not that on Windows: it converts the native UTF-16 to the ANSI code
 		 * page, which has no byte for most characters and a different one for many others, and
 		 * the conversion throws on a name it cannot represent, which fails the whole listing.
-		 * u8string() converts to UTF-8; the result is copied byte for byte into the std::string.
 		 *
-		 * A Windows name that is not valid UTF-16 (an unpaired surrogate, which NTFS permits) has
-		 * no UTF-8 form, and u8string() throws on it. That is reported as illegal_byte_sequence
-		 * rather than given a lossy name, because a lossy name would not round-trip to the file.
+		 * The conversion to UTF-8 is WideCharToMultiByte's, called directly, rather than
+		 * path::u8string()'s. Neither the standard nor Microsoft documents what u8string() throws
+		 * when a name has no UTF-8 form; WideCharToMultiByte documents its failure: with
+		 * WC_ERR_INVALID_CHARS it returns 0 and sets ERROR_NO_UNICODE_TRANSLATION for invalid
+		 * input, where without the flag it would silently substitute U+FFFD.
+		 *
+		 * A Windows name that is not valid UTF-16 (an unpaired surrogate, which NTFS permits) is
+		 * that case, and is reported as illegal_byte_sequence rather than given a lossy name,
+		 * because a lossy name would not round-trip to the file.
 		 */
 		std::expected<std::string, std::error_code> entry_name(const std::filesystem::path& entry)
 		{
 #ifdef _WIN32
-			try
+			const std::filesystem::path name = entry.filename();
+			const std::wstring&         wide = name.native();
+			if(wide.empty())
 			{
-				const std::u8string utf8 = entry.filename().u8string();
-				return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+				return std::string();
 			}
-			catch(const std::system_error&)
+			// A file name is at most a few hundred UTF-16 units; the API's count is an int.
+			if(wide.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
 			{
-				return std::unexpected(std::make_error_code(std::errc::illegal_byte_sequence));
+				return std::unexpected(std::make_error_code(std::errc::filename_too_long));
 			}
+			const auto wide_count = static_cast<int>(wide.size());
+			const auto failure    = [] {
+				const DWORD code = ::GetLastError();
+				return code == ERROR_NO_UNICODE_TRANSLATION ? std::make_error_code(std::errc::illegal_byte_sequence) : last_error();
+			};
+			// The first call measures, the second converts; both reject invalid UTF-16 the same way.
+			const int size = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wide_count, nullptr, 0, nullptr, nullptr);
+			if(size == 0)
+			{
+				return std::unexpected(failure());
+			}
+			std::string utf8(static_cast<std::size_t>(size), '\0');
+			if(::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wide_count, utf8.data(), size, nullptr, nullptr) == 0)
+			{
+				return std::unexpected(failure());
+			}
+			return utf8;
 #else
 			return entry.filename().string();
 #endif
@@ -728,8 +752,9 @@ namespace alt
 					// This function is noexcept and a worker has nobody to hand an exception to,
 					// so one would abort the process. Nothing here is known to throw anything else:
 					// the one source there was, a Windows directory entry whose name the narrow
-					// conversion could not represent, is now caught where it happens and reported
-					// as illegal_byte_sequence (see entry_name()). This stays as the backstop.
+					// conversion could not represent, no longer throws at all: entry_name()
+					// converts without exceptions and reports illegal_byte_sequence. This stays
+					// as the backstop.
 					result.error = std::make_error_code(std::errc::io_error);
 				}
 			}
