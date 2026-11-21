@@ -7,8 +7,43 @@
 #include <string_view>
 
 #ifdef _WIN32
+// <windows.h> is needed only for SecureZeroMemory, but it defines the function-like macros
+// min and max, which would break std::min, std::max and std::numeric_limits<>::max() in
+// every translation unit that includes this header (issue #58). push_macro and pop_macro
+// restore each macro to exactly the state it had before: left undefined if it was undefined,
+// and left as the includer's definition if the includer had already included <windows.h>.
+// Prefer this to defining NOMINMAX, which would change what the includer sees afterward,
+// and to a bare #undef, which would remove macros the includer may have wanted.
+// Microsoft's documentation for pop_macro does not say what happens to a macro that was
+// undefined at push time, which is the case this relies on. GCC and clang leave it
+// undefined, verified locally; tests/test_memory_header_hygiene.cpp is what verifies MSVC
+// does, and would fail with C4003 there if it did not.
+#	pragma push_macro("min")
+#	pragma push_macro("max")
 #	include <windows.h>
-#elif (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
+#	pragma pop_macro("max")
+#	pragma pop_macro("min")
+#endif
+
+// Selects the explicit_bzero arm of clear_memory; undefined again after it so this
+// public header leaves no macro behind.
+//
+// The glibc test is nested on purpose. __GLIBC_PREREQ is a function-like macro that only
+// glibc's <features.h> supplies, and the preprocessor must parse a whole #if expression
+// before it evaluates it, so "defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)" in one
+// expression does not compile where the macro is absent: MSVC reports C7780 and C1017.
+// Flattening this back into one expression reintroduces that failure. The _WIN32 arm of
+// clear_memory means MSVC never evaluates this on its own, which would hide the defect
+// there; it still applies to any non-glibc toolchain without the _WIN32 arm, such as musl.
+#if defined(__APPLE__)
+#	define ALT_DETAIL_HAS_EXPLICIT_BZERO 1 // NOLINT(cppcoreguidelines-macro-usage)
+#elif defined(__GLIBC__)
+#	if __GLIBC_PREREQ(2, 25)
+#		define ALT_DETAIL_HAS_EXPLICIT_BZERO 1 // NOLINT(cppcoreguidelines-macro-usage)
+#	endif
+#endif
+
+#ifdef ALT_DETAIL_HAS_EXPLICIT_BZERO
 #	include <string.h>
 #endif
 
@@ -17,6 +52,13 @@ namespace alt
 
 	/**
 	 * @brief Zeroes n bytes starting at p in a way the compiler will not optimize away.
+	 *
+	 * Uses @c SecureZeroMemory on Windows, @c explicit_bzero where the platform provides
+	 * it, and a volatile byte-write loop elsewhere. On Windows this header includes
+	 * @c <windows.h> for @c SecureZeroMemory but restores the @c min and @c max macros
+	 * to their prior state afterward, so it leaves no Win32 @c min or @c max macro in
+	 * the including translation unit.
+	 *
 	 * @param p  Pointer to memory to zero. Must point to at least n addressable bytes.
 	 *           May be null only when n == 0.
 	 * @param n  Number of bytes to zero. A value of 0 is a no-op.
@@ -25,14 +67,18 @@ namespace alt
 	{
 #ifdef _WIN32
 		SecureZeroMemory(p, n);
-#elif (defined(__GLIBC__) && __GLIBC_PREREQ(2, 25)) || defined(__APPLE__)
+#elif defined(ALT_DETAIL_HAS_EXPLICIT_BZERO)
 		explicit_bzero(p, n);
 #else
 		auto* vp = static_cast<volatile unsigned char*>(p);
 		for(std::size_t i = 0; i < n; ++i)
+		{
 			vp[i] = 0u;
+		}
 #endif
 	}
+
+#undef ALT_DETAIL_HAS_EXPLICIT_BZERO
 
 	/**
 	 * @brief Allocator adaptor that zeroes memory before releasing it.
