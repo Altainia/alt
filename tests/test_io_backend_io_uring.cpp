@@ -24,6 +24,7 @@
 #	include <limits>
 #	include <memory>
 #	include <semaphore>
+#	include <span>
 #	include <string>
 #	include <string_view>
 #	include <vector>
@@ -134,6 +135,40 @@ namespace
 		w.result = result;
 		w.calls.fetch_add(1);
 		w.done.release();
+	}
+
+	/**
+	 * A waiter plus a WEAK handle on the storage handed to the kernel, so a callback can report
+	 * whether that storage was still alive when it ran.
+	 *
+	 * io_backend.hpp promises that a cancel never makes a buffer safe to free and only the callback
+	 * does, and the io_uring backend keeps that promise by holding an io_buffer copy in the record
+	 * until after the callback has RETURNED. No io_buffer accessor can observe it: copies share
+	 * storage, so any view a test keeps is itself an owner and would answer "alive" whatever the
+	 * backend did. A weak_ptr to the keepalive given to io_buffer::borrow() sits outside that
+	 * ownership and can answer honestly -- once the test has dropped its own strong reference,
+	 * "not expired" means something else still owns the bytes, and the backend's record is the only
+	 * candidate left.
+	 *
+	 * The same separation, for the same reason, as IoOperationTest's
+	 * TheBufferSurvivesTheChainsTeardownAndTheBackendsLateWrite, whose comment is where "each backend owes a
+	 * test of its own that the storage outlives its late write" is written down. This is the io_uring
+	 * backend's.
+	 */
+	struct storage_watch
+	{
+		waiter              w;
+		std::weak_ptr<void> storage;
+		/// Sampled by deliver_and_sample_the_storage() before the completion is delivered.
+		std::atomic<bool> alive_when_the_callback_ran{false};
+	};
+
+	/// deliver(), preceded by the liveness sample storage_watch exists for.
+	void deliver_and_sample_the_storage(void* state, alt::io_completion result) noexcept
+	{
+		auto& watch = *static_cast<storage_watch*>(state);
+		watch.alive_when_the_callback_ran.store(!watch.storage.expired());
+		deliver(&watch.w, result);
 	}
 
 	alt::io_request positional(alt::io_op op, alt::native_handle handle, alt::io_buffer buffer, std::uint64_t offset, std::size_t size)
@@ -1249,19 +1284,30 @@ namespace
 	/**
 	 * Submits a read of @p pipe's read end, which no write will complete, and returns its token.
 	 *
-	 * The buffer is passed in rather than allocated here so the caller can keep a view of it and
-	 * check afterwards that it outlived the kernel's use of it.
+	 * The buffer is passed in rather than allocated here because what the caller has done with it
+	 * before handing it over is the point in one case: ACancelOfAPendingRingReadReachesTheKernel
+	 * borrows storage of its own and then drops its last reference to it, which is what lets the
+	 * completion say whether the backend was keeping those bytes alive.
+	 *
+	 * @p on_done and @p state are the completion the backend is given; @p w is the waiter inside
+	 * @p state, needed here only to set its submitted flag.
 	 */
-	std::expected<alt::io_token, std::error_code> submit_pending_pipe_read(alt::io_backend& ring, const empty_pipe& pipe, waiter& w, alt::io_buffer buffer)
+	std::expected<alt::io_token, std::error_code> submit_pending_pipe_read(alt::io_backend& ring, const empty_pipe& pipe, waiter& w, alt::io_buffer buffer, const alt::io_completion_fn on_done, void* const state)
 	{
 		alt::io_request read;
 		read.op     = alt::io_op::read;
 		read.handle = pipe.read_end();
 		read.size   = buffer.bytes().size();
 		read.buffer = std::move(buffer);
-		auto token  = ring.submit(read, deliver, &w);
+		auto token  = ring.submit(read, on_done, state);
 		w.submitted.store(true);
 		return token;
+	}
+
+	/// The ordinary case: @p w takes the completion through deliver().
+	std::expected<alt::io_token, std::error_code> submit_pending_pipe_read(alt::io_backend& ring, const empty_pipe& pipe, waiter& w, alt::io_buffer buffer)
+	{
+		return submit_pending_pipe_read(ring, pipe, w, std::move(buffer), deliver, &w);
 	}
 
 	/**
@@ -1305,13 +1351,25 @@ namespace
 } // namespace
 
 /**
- * The one shape in which a cancel's EFFECT is deterministic rather than a race.
+ * The one shape in which a cancel's EFFECT is deterministic rather than a race, and the one place
+ * the buffer-lifetime promise is asserted rather than argued.
  *
  * A read of a pipe nothing writes to can never complete on its own, so a completion arriving at
  * all is proof that the IORING_OP_ASYNC_CANCEL reached the kernel and the kernel acted on it.
- * Measured through the ring -- not through read(2) -- on this machine's kernel: the cancel entry
- * completes with 0 and the read with -ECANCELED, every time. This is the only cancel test that
- * asserts an error code, and the only one entitled to: everywhere else the outcome is a race.
+ * Measured through the ring -- not through read(2) -- on this machine's kernel (7.0.0-43-generic,
+ * liburing 2.14): the cancel entry completes with 0 and the read with -ECANCELED, every time. This
+ * is the only cancel test that asserts an error code, and the only one entitled to: everywhere
+ * else the outcome is a race.
+ *
+ * The lifetime half. io_backend.hpp's cancel() contract is that a cancel never makes a buffer safe
+ * to free and only the callback does, which here means the record's io_buffer copy outlives the
+ * callback. The storage is BORROWED from this test rather than allocated into the request, the
+ * test's own strong reference is dropped once the read is in flight, and the callback samples
+ * whether the bytes were still owned when it ran -- by then the backend's record is the only
+ * thing that can own them. An earlier version of this test asserted view.bytes().size() == 4 on a
+ * copy of the buffer and called that the guard; it was vacuous, because io_buffer copies SHARE
+ * storage and the copy kept the bytes alive by itself. Mutations H and I in the task report are
+ * what this version is held to.
  *
  * It is what a cancel() that ignored ring tokens would fail. ARingOperationsTokenCarriesTheTag and
  * CancellingAForwardedOperationReachesThePool pin the routing either side of it.
@@ -1321,22 +1379,26 @@ TEST_F(IoUringBackendTest, ACancelOfAPendingRingReadReachesTheKernel)
 	const empty_pipe pipe;
 	ASSERT_TRUE(pipe.valid()) << "pipe() failed";
 
-	waiter     w;
-	auto       buffer = buffer_of(4);
-	const auto view   = buffer;
-	const auto token  = submit_pending_pipe_read(backend(), pipe, w, std::move(buffer));
+	storage_watch watch;
+	auto          storage = std::make_shared<std::array<std::byte, 4>>();
+	watch.storage         = storage;
+
+	const auto token = submit_pending_pipe_read(backend(), pipe, watch.w, alt::io_buffer::borrow(std::span<std::byte>{*storage}, storage), deliver_and_sample_the_storage, &watch);
 	ASSERT_TRUE(token.has_value()) << token.error().message();
 	ASSERT_NE(token->value() & alt::detail::io_uring_token_tag, 0U) << "the read was forwarded to the pool rather than put on the ring";
 
-	backend().cancel(*token);
-	wait_for_the_cancelled_read(w, pipe);
+	// Every strong reference this test had goes away here, while the read is still in flight. The
+	// request's own copy died inside the helper, so from this point the record is the only owner.
+	storage.reset();
+	ASSERT_FALSE(watch.storage.expired()) << "the backend kept no owner of the storage it gave the kernel";
 
-	EXPECT_EQ(w.calls.load(), 1);
-	EXPECT_EQ(w.result.error, std::errc::operation_canceled) << w.result.error.message();
-	EXPECT_EQ(w.result.bytes, 0U);
-	// The buffer the entry was given is still here, which the callback is what makes true and the
-	// cancel is not: the record holds a copy of it until the callback has returned.
-	EXPECT_EQ(view.bytes().size(), 4U);
+	backend().cancel(*token);
+	wait_for_the_cancelled_read(watch.w, pipe);
+
+	EXPECT_EQ(watch.w.calls.load(), 1);
+	EXPECT_EQ(watch.w.result.error, std::errc::operation_canceled) << watch.w.result.error.message();
+	EXPECT_EQ(watch.w.result.bytes, 0U);
+	EXPECT_TRUE(watch.alive_when_the_callback_ran.load()) << "the storage the kernel was given was released before the completion callback ran";
 }
 
 /**
@@ -1417,9 +1479,16 @@ namespace
  * error code of a cancelled operation is unobservable above this seam -- which is what makes the
  * race harmless rather than something to paper over.
  *
- * What is invariant: exactly one completion arrives, it arrives from the reaper thread, its shape
- * is one of the two the race allows and not a mixture, and the buffer the kernel was given
- * outlives its use of it.
+ * What is invariant: exactly one completion arrives, it arrives from the reaper thread, and its
+ * shape is one of the two the race allows rather than a mixture.
+ *
+ * What this test does NOT assert is the buffer lifetime, though an earlier version of this comment
+ * claimed it. It keeps `view`, a copy of the buffer, because the non-cancelled arm's content check
+ * needs one -- and an io_buffer copy shares storage, so holding it makes this test an owner of
+ * those bytes and blinds it to whether the backend is one too. The two cannot be had in the same
+ * test: ACancelOfAPendingRingReadReachesTheKernel drops its reference instead and carries the
+ * lifetime guard, and DestroyingItWithARingOperationInFlightTerminates covers destruction with an
+ * operation still in flight.
  */
 TEST_F(IoUringBackendTest, AMidFlightCancelStillDeliversExactlyOneCompletion)
 {

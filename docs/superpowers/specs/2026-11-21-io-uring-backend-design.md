@@ -379,10 +379,12 @@ Mapping a completion to `io_completion`:
 - **Either arm of the race occurs, and which is likelier was measured rather than guessed.**
   An earlier draft of this document asserted that a cancel "usually loses the race" because
   the operation is "typically already running or finished". That was wrong, and phase 7b
-  measured it **through the ring** rather than through libc: cancelling a read of a regular
-  file immediately after submitting it produced `ECANCELED` in 485 of 500 trials directly,
-  and in 200 of 200 through the backend. Delay the cancel by a millisecond and it loses
-  instead, 200 of 200.
+  measured it **through the ring** rather than through libc, on kernel 7.0.0-43-generic with
+  liburing 2.14: cancelling a read of a regular file immediately after submitting it produced
+  `ECANCELED` in 485 of 500 trials directly, and in 200 of 200 through the backend. Delay the
+  cancel by a millisecond and it loses instead, 200 of 200. Those proportions belong to that
+  kernel and that timing rather than to the interface, which is this paragraph's own point: the
+  balance is environment-dependent, so nothing may rest on it.
 
   So both arms are ordinary: the cancel may win, and the operation then completes with
   `ECANCELED` mapping to `std::errc::operation_canceled`; or it may lose, `ASYNC_CANCEL`
@@ -396,6 +398,15 @@ Mapping a completion to `io_completion`:
   which is what makes the race harmless — and it is why a test here must assert the
   invariants (exactly one completion, no resumption, the buffer outliving the kernel) and
   never the error code, which would be asserting the outcome of a race.
+
+  Those invariants are split across two tests on purpose.
+  `AMidFlightCancelStillDeliversExactlyOneCompletion` carries exactly-one-completion and
+  nothing-after-it; the buffer outliving the kernel is carried by
+  `ACancelOfAPendingRingReadReachesTheKernel`, which borrows its storage and drops its own
+  reference to it so that a `std::weak_ptr` can answer whether the backend still owns the
+  bytes when the callback runs. The two cannot be combined: a test that keeps a copy of the
+  buffer to check its contents is itself an owner of that storage — `io_buffer` copies share
+  it — so for that test the property is true by construction and unobservable.
 
 **Shutdown** submits a NOP with the reserved wake-up `user_data` so the thread returns
 from `wait_cqe` immediately, rather than polling with a timeout.
