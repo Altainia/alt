@@ -598,6 +598,77 @@ TEST_F(IoUringBackendTest, AZeroSizeTransferCompletesWithZeroBytes)
 	EXPECT_EQ(read_whole(path), "0123456789");
 }
 
+namespace
+{
+	/// A request for @p op on @p handle with no buffer: the shape both fsync forms take.
+	alt::io_request sync_request(const alt::io_op op, const alt::native_handle handle)
+	{
+		alt::io_request request;
+		request.op     = op;
+		request.handle = handle;
+		return request;
+	}
+} // namespace
+
+TEST_F(IoUringBackendTest, SyncFullReachesTheRingAndSucceeds)
+{
+	auto file = open_file(write_file("data.txt", "durable"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	ASSERT_EQ(alt::detail::io_uring_last_fsync_flags_for_testing(backend()), ~0U) << "an fsync was prepared before this test submitted one";
+
+	waiter     w;
+	const auto token = backend().submit(sync_request(alt::io_op::sync_full, (*file)->native()), deliver, &w);
+	w.submitted.store(true);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	EXPECT_NE(token->value() & alt::detail::io_uring_token_tag, 0U) << "sync_full was forwarded to the pool, not put on the ring";
+
+	ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the fsync never completed";
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_FALSE(w.result.error) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, 0U);
+	EXPECT_NE(w.thread, std::this_thread::get_id());
+	// The full form carries no flag. sync_data differs from it in this field alone, and the kernel
+	// answers both with a zero, so the entry is the only place the distinction can be seen.
+	EXPECT_EQ(alt::detail::io_uring_last_fsync_flags_for_testing(backend()), 0U);
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+TEST_F(IoUringBackendTest, SyncDataReachesTheRingAndSucceeds)
+{
+	auto file = open_file(write_file("data.txt", "durable"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	waiter     w;
+	const auto token = backend().submit(sync_request(alt::io_op::sync_data, (*file)->native()), deliver, &w);
+	w.submitted.store(true);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	EXPECT_NE(token->value() & alt::detail::io_uring_token_tag, 0U) << "sync_data was forwarded to the pool, not put on the ring";
+
+	ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the fdatasync never completed";
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_FALSE(w.result.error) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, 0U);
+	EXPECT_NE(w.thread, std::this_thread::get_id());
+	EXPECT_EQ(alt::detail::io_uring_last_fsync_flags_for_testing(backend()), static_cast<unsigned>(IORING_FSYNC_DATASYNC));
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+TEST_F(IoUringBackendTest, BothFsyncFormsOnAClosedDescriptorReportBadFileDescriptor)
+{
+	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	const auto stale = (*file)->native();
+	file->reset();
+
+	for(const auto op: {alt::io_op::sync_full, alt::io_op::sync_data})
+	{
+		const auto done = run(sync_request(op, stale));
+		// Negated errno, as for a transfer: the named condition is what pins the sign.
+		EXPECT_EQ(done.error, std::errc::bad_file_descriptor) << done.error.message();
+		EXPECT_EQ(done.bytes, 0U);
+	}
+}
+
 TEST_F(IoUringBackendTest, AnOperationOnAClosedDescriptorReportsBadFileDescriptor)
 {
 	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));

@@ -114,6 +114,16 @@ namespace alt::detail
 	 * cancel SQE's completion belongs there too rather than here.
 	 */
 	[[nodiscard]] std::size_t io_uring_ignored_completions_for_testing(const io_backend& ring) noexcept;
+
+	/**
+	 * The flags the most recent fsync submission entry @p ring prepared was given, or
+	 * ~0U if it has prepared none. Same precondition.
+	 *
+	 * sync_full and sync_data differ in nothing but IORING_FSYNC_DATASYNC, and the kernel's
+	 * answer to both is the same zero, so no completion can tell a swapped flag from a right one.
+	 * This is the one place the flag the entry actually carries is observable.
+	 */
+	[[nodiscard]] unsigned io_uring_last_fsync_flags_for_testing(const io_backend& ring) noexcept;
 } // namespace alt::detail
 
 #endif

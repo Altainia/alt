@@ -205,6 +205,9 @@ namespace alt::detail
 			return ring_sizes{.submission_entries = static_cast<unsigned>(submission), .completion_entries = static_cast<unsigned>(completion)};
 		}
 
+		/// What io_uring_last_fsync_flags_for_testing() reports before any fsync has been submitted. Not a value the kernel defines.
+		constexpr unsigned no_fsync_yet = ~0U;
+
 		/// The file descriptor @p handle carries. A ring operates on ordinary descriptors.
 		/// A third copy of the pool backend's own one-line cast; issue #74 moves it to a header.
 		int to_fd(const native_handle handle) noexcept
@@ -212,8 +215,41 @@ namespace alt::detail
 			return static_cast<int>(handle);
 		}
 
+		/// The operations this backend puts on the ring. Every other io_op is forwarded to the pool.
+		enum class ring_operation : std::uint8_t
+		{
+			read,
+			write,
+			/// IORING_OP_FSYNC with no flags: data and metadata.
+			fsync,
+			/// IORING_OP_FSYNC with IORING_FSYNC_DATASYNC: data, and only the metadata needed to read it back.
+			fdatasync,
+		};
+
+		/// The ring operation that serves @p op. Precondition: @p op is read, write, sync_full or sync_data.
+		ring_operation ring_operation_of(const io_op op) noexcept
+		{
+			switch(op)
+			{
+			case io_op::write:
+				return ring_operation::write;
+			case io_op::sync_full:
+				return ring_operation::fsync;
+			case io_op::sync_data:
+				return ring_operation::fdatasync;
+			default:
+				return ring_operation::read;
+			}
+		}
+
+		/// Whether @p kind is one of the two fsync forms, which carry no buffer, count or offset.
+		bool is_sync(const ring_operation kind) noexcept
+		{
+			return kind == ring_operation::fsync || kind == ring_operation::fdatasync;
+		}
+
 		/**
-		 * One read or write on the ring, owned by the backend from submission until the reaper has
+		 * One read, write or fsync on the ring, owned by the backend from submission until the reaper has
 		 * consumed its completion.
 		 *
 		 * The buffer copy is what keeps the bytes alive while the kernel owns them; it is released
@@ -254,12 +290,12 @@ namespace alt::detail
 		/// Everything a submission needs, read from the record before the record can be completed.
 		struct transfer_submission
 		{
-			std::uint64_t user_data = 0;
-			int           fd        = -1;
-			void*         data      = nullptr;
-			unsigned      count     = 0;
-			std::uint64_t offset    = 0;
-			bool          is_write  = false;
+			std::uint64_t  user_data = 0;
+			int            fd        = -1;
+			void*          data      = nullptr;
+			unsigned       count     = 0;
+			std::uint64_t  offset    = 0;
+			ring_operation kind      = ring_operation::read;
 		};
 
 		/**
@@ -399,7 +435,7 @@ namespace alt::detail
 				// violated past the point of diagnosing it, and releasing it is the safe side of that
 				// bug rather than the wrong one. The wake-up
 				// NOP's own submission has just flushed any entry still sitting unconsumed in the ring
-				// -- so the kernel either holds that read or write or has already completed it. A
+				// -- so the kernel either holds that operation or has already completed it. A
 				// completion that arrived before the NOP's was reaped and freed normally; these are the
 				// ones that did not.
 				//
@@ -505,11 +541,11 @@ namespace alt::detail
 
 			[[nodiscard]] std::expected<io_token, std::error_code> submit(const io_request& request, io_completion_fn on_done, void* state) override
 			{
-				if(request.op == io_op::read || request.op == io_op::write)
+				if(request.op == io_op::read || request.op == io_op::write || request.op == io_op::sync_full || request.op == io_op::sync_data)
 				{
 					return submit_transfer(request, on_done, state);
 				}
-				// Everything else is forwarded, and seven of the nine never can be anything else. open,
+				// Everything else is forwarded, and none of the seven can be anything else. open,
 				// the two stats, rename and unlink have opcodes that arrived across kernels 5.6 to 5.11
 				// and would each need their own probe and fallback for no latency anyone is waiting on; a
 				// directory listing has no opcode at all, since getdents is not exposed; and invoke runs
@@ -556,9 +592,14 @@ namespace alt::detail
 				return m_ignored.load();
 			}
 
+			[[nodiscard]] unsigned last_fsync_flags() const noexcept
+			{
+				return m_last_fsync_flags.load();
+			}
+
 		private:
 			/**
-			 * Submits @p request to the ring as one read or write SQE.
+			 * Submits @p request to the ring as one read, write or fsync SQE.
 			 *
 			 * The record is registered BEFORE the SQE reaches the kernel, so a completion that lands
 			 * while this call is still inside io_uring_submit() finds it. From that moment the record
@@ -583,12 +624,13 @@ namespace alt::detail
 				owned->on_done = on_done;
 				owned->state   = state;
 
+				const ring_operation      operation = ring_operation_of(request.op);
 				const transfer_submission submission{.user_data = io_uring_token_tag | m_next_id.fetch_add(1),
 				                                     .fd        = to_fd(request.handle),
 				                                     .data      = owned->buffer.bytes().data(),
-				                                     .count     = transfer_count(request),
+				                                     .count     = is_sync(operation) ? 0U : transfer_count(request),
 				                                     .offset    = request.offset,
-				                                     .is_write  = request.op == io_op::write};
+				                                     .kind      = operation};
 
 				if(const auto error = enroll(submission.user_data, std::move(owned)))
 				{
@@ -723,9 +765,12 @@ namespace alt::detail
 			 * ALREADY PUBLISHED: liburing advances the ring tail with a release store before it enters
 			 * the kernel, so the entry stays in the ring and the next submission -- any later
 			 * operation's, or the destructor's own wake-up NOP -- flushes it. The kernel may then
-			 * perform this read or write. Freeing the record here would hand it a buffer that is gone
-			 * to write into: a kernel write into freed heap, which this project has already recorded as
-			 * invisible to AddressSanitizer AND ThreadSanitizer, so no gate would ever catch it.
+			 * perform this operation. For a read or write, freeing the record here would hand it a
+			 * buffer that is gone to write into: a kernel write into freed heap, which this project
+			 * has already recorded as invisible to AddressSanitizer AND ThreadSanitizer, so no gate
+			 * would ever catch it. An fsync's record holds no buffer, so freeing that one would be
+			 * harmless; it is quarantined all the same, because nothing on this path asks which
+			 * operation it is and a second rule for one kind would be a second path to get wrong.
 			 *
 			 * **A refused io_uring_submit() consumed NO entry, this one included**, and every
 			 * interleaving argument below rests on that. io_uring_enter reports an error only when it
@@ -774,17 +819,25 @@ namespace alt::detail
 				{
 					return submission_outcome{.error = errno_error(EAGAIN), .entry_published = false};
 				}
-				if(submission.is_write)
+				switch(submission.kind)
 				{
+				case ring_operation::write:
 					io_uring_prep_write(sqe, submission.fd, submission.data, submission.count, submission.offset);
-				}
-				else
-				{
+					break;
+				case ring_operation::read:
 					io_uring_prep_read(sqe, submission.fd, submission.data, submission.count, submission.offset);
+					break;
+				case ring_operation::fsync:
+				case ring_operation::fdatasync: {
+					const unsigned flags = submission.kind == ring_operation::fdatasync ? IORING_FSYNC_DATASYNC : 0U;
+					io_uring_prep_fsync(sqe, submission.fd, flags);
+					m_last_fsync_flags.store(flags);
+					break;
+				}
 				}
 				// Assigned directly rather than through io_uring_sqe_set_data64(), for the reason
 				// post_wake_up() gives: the 2.1 floor does not promise that helper. io_uring_prep_read,
-				// io_uring_prep_write and io_uring_prep_nop are all older than it.
+				// io_uring_prep_write, io_uring_prep_fsync and io_uring_prep_nop are all older than it.
 				sqe->user_data      = submission.user_data;
 				const int submitted = io_uring_submit(&m_ring);
 				if(submitted < 0)
@@ -1031,6 +1084,9 @@ namespace alt::detail
 			 * a completion of an operation at all. Issue #73.
 			 */
 			std::atomic<std::size_t> m_ignored{0};
+
+			/// The flags the most recent fsync SQE was prepared with, or no_fsync_yet. Read by the test seam only.
+			std::atomic<unsigned> m_last_fsync_flags{no_fsync_yet};
 			/// Operations forwarded to the pool backend whose trampoline has not yet run.
 			std::atomic<std::size_t> m_forwarded{0};
 			std::thread              m_thread;
@@ -1081,6 +1137,12 @@ namespace alt::detail
 	{
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast): same reasoning as io_uring_submission_depth_for_testing above.
 		return static_cast<const io_uring_backend&>(ring).ignored_completions();
+	}
+
+	unsigned io_uring_last_fsync_flags_for_testing(const io_backend& ring) noexcept
+	{
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast): same reasoning as io_uring_submission_depth_for_testing above.
+		return static_cast<const io_uring_backend&>(ring).last_fsync_flags();
 	}
 } // namespace alt::detail
 
