@@ -151,7 +151,10 @@ Which fields each operation reads, and where its result goes, is the table on
 A read or write moves at most `min(size, buffer.size())` bytes. A larger `size` is
 clamped and the short transfer is reported as success, indistinguishable from a real
 short read, so a layer that must refuse that request has to do so before submitting.
-[`async_file`](async_file.md) does.
+[`async_file`](async_file.md) does. Each platform caps a single transfer below that as
+well: `std::numeric_limits<DWORD>::max()` on Windows, because `ReadFile` and `WriteFile`
+take a 32-bit count, and `0x7ffff000` (the kernel's `MAX_RW_COUNT`, about 2 GiB) on Linux
+for both backends there. A request above the cap in force is short in the same way.
 
 ## `manual_io_backend`
 
@@ -325,6 +328,17 @@ file descriptors, so the internal thread-pool backend is the plain one: no extra
 no association step. A descriptor from `async_file::adopt()` is as usable here as one this
 service opened.
 
+**It differs from the thread-pool backend on a NON-SEEKABLE descriptor**, and this is the one
+place the two Linux backends are not interchangeable. The pool arm performs a positional
+transfer with `pread`/`pwrite`, which fail with `ESPIPE` on a pipe, a socket or a terminal.
+This backend submits `IORING_OP_READ`/`IORING_OP_WRITE` carrying the requested offset, which
+such a descriptor's read path **ignores**: the transfer succeeds and the offset is silently
+disregarded. Since `automatic` resolves to io_uring on Linux, a program that adopts a pipe
+sees an error become a success between alt 1.17 and 1.18. The seam promises neither behavior,
+so neither is wrong; it does mean that the file-layer suite's thread-pool run and its
+`file_layer_on_io_uring` run are not equivalent coverage, because each can use a descriptor
+the other arm would refuse. Issue #79 tracks the choice of a contract.
+
 **Transfers.** Each ring operation gets a heap record holding its copy of the request's
 `io_buffer` (which keeps the bytes alive while the kernel owns them), the callback and the
 token. The record is registered in an in-flight registry, keyed by the token, *before* its
@@ -342,7 +356,8 @@ must not lose its storage.
 **Ring sizes.** `file_io_options::queue_depth` is the submission ring's size: rounded up to
 a power of two, clamped to what the kernel allows, and derived from `max_in_flight` when it
 is 0. The completion ring is sized separately, from `max_in_flight` plus the backend's own
-reserved entries, so a completion queue cannot overflow by construction for any
+reserved entries -- the wake-up NOP, and one cancel per in-flight operation, which assumes a
+caller that does not cancel the same token twice -- so a completion queue cannot overflow for any
 `max_in_flight` up to 32767. Above that the ring is clamped to the kernel's ceiling and an
 overflow becomes possible, but it is still safe: every kernel this backend accepts holds
 overflowing completions in a backlog rather than dropping them, and the reaper drains it.

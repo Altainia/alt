@@ -44,7 +44,11 @@ target_link_libraries(alt PUBLIC Threads::Threads)
 # dependencies to consumers as $<LINK_ONLY:PkgConfig::LIBURING>, so AltConfig.cmake.in
 # must define that same imported target. 2.1 is the oldest release supported
 # (Ubuntu 22.04, Debian 12); neither this machine nor CI's runner has one that old,
-# so the version constraint below is the only place the floor is stated.
+# so the version constraint below is the only place the floor is ENFORCED for this
+# build. cmake/AltConfig.cmake.in carries the same constraint and enforces it for
+# consumers; README.md, CLAUDE.md and the phase 7b design state it in prose. So the
+# number lives in five places and this is the one that stops a too-old liburing from
+# building alt itself.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBURING IMPORTED_TARGET liburing>=2.1)

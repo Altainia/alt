@@ -242,14 +242,22 @@ So the design is:
 - **The completion ring is sized explicitly** with `IORING_SETUP_CQSIZE` via
   `io_uring_queue_init_params`, to at least `max_in_flight` plus the reserved internal
   completions (the wake-up NOP and one cancel per in-flight operation). Completion-queue
-  overflow is then unreachable *by construction* rather than by assumption, whatever
+  overflow is then unreachable rather than merely improbable, whatever
   `queue_depth` the caller passes — **for `max_in_flight` up to and including 32767, and
   not above it.** Covering `max_in_flight` costs `2 * max_in_flight + 1` entries, and
   `IORING_MAX_CQ_ENTRIES` is 65536: 32767 needs 65535 and fits, 32768 needs 65537 and is
   one entry short, and larger values fall further behind. *(Corrected during phase 7b
   implementation; the sentence above was unqualified and the arithmetic does not support
   it. The original wording was carried into the backend's own documentation before it was
-  caught, which is why it is corrected here as well as there.)*
+  caught, which is why it is corrected here as well as there. The final review added the
+  second qualification: "one cancel per in-flight operation" is an assumption about the
+  CALLER, not a property of the construction. `cancel()` is a hint with no once-only rule,
+  and a second `cancel()` on a still-pending token submits a second
+  `IORING_OP_ASYNC_CANCEL` with its own completion. `src/io_operation.cpp`'s `stop_handler`
+  cannot — it returns unless the state is `phase::waiting`, sets `phase::detached`, and runs
+  from a `std::stop_callback`, which fires once — so the bound holds for this library
+  because of that caller. Breaking it costs exactly what exceeding 32767 costs: overflow
+  becomes possible and the NODROP backlog keeps it safe.)*
 - **Above that bound the value is accepted, not refused**, and the guarantee weakens from
   unreachable to merely safe. Every kernel that passes the capability check is 5.6 or
   newer, hence sets `IORING_FEAT_NODROP`, under which an overflowing completion goes to a
@@ -563,11 +571,21 @@ bump: a new capability plus a packaging change. Decided in conversation.
 The suite is where this phase is most likely to go wrong, because the backend's
 correctness is mostly about lifetime and ordering rather than results.
 
-**Availability.** A helper reports whether a ring can be created. Per-test skipping uses
-it, **and one test fails outright when io_uring is unavailable** — a deliberate canary, so
-that a runner which stops permitting io_uring turns CI red instead of leaving the whole
-backend unexercised behind a green sweep. That test's name and comment must say that is
-its entire job, so nobody later "fixes" it into a skip.
+**Availability.** A helper reports whether a ring can be created, and one test —
+`IoUringAvailability.TheRunnerProvidesIoUring` — **fails outright when io_uring is
+unavailable**: a deliberate canary, so that a runner which stops permitting io_uring turns
+CI red instead of leaving the whole backend unexercised behind a green sweep. That test's
+name and comment must say that is its entire job, so nobody later "fixes" it into a skip.
+
+*(Corrected by the final review to describe what was built. The sentence above read
+"Per-test skipping uses it, and one test fails outright", which implies one red test and the
+rest skipped. As built, only `tests/test_file_io.cpp`'s three io_uring cases consult the
+helper and skip; `IoUringBackendTest::build()` uses `EXPECT_TRUE` instead — deliberately, and
+with a comment saying so — so all 35 of that fixture's tests fail as well, and a runner that
+loses io_uring produces roughly forty red tests rather than one. That over-satisfies the
+anti-goal rather than missing it, and it is defensible for tests that are **about** io_uring:
+a skip there would hide the backend entirely. It is recorded here because it was not the
+letter of this section.)*
 
 **Reuse the file-layer harness.** Phase 7c added `tests/file_io_test_support.hpp` and runs
 the file-layer suite against the IOCP backend. The io_uring backend should go through the

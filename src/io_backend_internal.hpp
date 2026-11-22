@@ -40,7 +40,10 @@ namespace alt::detail
 	/**
 	 * The byte count a positional transfer may move: never more than the buffer holds.
 	 *
-	 * This is the platform-neutral clamp only. The Windows arm applies its own DWORD clamp on top of it.
+	 * This is the platform-neutral clamp only, and every arm applies a cap of its own on top of it:
+	 * the Windows arm a DWORD clamp, and both Linux arms the kernel's MAX_RW_COUNT of 0x7ffff000 --
+	 * explicitly in the io_uring arm's max_single_transfer, and by the kernel's own truncation of
+	 * pread and pwrite in the thread-pool arm.
 	 */
 	inline std::size_t transfer_size(const io_request& request) noexcept
 	{
