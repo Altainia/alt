@@ -221,6 +221,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(file_layer_on_io_uring PROPERTIES ENVIRONMENT "ALT_TEST_IO_BACKEND=io_uring" TIMEOUT 300)
 endif()
 
+# Guards the discovered tests' ALT_TEST_IO_BACKEND=thread_pool above, which no test can
+# observe from inside: dropped, every discovered test takes `automatic` (io_uring here) and
+# still passes, and the thread pool is covered by nothing. This reads the property back from
+# ctest's own description of one discovered file-layer test. Linux only because that is
+# where it was measured; the Windows setting is unguarded.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME discovered_tests_name_the_thread_pool
+        COMMAND ${CMAKE_COMMAND}
+            -DCTEST_COMMAND=${CMAKE_CTEST_COMMAND}
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DTEST_NAME=FileIoTest.CreateRejectsAZeroMaxInFlight
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_discovered_test_environment.cmake)
+endif()
+
 # Compile checks for alt::task's [[nodiscard]] await_resume (issue #61). A diagnostic is
 # not observable from a running test, so these build a probe and judge the build: the
 # discarding variant must fail and the cast-to-void control must succeed, and the control

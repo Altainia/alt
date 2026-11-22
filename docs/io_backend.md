@@ -360,8 +360,8 @@ internal thread-pool backend, and `cancel` forwards it there. Tokens are ids, ne
 addresses.
 
 **Cancellation.** `cancel` on a ring token looks the token up in the registry and, if it is
-still there, submits an `IORING_OP_ASYNC_CANCEL` entry naming it, after releasing the registry's lock. It is a hint: the read's completion comes either way, and the callback runs
-exactly once, with `operation_canceled` and 0 bytes if the kernel acted on the cancel, or the
+still there, submits an `IORING_OP_ASYNC_CANCEL` entry naming it, after releasing the registry's lock. It is a hint: the read's
+completion comes either way, and the callback runs exactly once, with `operation_canceled` and 0 bytes if the kernel acted on the cancel, or the
 transfer's real result if it finished first. A cancel never makes a buffer safe to free; only
 the callback does, and the record's `io_buffer` copy is held until the callback has returned.
 A token not found has completed, or is completing, and the call does nothing.

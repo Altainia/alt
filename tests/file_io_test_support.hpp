@@ -96,6 +96,9 @@ namespace alt_test
 	 * seccomp filter), EACCES (a restricted `io_uring_group`), ENOSYS (no io_uring in the kernel)
 	 * and ENOTSUP (the kernel lacks an opcode the backend needs). Anything else, notably EINVAL
 	 * from a sizing mistake or ENOMEM, is a verdict on this library and is never environmental.
+	 * ENOMEM is a deliberate choice: a low RLIMIT_MEMLOCK on an old kernel can produce it from the
+	 * environment, but it is also what the backend reports for a failed allocation, so it fails
+	 * the tests (and the canary) rather than skipping them.
 	 */
 	inline bool io_uring_refusal_is_environmental(const std::error_code& error) noexcept
 	{

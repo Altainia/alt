@@ -35,6 +35,7 @@
 #	include <utility>
 
 #	include "death_test_support.hpp"
+#	include "file_io_test_support.hpp"
 #	include "io_backend_io_uring.hpp"
 
 namespace
@@ -1643,6 +1644,9 @@ TEST(IoUringAvailability, TheRunnerProvidesIoUring)
 	const auto                 made = alt::detail::make_io_uring_backend(*pool, defaults.queue_depth, defaults.max_in_flight);
 
 	EXPECT_TRUE(made.has_value()) << "this runner cannot create an io_uring ring, so no io_uring test is running here: " << (made ? std::string{} : made.error().message());
+	// Binds this test's verdict to the helper the skipping tests consult. A helper that wrongly
+	// reported "unavailable" would otherwise skip them everywhere while this stayed green.
+	EXPECT_FALSE(alt_test::io_uring_unavailable_reason().has_value()) << "the skip helper says io_uring is unavailable where the ring was just built";
 }
 
 #endif

@@ -806,10 +806,14 @@ namespace
 } // namespace
 
 /**
- * The harness half of running the file layer once per backend: the backend a run names through
- * ALT_TEST_IO_BACKEND is the backend the fixtures' service really has, not merely one the
- * variable was parsed into. Without it, a name the harness stopped recognizing would leave
- * every fixture on `automatic` while a ctest entry named after another backend passed.
+ * The harness half of running the file layer once per backend: the name ALT_TEST_IO_BACKEND
+ * carries is mapped by file_io_options_under_test() to the backend a service built from those
+ * options really has. Without it, a name the harness stopped recognizing would leave a service
+ * on `automatic` while a ctest entry named after another backend passed.
+ *
+ * It does NOT check that the fixtures call file_io_options_under_test(), nor that the variable
+ * is set at all: unset, it skips. The setting itself is guarded by the
+ * discovered_tests_name_the_thread_pool ctest case.
  */
 TEST(FileIoTest, TheBackendTheRunNamesIsTheOneTheFixturesGet)
 {
