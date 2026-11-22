@@ -339,7 +339,15 @@ originally defined as "no operation found for it", which the quarantine falsifie
 case finds its record. Restated here, in the plan, and in both of the backend's own
 files.)* What the counter must **not** absorb is this backend's own bookkeeping: the
 wake-up NOP is excluded by a branch ahead of the lookup, and a cancel SQE's own
-completion belongs in that same branch.
+completion is excluded by a second branch beside it (phase 7b Task 6; issue #73).
+
+Neither of the two producers can be reached from the suite, so the tests assert the counter
+is still **zero** rather than that it counted something. A quarantined record's late
+completion needs a refused `io_uring_submit`, which no kernel this project builds on
+produces (issue #72); a genuinely stale completion cannot be produced at all, because a
+record is registered before its entry reaches the kernel and withdrawn only by its own
+completion, so no completion can arrive for a `user_data` the registry has forgotten. The
+counter's value is therefore in what it refuses to count.
 
 ### The reaper thread
 
@@ -413,6 +421,15 @@ from `wait_cqe` immediately, rather than polling with a timeout.
   cannot get an SQE simply does nothing, which "cancel is a hint" permits. A stale cancel is a harmless no-op — which is precisely what
   "cancel is a hint" already permits. The lookup under the lock establishes that the operation
   *was* pending; nothing more is required of it.
+
+  **One liburing detail the floor forces.** `io_uring_prep_cancel` at 2.1 takes its target as a
+  `void*`, not a `__u64` — the 64-bit form is exactly what `io_uring_prep_cancel64` was added in
+  2.2 to provide. A `user_data` of this backend's always has bit 63 set, so routing one through a
+  pointer is not merely ugly: where a pointer is narrower than 64 bits the conversion does not
+  compile. So the entry is prepared with a null target and `sqe->addr` is then assigned the
+  `user_data`, which is the assignment `io_uring_prep_cancel64` itself makes and which `addr` has
+  meant for `IORING_OP_ASYNC_CANCEL` since the opcode existed. It needs a `clang-tidy`
+  suppression, because `addr` is a union member of the kernel's submission entry.
 - The original operation still completes, and that completion is what resumes the awaiting
   frame. Nothing about cancellation shortcuts the completion path.
 

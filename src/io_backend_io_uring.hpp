@@ -111,7 +111,11 @@ namespace alt::detail
 	 * A completion whose user_data is in no registry, and a completion whose record was found but
 	 * owes no callback because its submission was refused and its caller already has an error.
 	 * Not this backend's own bookkeeping: the wake-up NOP is excluded before the lookup, and a
-	 * cancel SQE's completion belongs there too rather than here.
+	 * cancel entry's own completion is excluded there too.
+	 *
+	 * Neither producer can be reached from the suite, so every test asserts this is still zero
+	 * rather than that it counted something; the implementation's own comment on the counter says
+	 * why, for each.
 	 */
 	[[nodiscard]] std::size_t io_uring_ignored_completions_for_testing(const io_backend& ring) noexcept;
 

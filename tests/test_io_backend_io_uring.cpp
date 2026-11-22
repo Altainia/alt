@@ -1117,7 +1117,14 @@ TEST(IoUringBackendDeathTest, DestroyingItWithAForwardedOperationInFlightTermina
 
 namespace
 {
-	/// A pipe nothing is ever written to, so a read submitted on its read end stays in flight.
+	/**
+	 * A pipe nothing is written to unless a test asks, so a read submitted on its read end stays
+	 * in flight until it is cancelled.
+	 *
+	 * That is what makes it the one shape in which a cancel's EFFECT is deterministic rather than
+	 * a race: a read of a regular file may complete on its own before the cancel reaches the
+	 * kernel, and a read of this pipe cannot.
+	 */
 	class empty_pipe
 	{
 	public:
@@ -1153,6 +1160,21 @@ namespace
 		[[nodiscard]] alt::native_handle read_end() const
 		{
 			return m_fds[0];
+		}
+
+		/**
+		 * Writes one byte, which completes a read left pending on the read end.
+		 *
+		 * The escape hatch for a cancel that did not take effect. Without it such a test leaves a
+		 * ring operation in flight, and the fixture's destructor stops the whole process for
+		 * that -- replacing one failed expectation with a dead test binary that reports nothing
+		 * about the other tests in it. Called only after a wait has already failed.
+		 */
+		void release_a_pending_read() const
+		{
+			constexpr char  byte    = 'x';
+			const ::ssize_t written = ::write(m_fds[1], &byte, 1);
+			EXPECT_EQ(written, 1) << "the pipe would not take the byte that releases the read";
 		}
 
 	private:
@@ -1220,6 +1242,314 @@ TEST(IoUringBackendDeathTest, DestroyingItWithARingOperationInFlightTerminates)
 
 	const alt_test::scoped_death_test_style style{"threadsafe"};
 	EXPECT_DEATH(destroy_the_backend_with_a_ring_operation_in_flight(), "io_uring backend destroyed with ring operations in flight");
+}
+
+namespace
+{
+	/**
+	 * Submits a read of @p pipe's read end, which no write will complete, and returns its token.
+	 *
+	 * The buffer is passed in rather than allocated here so the caller can keep a view of it and
+	 * check afterwards that it outlived the kernel's use of it.
+	 */
+	std::expected<alt::io_token, std::error_code> submit_pending_pipe_read(alt::io_backend& ring, const empty_pipe& pipe, waiter& w, alt::io_buffer buffer)
+	{
+		alt::io_request read;
+		read.op     = alt::io_op::read;
+		read.handle = pipe.read_end();
+		read.size   = buffer.bytes().size();
+		read.buffer = std::move(buffer);
+		auto token  = ring.submit(read, deliver, &w);
+		w.submitted.store(true);
+		return token;
+	}
+
+	/**
+	 * Waits for @p w, and if nothing arrives lets @p pipe release the read rather than leave a ring
+	 * operation in flight for the fixture's destructor to stop the process over.
+	 */
+	void wait_for_the_cancelled_read(waiter& w, const empty_pipe& pipe)
+	{
+		if(w.done.try_acquire_for(completion_guard))
+		{
+			return;
+		}
+		ADD_FAILURE() << "the cancelled read never completed: the cancel did not reach the kernel";
+		pipe.release_a_pending_read();
+		ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the read did not complete even once the pipe was written to";
+	}
+
+	/**
+	 * Runs @p cycles of "submit a read on a pipe nothing writes to, cancel it, wait for its one
+	 * completion" on a pipe of its own.
+	 *
+	 * Each cancel therefore meets an operation that is genuinely still in flight, which is the
+	 * interleaving worth producing and the one a regular file cannot be relied on for.
+	 */
+	void cancel_pipe_reads_repeatedly(alt::io_backend& ring, const int cycles)
+	{
+		const empty_pipe pipe;
+		ASSERT_TRUE(pipe.valid()) << "pipe() failed";
+		for(int cycle = 0; cycle < cycles; ++cycle)
+		{
+			auto buffer = alt::io_buffer::allocate(4);
+			ASSERT_TRUE(buffer.has_value());
+			waiter     w;
+			const auto token = submit_pending_pipe_read(ring, pipe, w, std::move(*buffer));
+			ASSERT_TRUE(token.has_value()) << "cycle " << cycle << ": " << token.error().message();
+			ring.cancel(*token);
+			wait_for_the_cancelled_read(w, pipe);
+			ASSERT_EQ(w.calls.load(), 1) << "cycle " << cycle;
+		}
+	}
+} // namespace
+
+/**
+ * The one shape in which a cancel's EFFECT is deterministic rather than a race.
+ *
+ * A read of a pipe nothing writes to can never complete on its own, so a completion arriving at
+ * all is proof that the IORING_OP_ASYNC_CANCEL reached the kernel and the kernel acted on it.
+ * Measured through the ring -- not through read(2) -- on this machine's kernel: the cancel entry
+ * completes with 0 and the read with -ECANCELED, every time. This is the only cancel test that
+ * asserts an error code, and the only one entitled to: everywhere else the outcome is a race.
+ *
+ * It is what a cancel() that ignored ring tokens would fail. ARingOperationsTokenCarriesTheTag and
+ * CancellingAForwardedOperationReachesThePool pin the routing either side of it.
+ */
+TEST_F(IoUringBackendTest, ACancelOfAPendingRingReadReachesTheKernel)
+{
+	const empty_pipe pipe;
+	ASSERT_TRUE(pipe.valid()) << "pipe() failed";
+
+	waiter     w;
+	auto       buffer = buffer_of(4);
+	const auto view   = buffer;
+	const auto token  = submit_pending_pipe_read(backend(), pipe, w, std::move(buffer));
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	ASSERT_NE(token->value() & alt::detail::io_uring_token_tag, 0U) << "the read was forwarded to the pool rather than put on the ring";
+
+	backend().cancel(*token);
+	wait_for_the_cancelled_read(w, pipe);
+
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_EQ(w.result.error, std::errc::operation_canceled) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, 0U);
+	// The buffer the entry was given is still here, which the callback is what makes true and the
+	// cancel is not: the record holds a copy of it until the callback has returned.
+	EXPECT_EQ(view.bytes().size(), 4U);
+}
+
+/**
+ * A cancel entry's own completion is not a completion delivered to nobody, and must not be counted
+ * as one. Issue #73.
+ *
+ * It carries a user_data of this backend's own -- the tag with an operation id of one, which
+ * first_operation_id keeps free -- and that value is in no registry. Without a branch for it ahead
+ * of the registry lookup every cancel lands on the ignored-completions counter, which means "a
+ * completion the reaper delivered to nobody" and would stop meaning it, breaking parity with the
+ * IOCP backend's ignored-packet counter and the zero-assertions the tests above already make.
+ *
+ * Why a loop and a trailing read: the counter can only be read once the reaper has consumed the
+ * cancel's completion, and nothing exposes that moment directly. For a read that is genuinely
+ * pending -- which a read of a pipe nothing writes to always is -- the kernel appends the cancel
+ * entry's completion while the cancelling thread is still inside cancel(), so a ring operation
+ * submitted afterwards has its completion later in the queue and the reaper consumes the queue in
+ * order. Measured through the ring, 500 trials per shape: against a pending pipe read the cancel's
+ * completion came first 500 times out of 500, while against a read that had already finished
+ * (/dev/zero) it came second 500 out of 500 -- which is why this test uses the pipe and not a file.
+ * Eight cycles rather than one so that a missing branch cannot hide behind a single unlucky
+ * interleaving: it makes this count eight rather than zero, which is what the mutation showed.
+ */
+TEST_F(IoUringBackendTest, ACancelSqesOwnCompletionIsNotCountedAsIgnored)
+{
+	constexpr int cycles = 8;
+	cancel_pipe_reads_repeatedly(backend(), cycles);
+
+	// The barrier: a ring operation submitted after every cancel, waited to completion.
+	auto file = open_file(write_file("barrier.txt", "0123"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	const auto done = run(positional(alt::io_op::read, **file, buffer_of(4), 0, 4));
+	ASSERT_FALSE(done.error) << done.error.message();
+
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U) << "a cancel entry's own completion was counted as ignored";
+}
+
+namespace
+{
+	/**
+	 * Checks the one completion of a cancelled regular-file read against both outcomes the race
+	 * allows, and deliberately does not assert which of them happened.
+	 *
+	 * What it does assert is that the completion is one of the two SHAPES and not a mixture: a
+	 * cancelled read moves nothing, and a read that was not cancelled moves everything it was
+	 * asked for. A backend that synthesized a cancellation over a finished read would fail here.
+	 */
+	void expect_either_cancelled_or_complete(const waiter& w, const alt::io_buffer& view, const std::string& expected)
+	{
+		if(w.result.error)
+		{
+			EXPECT_EQ(w.result.error, std::errc::operation_canceled) << w.result.error.message();
+			EXPECT_EQ(w.result.bytes, 0U) << "a cancelled read reported a byte count";
+			return;
+		}
+		EXPECT_EQ(w.result.bytes, expected.size());
+		EXPECT_EQ(text_of(view, expected.size()), expected);
+	}
+} // namespace
+
+/**
+ * The invariants of a mid-flight cancel, and NEVER the error code.
+ *
+ * Cancelling a read of a regular file is a race whose outcome the caller cannot observe. The
+ * kernel may cancel the read before it starts, or the read may already be running or finished, in
+ * which case ASYNC_CANCEL comes back -EALREADY or -ENOENT and the read completes NORMALLY, with a
+ * byte count and no error. Both are correct. Measured through the ring -- not through pread(),
+ * which is a different instrument and has already given this phase a false answer once -- on this
+ * machine's kernel: over 500 submit-then-cancel trials with nothing in between, the read came back
+ * -ECANCELED 485 times and completed normally 15, and with 1 ms between the two it completed
+ * normally 200 times out of 200. So which arm this test takes is not for it to assert. (Through the
+ * backend itself the cancel won 200 times out of 200, which is exactly why asserting the code here
+ * would look safe on this machine and flake on another kernel or a busier one.)
+ *
+ * The backend must not synthesize a cancellation to make the race go away either. On the cancelled
+ * path the awaiting frame is already gone, and src/io_operation.cpp's phase::detached branch tears
+ * the operation block down WITHOUT reading the completion's error or byte count at all, so the
+ * error code of a cancelled operation is unobservable above this seam -- which is what makes the
+ * race harmless rather than something to paper over.
+ *
+ * What is invariant: exactly one completion arrives, it arrives from the reaper thread, its shape
+ * is one of the two the race allows and not a mixture, and the buffer the kernel was given
+ * outlives its use of it.
+ */
+TEST_F(IoUringBackendTest, AMidFlightCancelStillDeliversExactlyOneCompletion)
+{
+	auto file = open_file(write_file("midflight.txt", "0123456789"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	waiter     w;
+	auto       buffer = buffer_of(8);
+	const auto view   = buffer;
+	const auto token  = backend().submit(positional(alt::io_op::read, **file, std::move(buffer), 0, 8), deliver, &w);
+	w.submitted.store(true);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	ASSERT_NE(token->value() & alt::detail::io_uring_token_tag, 0U);
+
+	backend().cancel(*token);
+	ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the read never completed";
+
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_NE(w.thread, std::this_thread::get_id()) << "a ring completion runs on the reaper thread";
+	expect_either_cancelled_or_complete(w, view, "01234567");
+	// And nothing follows it. The seam promises exactly one callback per submission and a cancel
+	// does not buy a second one; this wait is the cost of asserting "exactly one" rather than "at
+	// least one", which the count above on its own would be.
+	EXPECT_FALSE(w.done.try_acquire_for(std::chrono::milliseconds(100))) << "a second completion arrived for one submission";
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+/**
+ * Cancelling a token whose operation has already completed is a no-op, as the seam documents.
+ *
+ * The record was withdrawn by the reaper before its callback ran, so the registry lookup finds
+ * nothing and no entry is submitted for it. What this pins is that the lookup does not act on a
+ * record that is not there, that no second callback arrives for the completed operation, and that
+ * the backend is still usable afterwards.
+ */
+TEST_F(IoUringBackendTest, ACancelAfterCompletionIsHarmless)
+{
+	auto file = open_file(write_file("after.txt", "0123456789"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	waiter     w;
+	const auto token = backend().submit(positional(alt::io_op::read, **file, buffer_of(4), 0, 4), deliver, &w);
+	w.submitted.store(true);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+	ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the read never completed";
+	ASSERT_FALSE(w.result.error) << w.result.error.message();
+
+	backend().cancel(*token);
+	// Twice: a second cancel of the same completed token is no different from the first.
+	backend().cancel(*token);
+
+	EXPECT_FALSE(w.done.try_acquire_for(std::chrono::milliseconds(100))) << "cancelling a completed token produced a second completion";
+	EXPECT_EQ(w.calls.load(), 1);
+	// Still usable, and still counting nothing: a cancel that was never submitted produces no
+	// completion of its own either.
+	const auto again = run(positional(alt::io_op::read, **file, buffer_of(4), 4, 4));
+	EXPECT_FALSE(again.error) << again.error.message();
+	EXPECT_EQ(again.bytes, 4U);
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+/**
+ * Cancelling tokens this backend never issued: the empty one, and tagged ones naming operation ids
+ * no submission ever took.
+ *
+ * All are documented no-ops. The tagged ones are what matters here, because they are what reaches
+ * the registry: a lookup that acted on what it did not find would dereference m_records.end().
+ * Nothing is submitted for them, so the kernel is never asked about a user_data it does not know.
+ */
+TEST_F(IoUringBackendTest, ACancelOfATokenThisBackendNeverIssuedIsANoOp)
+{
+	backend().cancel(alt::io_token{});
+	backend().cancel(alt::io_token{alt::detail::io_uring_token_tag | 4096U});
+	// The reserved values too, which belong to no operation and must find no record either.
+	backend().cancel(alt::io_token{alt::detail::io_uring_token_tag});
+	backend().cancel(alt::io_token{alt::detail::io_uring_token_tag | 1U});
+
+	auto file = open_file(write_file("unknown.txt", "0123"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	const auto done = run(positional(alt::io_op::read, **file, buffer_of(4), 0, 4));
+	EXPECT_FALSE(done.error) << done.error.message();
+	EXPECT_EQ(done.bytes, 4U);
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+/**
+ * Cancels and submissions from several threads at once, which is what ThreadSanitizer is pointed at
+ * for this backend.
+ *
+ * cancel() touches both of this backend's mutexes -- the registry's to ask whether the operation is
+ * still pending, the submission's to put the entry on the ring -- and it may be called from any
+ * thread, concurrently with other threads' submissions and with the reaper's own withdrawals. An
+ * entry acquired or submitted without the submission mutex is a write to ring memory two threads
+ * share, which liburing does not serialize and the kernel does not forgive, and a registry touched
+ * without its mutex is a data race on an unordered_map. Under debug-tsan both are reports rather
+ * than reasoning: dropping the lock from post_cancel() makes this test abort with data races in
+ * liburing's own _io_uring_get_sqe().
+ *
+ * It is NOT a test of the lock ORDER, and nothing here could be: the one path that nests the two
+ * mutexes is submit_to_ring()'s refusal, which cannot be reached on any kernel this project builds
+ * on (issue #72), so an inverted cancel would never meet it -- in a test or in ThreadSanitizer's
+ * lock-order detector.
+ */
+TEST_F(IoUringBackendTest, ConcurrentCancelsAndSubmissionsAreSerialized)
+{
+	constexpr int cancelling_threads = 4;
+	constexpr int cycles             = 25;
+
+	std::vector<std::thread> workers;
+	workers.reserve(cancelling_threads);
+	for(int worker = 0; worker < cancelling_threads; ++worker)
+	{
+		workers.emplace_back([this] { cancel_pipe_reads_repeatedly(backend(), cycles); });
+	}
+	// And one stream of ordinary transfers alongside them, so the submissions a cancel is racing
+	// are not all cancels.
+	auto file = open_file(write_file("concurrent.txt", "0123456789"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	for(int i = 0; i < cycles; ++i)
+	{
+		const auto done = run(positional(alt::io_op::read, **file, buffer_of(4), 0, 4));
+		EXPECT_FALSE(done.error) << "transfer " << i << ": " << done.error.message();
+		EXPECT_EQ(done.bytes, 4U) << "transfer " << i;
+	}
+	for(auto& worker: workers)
+	{
+		worker.join();
+	}
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
 }
 
 #endif

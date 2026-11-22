@@ -81,14 +81,24 @@ namespace alt::detail
 		constexpr std::uint64_t wake_up_user_data = io_uring_token_tag;
 
 		/**
+		 * The user_data of the IORING_OP_ASYNC_CANCEL entries cancel() submits.
+		 *
+		 * The ring tag with an operation id of one, which first_operation_id below keeps free. A
+		 * cancel entry's own completion is this backend's bookkeeping and not any operation's
+		 * outcome: the operation the cancel names has a completion of its own, and that one is what
+		 * runs the callback. So the reaper has to be able to tell the two apart, which is what this
+		 * reservation is for.
+		 *
+		 * Every cancel carries the same value. Nothing is ever looked up by it, and a cancel owns no
+		 * record and no buffer that a distinct id would have to reach.
+		 */
+		constexpr std::uint64_t cancel_user_data = io_uring_token_tag | 1;
+
+		/**
 		 * The first operation id this backend issues, which is 2 rather than 1.
 		 *
-		 * Two values of the tagged space belong to no operation. Zero is the wake-up NOP's, above.
-		 * One is held for the user_data of a cancel SQE, whose own completion the reaper must be
-		 * able to tell from an operation's; it has no constant of its own yet because nothing
-		 * submits a cancel SQE, and a constant nothing reads is a warning under -Werror. Starting
-		 * the ids above it is what keeps that value free without defining it, so the arm that
-		 * submits cancels does not have to renumber tokens that are already issued.
+		 * Two values of the tagged space belong to no operation: zero is the wake-up NOP's and one
+		 * is the cancel entries', both above. Starting the ids past them is what keeps both free.
 		 */
 		constexpr std::uint64_t first_operation_id = 2;
 
@@ -413,11 +423,12 @@ namespace alt::detail
 					// Without the wake-up the join below never returns: the reaper is blocked in
 					// io_uring_wait_cqe, which has no timeout. The check above establishes that no
 					// CALLER'S operation is left, which is not the same as no completion being left:
-					// this submission may flush a quarantined entry, and the reaper may see that
-					// completion before or after the NOP's. Either order is fine -- a quarantined
-					// completion runs no callback and frees its record, and the NOP returns the reaper
-					// whenever it arrives -- so what the wake-up guarantees is that the reaper stops,
-					// not that it stops with nothing else to see.
+					// this submission may flush an entry left published by a refused submit -- a
+					// quarantined operation's, or a cancel's -- and the reaper may see that completion
+					// before or after the NOP's. Either order is fine: a quarantined completion runs no
+					// callback and frees its record, a cancel's is discarded, and the NOP returns the
+					// reaper whenever it arrives. So what the wake-up guarantees is that the reaper
+					// stops, not that it stops with nothing else to see.
 					if(!post_wake_up())
 					{
 						std::terminate();
@@ -549,23 +560,50 @@ namespace alt::detail
 				return submit_forwarded(request, on_done, state);
 			}
 
+			/**
+			 * Asks the kernel to abandon @p token's operation. A HINT, as the seam says: the operation
+			 * completes either way, and that completion is what runs the callback.
+			 *
+			 * The tag is what routes it. A pool token never carries it, which submit_forwarded()
+			 * asserts, and every token submit_transfer() issues does.
+			 *
+			 * **The registry lock is released before the entry is submitted, and that order is not
+			 * negotiable.** submit_to_ring()'s refusal path takes the registry lock while HOLDING the
+			 * submission mutex, so this backend's one lock order is submission then registry.
+			 * Submitting from inside the registry lock would be the reverse, and the two together
+			 * deadlock: one thread holding submission and waiting for registry, one holding registry
+			 * and waiting for submission. The spec and the plan both used to prescribe that nesting;
+			 * issue #75 records the discovery, which was made before any cancel existed.
+			 *
+			 * Releasing first costs nothing. If the operation completes in the window between the two,
+			 * the entry names a user_data the kernel no longer knows and completes with -ENOENT or
+			 * -EALREADY, which reap() discards. It cannot name a DIFFERENT, live operation, because ids
+			 * come from an ever-increasing counter and are never recycled -- without that, "the kernel
+			 * no longer knows that user_data" would be an assumption about id reuse rather than a fact.
+			 * A stale cancel is an ineffective cancel, which is precisely what a hint permits, and a
+			 * lock held to prevent it would buy nothing at the price of the deadlock above.
+			 *
+			 * The lookup is still worth its own line: it keeps this from asking the kernel about an
+			 * operation that was never pending here at all. Its predicate is callback_is_owed and not
+			 * mere presence, because a quarantined record is present and owes nothing -- a cancel for
+			 * one would name an entry whose caller already has an error.
+			 */
 			void cancel(io_token token) noexcept override
 			{
 				if(!token)
 				{
 					return;
 				}
-				// The tag is what routes a cancel: a pool token never carries it, which
-				// submit_forwarded() asserts, and every token submit_transfer() issues does.
-				//
-				// A tagged token is accepted and nothing is asked of the kernel for it. That is within
-				// the seam's contract -- cancel is a hint, and a ring operation completes on its own
-				// whatever happens here -- and it is where an IORING_OP_ASYNC_CANCEL naming the token's
-				// user_data belongs once this backend submits one.
 				if((token.value() & io_uring_token_tag) == 0)
 				{
 					m_pool_backend->cancel(token);
+					return;
 				}
+				if(!callback_is_owed_for(token.value()))
+				{
+					return;
+				}
+				post_cancel(token.value());
 			}
 
 			[[nodiscard]] io_backend_kind kind() const noexcept override
@@ -692,6 +730,34 @@ namespace alt::detail
 			}
 
 			/**
+			 * Whether the record @p user_data names is registered AND still owes its callback.
+			 *
+			 * The pending predicate cancel() asks before it submits anything. Presence alone is the
+			 * wrong question: a quarantined record is present and owes nothing, so a bare lookup would
+			 * have cancel() submit a pointless entry for one.
+			 *
+			 * The answer is read out and this lock released, rather than held while the caller acts on
+			 * it, because acting on it means a submission and this backend's lock order forbids that
+			 * nesting. See cancel(), and m_registry_mutex.
+			 *
+			 * It is therefore a SNAPSHOT, deliberately: by the time the caller submits, the operation
+			 * may have completed. That costs an ineffective cancel and nothing else.
+			 *
+			 * **Correctness by argument, not by test, and measured as such.** Weakening this to mere
+			 * presence passes the whole suite, and so does deleting the call site: telling the two
+			 * apart needs a quarantined record, which needs a refused io_uring_submit() that no kernel
+			 * this project builds on produces (issue #72), and a cancel submitted for a user_data the
+			 * kernel does not know is discarded by reap() without a trace. What this buys is a
+			 * pointless entry kept off the ring; what it does not buy is a failing test.
+			 */
+			bool callback_is_owed_for(const std::uint64_t user_data) noexcept
+			{
+				const std::scoped_lock lock(m_registry_mutex);
+				const auto             found = m_records.find(user_data);
+				return found != m_records.end() && found->second->callback_is_owed;
+			}
+
+			/**
 			 * Marks the record @p user_data names as owing no callback, so that it stays registered and
 			 * keeps its buffer's storage alive for a kernel write that may still land. The reaper frees
 			 * it when the late completion arrives; the destructor leaks it if that has not happened,
@@ -755,8 +821,8 @@ namespace alt::detail
 			 * A refused io_uring_submit() is reported as the errno it returned, and the entry is
 			 * ALREADY PUBLISHED: liburing advances the ring tail with a release store before it enters
 			 * the kernel, so the entry stays in the ring and the next submission -- any later
-			 * operation's, or the destructor's own wake-up NOP -- flushes it. The kernel may then
-			 * perform this operation. For a read or write, freeing the record here would hand it a
+			 * operation's, any cancel's, or the destructor's own wake-up NOP -- flushes it. The kernel
+			 * may then perform this operation. For a read or write, freeing the record here would hand it a
 			 * buffer that is gone to write into: a kernel write into freed heap, which this project
 			 * has already recorded as invisible to AddressSanitizer AND ThreadSanitizer, so no gate
 			 * would ever catch it. An fsync's record holds no buffer, so freeing that one would be
@@ -932,6 +998,54 @@ namespace alt::detail
 				return io_uring_submit(&m_ring) > 0;
 			}
 
+			/**
+			 * Submits one IORING_OP_ASYNC_CANCEL naming @p user_data. Called by cancel(), with no
+			 * registry lock held -- which is the whole subject of cancel()'s own comment.
+			 *
+			 * Holds the submission mutex across both liburing calls, as every submission to this ring
+			 * must: io_uring_get_sqe() and io_uring_submit() are not safe to call concurrently on a
+			 * shared ring, and cancel() may be called from any thread.
+			 *
+			 * **io_uring_prep_cancel(), never io_uring_prep_cancel64().** The 64-bit form is liburing
+			 * 2.2 and this project's floor is 2.1. No gate here exercises that floor -- this machine
+			 * and CI's runner both carry a much later liburing -- so the newer helper would compile
+			 * and pass everywhere and fail only for a consumer on Ubuntu 22.04 or Debian 12.
+			 *
+			 * 2.1's io_uring_prep_cancel() takes the target as a POINTER, which is what the 64-bit
+			 * form was added for. Every user_data of this backend's has bit 63 set, so routing one
+			 * through a void* is not an option: where a pointer is narrower than 64 bits that
+			 * conversion does not even compile, and nothing here is a pointer to begin with. So the
+			 * entry is prepared with a null target and the field is then assigned the way
+			 * io_uring_prep_cancel64() assigns it -- sqe->addr IS the target user_data, in every
+			 * liburing from 2.1 onward -- rather than by casting an integer to a pointer and back.
+			 *
+			 * **Failure is silence**, which the seam permits: cancel is a hint and must not block, so
+			 * there is nothing to retry and nobody to report to. A null entry publishes nothing. A
+			 * refused io_uring_submit() leaves its entry published, and some later submission may
+			 * flush it at an arbitrary time -- which for a cancel is harmless rather than merely
+			 * tolerated: the entry owns no record and no buffer, so there is nothing to quarantine
+			 * and nothing the kernel can write into after the fact, and the user_data it names cannot
+			 * meanwhile have been given to a different operation. That is why submit_to_ring()'s
+			 * quarantine has no counterpart here.
+			 */
+			void post_cancel(const std::uint64_t user_data) noexcept
+			{
+				const std::scoped_lock lock(m_submission_mutex);
+				io_uring_sqe* const    sqe = io_uring_get_sqe(&m_ring);
+				if(sqe == nullptr)
+				{
+					return;
+				}
+				io_uring_prep_cancel(sqe, nullptr, 0);
+				// NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): sqe->addr is a member of an anonymous union in the kernel's own submission entry, and for IORING_OP_ASYNC_CANCEL it IS the target user_data. This is the assignment io_uring_prep_cancel64() makes, spelled out here because that helper is liburing 2.2 and this project's floor is 2.1. The check's advice does not apply: there is no variant to use instead of a kernel ABI struct, the only alternative within 2.1 is io_uring_prep_cancel()'s POINTER parameter -- which cannot carry a user_data with bit 63 set where a pointer is narrower than 64 bits -- and every liburing helper this file already calls writes the same union through the same field.
+				sqe->addr = user_data;
+				// Assigned directly rather than through io_uring_sqe_set_data64(), for the reason
+				// post_wake_up() gives at length: the 2.1 floor does not promise that helper.
+				sqe->user_data = cancel_user_data;
+				// The count is not read, and neither is the sign: see above.
+				static_cast<void>(io_uring_submit(&m_ring));
+			}
+
 			/// The reaper thread: consumes completions until the destructor's wake-up arrives.
 			void reap() noexcept
 			{
@@ -962,6 +1076,20 @@ namespace alt::detail
 					{
 						return;
 					}
+					if(user_data == cancel_user_data)
+					{
+						// A cancel entry's own completion: 0 where the kernel abandoned the operation
+						// the entry named, -ENOENT or -EALREADY where that operation had already
+						// completed or was past being stopped. Nothing to deliver either way -- the
+						// operation has, or will have, a completion of its own, and that is the one
+						// that runs the callback -- and nothing to COUNT: m_ignored means "a completion
+						// the reaper delivered to nobody", which is a statement about operations, and
+						// this is not the completion of an operation at all. Discarded here, above the
+						// registry lookup, exactly as the wake-up NOP is, and for the same reason: it
+						// is this backend's own bookkeeping. res is deliberately unread; it says only
+						// who won a race the caller cannot observe.
+						continue;
+					}
 					std::unique_ptr<transfer_record> record = withdraw(user_data);
 					if(record && !record->callback_is_owed)
 					{
@@ -970,8 +1098,8 @@ namespace alt::detail
 						// the storage, and this scope's end frees it now that the kernel is done with
 						// it. Counted with the completions below, under the meaning m_ignored carries
 						// -- a completion delivered to nobody -- which this branch is half of. A cancel
-						// SQE's own completion is NOT that, and needs a branch above both rather than
-						// a share of this counter: issue #73.
+						// entry's own completion is NOT that, and is discarded in the branch above both
+						// rather than given a share of this counter.
 						m_ignored.fetch_add(1);
 						continue;
 					}
@@ -1023,18 +1151,16 @@ namespace alt::detail
 			 *
 			 * This comment said "never held at the same time" until the quarantine made that false.
 			 *
-			 * **A warning for the cancellation arm, which is where that invariant was expected to come
-			 * due.** The spec and the plan both describe cancel as submitting an ASYNC_CANCEL *under
-			 * the registry lock*, which is the OPPOSITE nesting -- registry, then submission -- and
-			 * against the order above that is a lock-order inversion, so the two together deadlock:
-			 * one thread in submit_to_ring()'s refusal path holding submission and waiting for
-			 * registry, one in cancel() holding registry and waiting for submission. Either cancel
-			 * takes the submission mutex first, or it copies what it needs out of the registry,
-			 * releases this mutex and submits afterwards -- which also keeps it off the path of
-			 * holding a lock across a liburing call. The registry lookup's purpose, not racing a
-			 * completion that is already withdrawing the record, survives either way. Issue #75
-			 * records the discovery; the spec and the plan have since been corrected to this order,
-			 * so they and this comment now agree.
+			 * **The cancellation arm is where that invariant was expected to come due, and it does
+			 * not.** cancel() asks callback_is_owed_for() its question, RELEASES this mutex, and only
+			 * then submits its IORING_OP_ASYNC_CANCEL under the submission mutex -- so it takes one at
+			 * a time like everything else, and holds no lock across a liburing call. The spec and the
+			 * plan both used to describe it as submitting *under the registry lock*, which is the
+			 * opposite nesting and deadlocks against the refusal path above: one thread in
+			 * submit_to_ring() holding submission and waiting for registry, one in cancel() holding
+			 * registry and waiting for submission. Issue #75 records the discovery, made before any
+			 * cancel existed; the spec, the plan, this comment and the code now all agree on the one
+			 * order.
 			 */
 			std::mutex m_registry_mutex;
 
@@ -1066,10 +1192,19 @@ namespace alt::detail
 			 * caller already has an error. What they have in common, and what this counter means, is
 			 * that no caller's callback ran for them.
 			 *
-			 * What it must not grow to include is this backend's own bookkeeping. The wake-up NOP is
-			 * excluded by the branch above the lookup, and a cancel SQE's own completion belongs in
-			 * that same branch rather than here: it is not a completion delivered to nobody, it is not
-			 * a completion of an operation at all. Issue #73.
+			 * What it does not include is this backend's own bookkeeping, and both kinds of that are
+			 * excluded by branches above the lookup: the wake-up NOP, and a cancel entry's own
+			 * completion, which is not a completion delivered to nobody because it is not the
+			 * completion of an operation at all.
+			 *
+			 * **Nothing in the suite makes it nonzero**, and that is a property of the counter rather
+			 * than a gap in the tests. Of its two producers, a quarantined record's late completion
+			 * needs a refused io_uring_submit() that cannot be produced on any kernel this builds on
+			 * (issue #72), and a genuinely stale completion cannot be produced at all: a record is
+			 * registered before its entry reaches the kernel and withdrawn only by the completion
+			 * itself, so no completion can arrive for a user_data this registry has forgotten. The
+			 * tests assert it stays zero, which is what they can assert and what the cancellation arm
+			 * would have broken.
 			 */
 			std::atomic<std::size_t> m_ignored{0};
 			/// Operations forwarded to the pool backend whose trampoline has not yet run.
