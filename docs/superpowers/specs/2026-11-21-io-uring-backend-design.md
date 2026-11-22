@@ -249,7 +249,7 @@ So the design is:
   ring is empty, and the kernel flushes the overflow list there. *(Measured in phase 7b
   Task 4 against a deliberately overflowed ring, because the acceptance decision rests on
   it. The same measurement showed that the earlier clause here — "further submissions are
-  refused with `EBUSY`" — is an older-kernel behaviour: a current kernel accepts the
+  refused with `EBUSY`" — is an older-kernel behavior: a current kernel accepts the
   submission and backlogs its completion. Neither loses a completion, so the decision is
   unaffected.)* No callback is lost at any `max_in_flight`. `file_io::create`
   validates `max_in_flight` only against zero, so an extreme value is reachable through
@@ -259,12 +259,37 @@ So the design is:
 - **Submission is serialized by a mutex.** liburing's `io_uring_get_sqe` and
   `io_uring_submit` are not safe to call concurrently on a shared ring, and `submit` may be
   called from any thread.
-- A failure from `io_uring_get_sqe` or `io_uring_submit` is reported as its errno and never
-  waited on, because `submit` must not block. Given the sizing above this path is
-  unreachable; it is implemented because an unreachable-by-construction argument is still
-  an argument, and it is **documented as untested for that reason** rather than given a
-  test that cannot fail. An earlier draft claimed a `queue_depth` below `max_in_flight`
-  would reach it and prescribed a test to force it — that was wrong on both counts, since
+- A failure from `io_uring_get_sqe` or from `io_uring_submit` is reported as its errno and
+  never waited on, because `submit` must not block. **The two are otherwise not
+  interchangeable, and treating them as one case is a memory-safety defect.** *(Corrected
+  during Task 4; the sentence here previously said "a failure from `io_uring_get_sqe` or
+  `io_uring_submit` is reported as its errno" and nothing more, which is what led the
+  implementation to free a record on both paths. The error above is mine.)*
+  - A null `io_uring_get_sqe` has published nothing. The kernel will never see the
+    operation, so its record is freed at once. Unreachable while the submission mutex is
+    held across both calls, since the queue drains before it is released.
+  - A refused `io_uring_submit` has **already published the entry** — liburing advances the
+    ring tail with a release store before entering the kernel — so a later submission, the
+    destructor's wake-up NOP included, flushes it and the kernel may perform the transfer.
+    Its record must therefore be **quarantined**, not freed: kept registered with no
+    callback owed, so its `io_buffer` keeps the storage alive, freed by the reaper when the
+    late completion arrives, and leaked by the destructor if it has not. Freeing it is a
+    kernel write into freed heap, which this project has recorded as invisible to
+    AddressSanitizer *and* ThreadSanitizer, so no gate would catch the regression.
+  - Reachability differs too. The refused-submit path is reachable in principle: a kernel
+    old enough to answer `EBUSY` on completion-queue overflow is one the capability check
+    admits, and `max_in_flight` is a caller contract rather than an invariant this backend
+    enforces, so a caller that exceeds it reaches overflow at any depth. It is not
+    reproducible on the kernel phase 7b was written against, which accepts a submission
+    while the ring is overflown. Both paths are **documented as untested** rather than
+    given a test that cannot fail, and the quarantine is correctness by argument.
+  - A non-negative `io_uring_submit` means the kernel took everything queued, not that what
+    it took was only the entry just added. That is permanently false after the first
+    refused submission, because an unconsumed published entry rides along with every later
+    submission.
+
+  An earlier draft claimed a `queue_depth` below `max_in_flight`
+  would reach this path and prescribed a test to force it — that was wrong on both counts, since
   the submission queue drains on every call and the completion queue is now sized
   independently.
 

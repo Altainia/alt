@@ -393,8 +393,12 @@ TEST_F(IoUringBackendTest, CoversTheLargestMaxInFlightItDocuments)
  *
  * 32768 would need 65537 entries and gets 65536, so overflow stops being unreachable. That is
  * deliberate and safe: every kernel past the capability check sets IORING_FEAT_NODROP, so an
- * overflowing completion is backlogged and further submissions refused rather than a completion
- * dropped. What must not happen is the factory REFUSING the value, which is what this pins.
+ * overflowing completion goes to a kernel-side backlog that the reaper's wait drains, rather than
+ * being dropped. What a submission attempted while the ring is overflown does is
+ * kernel-dependent -- an older kernel refuses it with EBUSY, the kernel this was measured on
+ * accepts it and backlogs its completion -- and the backend treats the refusal as a real,
+ * reachable case rather than a curiosity: see submit_to_ring()'s quarantine. What must not happen
+ * is the factory REFUSING the value, which is what this pins.
  */
 TEST_F(IoUringBackendTest, AcceptsAMaxInFlightAboveTheBoundAndClampsTheCompletionRing)
 {
@@ -488,8 +492,10 @@ TEST_F(IoUringBackendTest, ARingOperationsTokenCarriesTheTag)
 	EXPECT_FALSE(w.result.error) << w.result.error.message();
 	EXPECT_EQ(w.result.bytes, 6U);
 	// A ring completion comes from the reaper thread: the submission never completes it inline,
-	// unlike the IOCP arm, where a synchronous transfer does.
-	EXPECT_FALSE(w.ran_inline.load());
+	// unlike the IOCP arm, where a synchronous transfer does. Asserted on the completing THREAD
+	// rather than on waiter::ran_inline, which this test cannot read without a race -- ran_inline
+	// is derived from a flag the test sets after submit() returns, and a ring completion can beat
+	// that store. The thread identity is the same property with no race in it.
 	EXPECT_NE(w.thread, std::this_thread::get_id());
 	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
 }
