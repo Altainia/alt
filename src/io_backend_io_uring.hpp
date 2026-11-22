@@ -115,15 +115,33 @@ namespace alt::detail
 	 */
 	[[nodiscard]] std::size_t io_uring_ignored_completions_for_testing(const io_backend& ring) noexcept;
 
+	/// The operations this backend puts on the ring. Every other io_op is forwarded to the pool.
+	enum class io_uring_operation : std::uint8_t
+	{
+		read,
+		write,
+		/// IORING_OP_FSYNC with no flags: data and metadata.
+		fsync,
+		/// IORING_OP_FSYNC with IORING_FSYNC_DATASYNC: data, and only the metadata needed to read it back.
+		fdatasync,
+	};
+
 	/**
-	 * The flags the most recent fsync submission entry @p ring prepared was given, or
-	 * ~0U if it has prepared none. Same precondition.
+	 * The ring operation that serves @p op. Precondition: @p op is read, write, sync_full or
+	 * sync_data; any other value maps to read, which is meaningless for it.
 	 *
-	 * sync_full and sync_data differ in nothing but IORING_FSYNC_DATASYNC, and the kernel's
-	 * answer to both is the same zero, so no completion can tell a swapped flag from a right one.
-	 * This is the one place the flag the entry actually carries is observable.
+	 * Declared here, with io_uring_fsync_flags_of(), for the reason io_uring_probe_has_required_opcodes()
+	 * is: both are pure functions of their argument that submit() decides with, and exported so the
+	 * suite can assert the mapping directly. sync_full and sync_data complete identically, so no
+	 * completion can show a wrong mapping.
 	 */
-	[[nodiscard]] unsigned io_uring_last_fsync_flags_for_testing(const io_backend& ring) noexcept;
+	[[nodiscard]] io_uring_operation io_uring_operation_of(io_op op) noexcept;
+
+	/**
+	 * The fsync_flags an IORING_OP_FSYNC entry for @p operation carries: IORING_FSYNC_DATASYNC for
+	 * fdatasync and zero for everything else. A pure function, exported for the reason above.
+	 */
+	[[nodiscard]] unsigned io_uring_fsync_flags_of(io_uring_operation operation) noexcept;
 } // namespace alt::detail
 
 #endif

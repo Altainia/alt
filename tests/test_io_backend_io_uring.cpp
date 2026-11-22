@@ -614,7 +614,6 @@ TEST_F(IoUringBackendTest, SyncFullReachesTheRingAndSucceeds)
 {
 	auto file = open_file(write_file("data.txt", "durable"), alt::flags(alt::open_flag::read_write));
 	ASSERT_TRUE(file.has_value()) << file.error().message();
-	ASSERT_EQ(alt::detail::io_uring_last_fsync_flags_for_testing(backend()), ~0U) << "an fsync was prepared before this test submitted one";
 
 	waiter     w;
 	const auto token = backend().submit(sync_request(alt::io_op::sync_full, (*file)->native()), deliver, &w);
@@ -627,9 +626,6 @@ TEST_F(IoUringBackendTest, SyncFullReachesTheRingAndSucceeds)
 	EXPECT_FALSE(w.result.error) << w.result.error.message();
 	EXPECT_EQ(w.result.bytes, 0U);
 	EXPECT_NE(w.thread, std::this_thread::get_id());
-	// The full form carries no flag. sync_data differs from it in this field alone, and the kernel
-	// answers both with a zero, so the entry is the only place the distinction can be seen.
-	EXPECT_EQ(alt::detail::io_uring_last_fsync_flags_for_testing(backend()), 0U);
 	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
 }
 
@@ -649,24 +645,28 @@ TEST_F(IoUringBackendTest, SyncDataReachesTheRingAndSucceeds)
 	EXPECT_FALSE(w.result.error) << w.result.error.message();
 	EXPECT_EQ(w.result.bytes, 0U);
 	EXPECT_NE(w.thread, std::this_thread::get_id());
-	EXPECT_EQ(alt::detail::io_uring_last_fsync_flags_for_testing(backend()), static_cast<unsigned>(IORING_FSYNC_DATASYNC));
 	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
 }
 
-TEST_F(IoUringBackendTest, BothFsyncFormsOnAClosedDescriptorReportBadFileDescriptor)
+TEST(IoUringOperationTest, EachOfTheFourRingOpsMapsToItsOwnOperation)
 {
-	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
-	ASSERT_TRUE(file.has_value()) << file.error().message();
-	const auto stale = (*file)->native();
-	file->reset();
+	using alt::detail::io_uring_operation;
+	EXPECT_EQ(alt::detail::io_uring_operation_of(alt::io_op::read), io_uring_operation::read);
+	EXPECT_EQ(alt::detail::io_uring_operation_of(alt::io_op::write), io_uring_operation::write);
+	EXPECT_EQ(alt::detail::io_uring_operation_of(alt::io_op::sync_full), io_uring_operation::fsync);
+	EXPECT_EQ(alt::detail::io_uring_operation_of(alt::io_op::sync_data), io_uring_operation::fdatasync);
+}
 
-	for(const auto op: {alt::io_op::sync_full, alt::io_op::sync_data})
-	{
-		const auto done = run(sync_request(op, stale));
-		// Negated errno, as for a transfer: the named condition is what pins the sign.
-		EXPECT_EQ(done.error, std::errc::bad_file_descriptor) << done.error.message();
-		EXPECT_EQ(done.bytes, 0U);
-	}
+TEST(IoUringOperationTest, OnlyTheDataSyncFormCarriesTheDataSyncFlag)
+{
+	using alt::detail::io_uring_operation;
+	// sync_full and sync_data differ in this field alone and the kernel answers both with a zero,
+	// so no completion can show a swapped flag: the mapping is asserted here instead.
+	EXPECT_EQ(alt::detail::io_uring_fsync_flags_of(io_uring_operation::fsync), 0U);
+	EXPECT_EQ(alt::detail::io_uring_fsync_flags_of(io_uring_operation::fdatasync), static_cast<unsigned>(IORING_FSYNC_DATASYNC));
+	// The transfers prepare no fsync entry; the function answers zero rather than a stray flag.
+	EXPECT_EQ(alt::detail::io_uring_fsync_flags_of(io_uring_operation::read), 0U);
+	EXPECT_EQ(alt::detail::io_uring_fsync_flags_of(io_uring_operation::write), 0U);
 }
 
 TEST_F(IoUringBackendTest, AnOperationOnAClosedDescriptorReportsBadFileDescriptor)

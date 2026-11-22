@@ -36,6 +36,26 @@ namespace alt::detail
 		       io_uring_opcode_supported(&probe, IORING_OP_FSYNC) != 0 && io_uring_opcode_supported(&probe, IORING_OP_ASYNC_CANCEL) != 0;
 	}
 
+	io_uring_operation io_uring_operation_of(const io_op op) noexcept
+	{
+		switch(op)
+		{
+		case io_op::write:
+			return io_uring_operation::write;
+		case io_op::sync_full:
+			return io_uring_operation::fsync;
+		case io_op::sync_data:
+			return io_uring_operation::fdatasync;
+		default:
+			return io_uring_operation::read;
+		}
+	}
+
+	unsigned io_uring_fsync_flags_of(const io_uring_operation operation) noexcept
+	{
+		return operation == io_uring_operation::fdatasync ? IORING_FSYNC_DATASYNC : 0U;
+	}
+
 	namespace
 	{
 		/**
@@ -205,9 +225,6 @@ namespace alt::detail
 			return ring_sizes{.submission_entries = static_cast<unsigned>(submission), .completion_entries = static_cast<unsigned>(completion)};
 		}
 
-		/// What io_uring_last_fsync_flags_for_testing() reports before any fsync has been submitted. Not a value the kernel defines.
-		constexpr unsigned no_fsync_yet = ~0U;
-
 		/// The file descriptor @p handle carries. A ring operates on ordinary descriptors.
 		/// A third copy of the pool backend's own one-line cast; issue #74 moves it to a header.
 		int to_fd(const native_handle handle) noexcept
@@ -215,37 +232,10 @@ namespace alt::detail
 			return static_cast<int>(handle);
 		}
 
-		/// The operations this backend puts on the ring. Every other io_op is forwarded to the pool.
-		enum class ring_operation : std::uint8_t
-		{
-			read,
-			write,
-			/// IORING_OP_FSYNC with no flags: data and metadata.
-			fsync,
-			/// IORING_OP_FSYNC with IORING_FSYNC_DATASYNC: data, and only the metadata needed to read it back.
-			fdatasync,
-		};
-
-		/// The ring operation that serves @p op. Precondition: @p op is read, write, sync_full or sync_data.
-		ring_operation ring_operation_of(const io_op op) noexcept
-		{
-			switch(op)
-			{
-			case io_op::write:
-				return ring_operation::write;
-			case io_op::sync_full:
-				return ring_operation::fsync;
-			case io_op::sync_data:
-				return ring_operation::fdatasync;
-			default:
-				return ring_operation::read;
-			}
-		}
-
 		/// Whether @p kind is one of the two fsync forms, which carry no buffer, count or offset.
-		bool is_sync(const ring_operation kind) noexcept
+		bool is_sync(const io_uring_operation kind) noexcept
 		{
-			return kind == ring_operation::fsync || kind == ring_operation::fdatasync;
+			return kind == io_uring_operation::fsync || kind == io_uring_operation::fdatasync;
 		}
 
 		/**
@@ -290,12 +280,12 @@ namespace alt::detail
 		/// Everything a submission needs, read from the record before the record can be completed.
 		struct transfer_submission
 		{
-			std::uint64_t  user_data = 0;
-			int            fd        = -1;
-			void*          data      = nullptr;
-			unsigned       count     = 0;
-			std::uint64_t  offset    = 0;
-			ring_operation kind      = ring_operation::read;
+			std::uint64_t      user_data = 0;
+			int                fd        = -1;
+			void*              data      = nullptr;
+			unsigned           count     = 0;
+			std::uint64_t      offset    = 0;
+			io_uring_operation kind      = io_uring_operation::read;
 		};
 
 		/**
@@ -592,11 +582,6 @@ namespace alt::detail
 				return m_ignored.load();
 			}
 
-			[[nodiscard]] unsigned last_fsync_flags() const noexcept
-			{
-				return m_last_fsync_flags.load();
-			}
-
 		private:
 			/**
 			 * Submits @p request to the ring as one read, write or fsync SQE.
@@ -624,7 +609,7 @@ namespace alt::detail
 				owned->on_done = on_done;
 				owned->state   = state;
 
-				const ring_operation      operation = ring_operation_of(request.op);
+				const io_uring_operation  operation = io_uring_operation_of(request.op);
 				const transfer_submission submission{.user_data = io_uring_token_tag | m_next_id.fetch_add(1),
 				                                     .fd        = to_fd(request.handle),
 				                                     .data      = owned->buffer.bytes().data(),
@@ -821,17 +806,15 @@ namespace alt::detail
 				}
 				switch(submission.kind)
 				{
-				case ring_operation::write:
+				case io_uring_operation::write:
 					io_uring_prep_write(sqe, submission.fd, submission.data, submission.count, submission.offset);
 					break;
-				case ring_operation::read:
+				case io_uring_operation::read:
 					io_uring_prep_read(sqe, submission.fd, submission.data, submission.count, submission.offset);
 					break;
-				case ring_operation::fsync:
-				case ring_operation::fdatasync: {
-					const unsigned flags = submission.kind == ring_operation::fdatasync ? IORING_FSYNC_DATASYNC : 0U;
-					io_uring_prep_fsync(sqe, submission.fd, flags);
-					m_last_fsync_flags.store(flags);
+				case io_uring_operation::fsync:
+				case io_uring_operation::fdatasync: {
+					io_uring_prep_fsync(sqe, submission.fd, io_uring_fsync_flags_of(submission.kind));
 					break;
 				}
 				}
@@ -1085,8 +1068,6 @@ namespace alt::detail
 			 */
 			std::atomic<std::size_t> m_ignored{0};
 
-			/// The flags the most recent fsync SQE was prepared with, or no_fsync_yet. Read by the test seam only.
-			std::atomic<unsigned> m_last_fsync_flags{no_fsync_yet};
 			/// Operations forwarded to the pool backend whose trampoline has not yet run.
 			std::atomic<std::size_t> m_forwarded{0};
 			std::thread              m_thread;
@@ -1137,12 +1118,6 @@ namespace alt::detail
 	{
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast): same reasoning as io_uring_submission_depth_for_testing above.
 		return static_cast<const io_uring_backend&>(ring).ignored_completions();
-	}
-
-	unsigned io_uring_last_fsync_flags_for_testing(const io_backend& ring) noexcept
-	{
-		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast): same reasoning as io_uring_submission_depth_for_testing above.
-		return static_cast<const io_uring_backend&>(ring).last_fsync_flags();
 	}
 } // namespace alt::detail
 
