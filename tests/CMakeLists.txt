@@ -222,15 +222,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 # Guards the discovered tests' ALT_TEST_IO_BACKEND=thread_pool above, which no test can
-# observe from inside: dropped, every discovered test takes `automatic` (io_uring here) and
+# observe from inside: dropped, every discovered test takes `automatic` (io_uring or IOCP) and
 # still passes, and the thread pool is covered by nothing. This reads the property back from
-# ctest's own description of one discovered file-layer test. Linux only because that is
-# where it was measured; the Windows setting is unguarded.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# ctest's own description of one discovered file-layer test (issue #78 for the Windows half).
+#
+# CONFIG is what makes it work under a multi-config generator. Visual Studio keeps one list
+# of discovered tests per configuration, and a ctest given no -C there includes the list for
+# an empty configuration name (alt_tests[1]_include-.cmake), which does not exist, so the
+# --show-only call fails before anything is checked. $<CONFIG> is the configuration the
+# outer ctest is running; under a single-config generator it is the build type.
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME discovered_tests_name_the_thread_pool
         COMMAND ${CMAKE_COMMAND}
             -DCTEST_COMMAND=${CMAKE_CTEST_COMMAND}
             -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DCONFIG=$<CONFIG>
             -DTEST_NAME=FileIoTest.CreateRejectsAZeroMaxInFlight
             -P ${CMAKE_CURRENT_SOURCE_DIR}/check_discovered_test_environment.cmake)
 endif()

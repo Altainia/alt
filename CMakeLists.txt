@@ -38,6 +38,13 @@ target_include_directories(alt
 
 target_link_libraries(alt PUBLIC Threads::Threads)
 
+# CMAKE_CXX_STANDARD above sets the standard for this build only and is not exported, so
+# without this an installed alt::alt asks nothing of its consumer, who then compiles the
+# public headers in the compiler's default mode. GCC's C++17 default happened to accept
+# what a minimal consumer included; MSVC's C++14 default does not, and the Windows link
+# case in package_version_gate failed on it (issue #78). The headers need C++23 throughout.
+target_compile_features(alt PUBLIC cxx_std_23)
+
 # The io_uring backend is Linux-only and a hard dependency there: liburing is linked
 # PRIVATE and no public header names it. alt is a static library unless
 # BUILD_SHARED_LIBS is set, and a static library hands even its PRIVATE link

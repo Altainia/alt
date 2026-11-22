@@ -1,18 +1,29 @@
 # Fails unless a discovered test carries ENVIRONMENT=ALT_TEST_IO_BACKEND=thread_pool.
 #
-# Run as: cmake -DCTEST_COMMAND=<ctest> -DBUILD_DIR=<dir> -DTEST_NAME=<name> -P <this file>
+# Run as: cmake -DCTEST_COMMAND=<ctest> -DBUILD_DIR=<dir> -DTEST_NAME=<name> [-DCONFIG=<config>]
+#               -P <this file>
 #
 # Nothing in the suite can see the property from inside: with it dropped, the discovered
-# tests silently take `automatic`, which is io_uring on Linux, and every one of them still
-# passes. So the property is read back from ctest's own description of the test.
+# tests silently take `automatic`, which is io_uring on Linux and IOCP on Windows, and every
+# one of them still passes. So the property is read back from ctest's own description of
+# the test.
+#
+# CONFIG is the configuration to describe. A multi-config generator needs it: without -C,
+# ctest there looks for the discovered-test list of an empty configuration name and fails.
+# It is empty under a single-config generator with no build type, and -C is left off then.
 foreach(_required IN ITEMS CTEST_COMMAND BUILD_DIR TEST_NAME)
     if(NOT DEFINED ${_required})
         message(FATAL_ERROR "${_required} must be given")
     endif()
 endforeach()
 
+set(_config_args "")
+if(CONFIG)
+    set(_config_args -C "${CONFIG}")
+endif()
+
 execute_process(
-    COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_DIR}" --show-only=json-v1 -R "^${TEST_NAME}$"
+    COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_DIR}" ${_config_args} --show-only=json-v1 -R "^${TEST_NAME}$"
     OUTPUT_VARIABLE _json
     RESULT_VARIABLE _status
 )
