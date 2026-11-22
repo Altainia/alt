@@ -105,7 +105,14 @@ namespace alt::detail
 	/// The completion ring entries @p ring was created with. Same precondition.
 	[[nodiscard]] std::size_t io_uring_completion_depth_for_testing(const io_backend& ring) noexcept;
 
-	/// How many completions the reaper thread found no operation for and ignored. Same precondition.
+	/**
+	 * How many completions the reaper delivered to nobody. Same precondition.
+	 *
+	 * A completion whose user_data is in no registry, and a completion whose record was found but
+	 * owes no callback because its submission was refused and its caller already has an error.
+	 * Not this backend's own bookkeeping: the wake-up NOP is excluded before the lookup, and a
+	 * cancel SQE's completion belongs there too rather than here.
+	 */
 	[[nodiscard]] std::size_t io_uring_ignored_completions_for_testing(const io_backend& ring) noexcept;
 } // namespace alt::detail
 

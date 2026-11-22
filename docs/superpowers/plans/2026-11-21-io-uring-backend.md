@@ -351,7 +351,7 @@ TEST(IoUringBackendTest, ACompletionForAnUnregisteredTokenIsIgnoredAndCounted)
 
 Tag says pool → forward to the internal pool backend's `cancel`. Otherwise, **under the registry lock**, if the token is still pending, submit `IORING_OP_ASYNC_CANCEL` targeting that `user_data`. Taking the lock is what stops a cancel racing a completion that is already removing the record. Use `io_uring_prep_cancel` — **not** `io_uring_prep_cancel64`, which is liburing 2.2 and above the floor.
 
-The original operation's completion is what drives the callback. The cancel SQE's own completion carries the reserved `user_data` and is ignored. A completion whose token is not in the registry is ignored and counted.
+The original operation's completion is what drives the callback. The cancel SQE's own completion carries the reserved `user_data` and is ignored — in the branch ahead of the registry lookup, with the wake-up NOP, **not** by falling through to the ignored-completions counter. That counter means "a completion the reaper delivered to nobody": a completion whose token is in no registry, or whose record is quarantined and owes no callback. (It was originally defined as "not in the registry", which Task 4's quarantine falsified; the spec's "Records and `user_data`" section carries the restated meaning.)
 
 - [ ] **Step 4: Run the tests, mutation-check, run `debug-tsan`, commit**
 

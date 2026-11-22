@@ -372,15 +372,25 @@ namespace alt::detail
 				if(m_thread.joinable())
 				{
 					// Without the wake-up the join below never returns: the reaper is blocked in
-					// io_uring_wait_cqe, which has no timeout. Quiescence is established above, so the
-					// NOP is the only completion left for it to see.
+					// io_uring_wait_cqe, which has no timeout. The check above establishes that no
+					// CALLER'S operation is left, which is not the same as no completion being left:
+					// this submission may flush a quarantined entry, and the reaper may see that
+					// completion before or after the NOP's. Either order is fine -- a quarantined
+					// completion runs no callback and frees its record, and the NOP returns the reaper
+					// whenever it arrives -- so what the wake-up guarantees is that the reaper stops,
+					// not that it stops with nothing else to see.
 					if(!post_wake_up())
 					{
 						std::terminate();
 					}
 					m_thread.join();
 				}
-				// Whatever is still registered is quarantined, by the check above, and the wake-up
+				// Whatever is still registered is quarantined. The check above says so for the instant
+				// it ran, not for this one, and nothing re-establishes it: what makes it true here is
+				// that a record can only appear through submit(), which a caller that has gone
+				// quiescent is no longer calling. A record that did appear would be that precondition
+				// violated past the point of diagnosing it, and releasing it is the safe side of that
+				// bug rather than the wrong one. The wake-up
 				// NOP's own submission has just flushed any entry still sitting unconsumed in the ring
 				// -- so the kernel either holds that read or write or has already completed it. A
 				// completion that arrived before the NOP's was reaped and freed normally; these are the
@@ -581,17 +591,14 @@ namespace alt::detail
 				if(outcome.error)
 				{
 					// Either way the caller gets an error and no callback ever runs, as the seam
-					// requires. What differs is the record's fate, and only submit_to_ring() knows
-					// which: an entry that never reached the ring leaves nothing for the kernel to do,
-					// so the record is withdrawn and freed with its buffer copy; a published one may
-					// still be flushed to the kernel, so the record is quarantined and kept alive
-					// instead. Freeing a published entry's record is a kernel write into freed heap that
-					// no sanitizer in this project's gates can see.
-					if(outcome.entry_published)
-					{
-						quarantine(submission.user_data);
-					}
-					else
+					// requires. What differs is the record's fate. An entry that never reached the ring
+					// leaves nothing for the kernel to do, so the record is withdrawn and freed with
+					// its buffer copy. A published one may still be flushed to the kernel, and
+					// submit_to_ring() has already quarantined it under the submission mutex -- it has
+					// to be done there, not here, or another thread's flush can race the flag -- so
+					// there is nothing to do for it but report. Freeing a published entry's record is a
+					// kernel write into freed heap that no sanitizer in this project's gates can see.
+					if(!outcome.entry_published)
 					{
 						const std::unique_ptr<transfer_record> mine = withdraw(submission.user_data);
 						static_cast<void>(mine);
@@ -651,18 +658,32 @@ namespace alt::detail
 			 * since it can neither free what the kernel may hold nor wait for a completion that may
 			 * never come.
 			 *
+			 * **Precondition: m_submission_mutex is held.** This is not tidiness, it is the whole
+			 * correctness of the quarantine. A published entry reaches the kernel only through an
+			 * io_uring_submit(), every one of which holds that mutex, so holding it across this write
+			 * makes installing the flag atomic with respect to any flush. Clearing the flag after
+			 * releasing it instead leaves a window in which another thread's submission flushes the
+			 * stale entry, the kernel completes it, and the reaper finds a record that still owes a
+			 * callback and INVOKES it -- handing the caller an error and a callback both, which is the
+			 * seam violation this path exists to avoid.
+			 *
 			 * The record stays in the SAME registry rather than moving to a container of its own. That
-			 * keeps the reaper's lookup one lookup, and it makes the destructor's in-flight question
-			 * ("is any callback still owed?") a predicate over the records it already walks instead of
-			 * two emptiness checks whose difference a reader would have to reconstruct.
+			 * costs a third m_records.find() site, here, and keeps the reaper's lookup to one lookup;
+			 * it also makes the destructor's in-flight question ("is any callback still owed?") a
+			 * predicate over the records it already walks instead of two emptiness checks whose
+			 * difference a reader would have to reconstruct.
 			 */
 			void quarantine(const std::uint64_t user_data) noexcept
 			{
 				const std::scoped_lock lock(m_registry_mutex);
 				const auto             found = m_records.find(user_data);
-				// Reachable only from submit_transfer()'s error arm, where the record was enrolled by
-				// this same thread and cannot have been withdrawn: no completion for it exists, since
-				// the submission that would have produced one was refused.
+				// The record is still here. NOT because a refused submission produces no completion --
+				// it may well produce one later, which is the reason this function exists -- but
+				// because it cannot have produced one YET: the entry reaches the kernel only through an
+				// io_uring_submit() under the submission mutex this call holds, and the one call that
+				// could have taken it is the submit that just failed. So no completion for it exists at
+				// this instant, nothing can have withdrawn it, and the window closes before the mutex
+				// is released.
 				assert(found != m_records.end() && "a record was quarantined after it was withdrawn");
 				if(found != m_records.end())
 				{
@@ -693,12 +714,22 @@ namespace alt::detail
 			 * operation's, or the destructor's own wake-up NOP -- flushes it. The kernel may then
 			 * perform this read or write. Freeing the record here would hand it a buffer that is gone
 			 * to write into: a kernel write into freed heap, which this project has already recorded as
-			 * invisible to AddressSanitizer AND ThreadSanitizer, so no gate would ever catch it. The
-			 * record is therefore QUARANTINED rather than freed, which is why entry_published is
-			 * reported rather than folded into the error.
+			 * invisible to AddressSanitizer AND ThreadSanitizer, so no gate would ever catch it.
 			 *
-			 * **Neither failure is tested, and the reason differs.** A null SQE is unreachable because
-			 * this lock is held across both calls, so the queue is drained before it is released. A
+			 * So this function QUARANTINES the record itself, before it returns and while it still
+			 * holds the submission mutex, rather than leaving that to its caller. The flush that makes
+			 * the entry dangerous needs the same mutex, so doing it here is what makes the quarantine
+			 * atomic with respect to the flush; doing it after the return would leave a window in
+			 * which the record still owes a callback while the kernel is completing it. entry_published
+			 * is reported so the caller knows the record is no longer its to free, and for no other
+			 * reason.
+			 *
+			 * **Neither failure is tested, and the reason differs.** A null SQE is unreachable while
+			 * this lock is held across both calls AND every submission is consumed -- which is true
+			 * until the first refused submit and false afterwards, since a refused submit leaves its
+			 * entry unconsumed, and enough of them would fill the submission queue. That costs nothing:
+			 * a null SQE published nothing whatever came before it, so its record is still safe to
+			 * free. A
 			 * refused submit is reachable in principle -- a kernel old enough to answer EBUSY on
 			 * completion-queue overflow, which the capability check admits, reached by a caller that
 			 * exceeds the max_in_flight it declared, since that is a contract and not an invariant this
@@ -737,6 +768,10 @@ namespace alt::detail
 				const int submitted = io_uring_submit(&m_ring);
 				if(submitted < 0)
 				{
+					// Still holding m_submission_mutex, and that is the point: the flag has to be
+					// installed before any other thread can submit, because any other thread's
+					// submission flushes this entry too. See quarantine().
+					quarantine(submission.user_data);
 					return submission_outcome{.error = errno_error(-submitted), .entry_published = true};
 				}
 				return {};
@@ -868,10 +903,10 @@ namespace alt::detail
 						// A quarantined record's completion: its submission was refused, its caller
 						// already has an error, and its callback must never run. All that was owed was
 						// the storage, and this scope's end frees it now that the kernel is done with
-						// it. Counted with the completions below, which is what it is -- a completion
-						// with no operation of the caller's behind it. A cancel SQE's own completion
-						// will need a branch of its own ABOVE both, or it inflates this counter and
-						// destroys its documented meaning: issue #73.
+						// it. Counted with the completions below, under the meaning m_ignored carries
+						// -- a completion delivered to nobody -- which this branch is half of. A cancel
+						// SQE's own completion is NOT that, and needs a branch above both rather than
+						// a share of this counter: issue #73.
 						m_ignored.fetch_add(1);
 						continue;
 					}
@@ -900,16 +935,38 @@ namespace alt::detail
 			/// Whether m_ring was created, and so whether the destructor must tear it down.
 			bool m_ring_created = false;
 
-			/// Serializes every submission to m_ring; liburing does not make a shared ring thread-safe.
+			/**
+			 * Serializes every submission to m_ring; liburing does not make a shared ring thread-safe.
+			 *
+			 * The OUTER of the two mutexes. See m_registry_mutex for the order and why it holds.
+			 */
 			std::mutex m_submission_mutex;
 
 			/**
 			 * Serializes the in-flight registry below.
 			 *
-			 * Two mutexes rather than one, and **never held at the same time**, so there is no lock
-			 * order between them to get wrong: a submission enrolls its record and releases this before
-			 * taking m_submission_mutex, and the reaper withdraws a record and releases this before
-			 * invoking anything. The reaper takes m_submission_mutex not at all.
+			 * **Lock order: m_submission_mutex then m_registry_mutex, never the reverse.** One place
+			 * nests them -- submit_to_ring()'s refusal path, which quarantines a record while still
+			 * holding the submission mutex, because the flush it is racing needs that same mutex and
+			 * the flag has to be installed before another thread can perform one. Everything else
+			 * takes one at a time: enroll() takes this and releases it before the submission mutex is
+			 * taken, withdraw() takes only this, and the reaper takes only this and never the
+			 * submission mutex at all. No path anywhere takes the submission mutex while holding this
+			 * one, which is what makes the nesting deadlock-free rather than merely untested.
+			 *
+			 * This comment said "never held at the same time" until the quarantine made that false.
+			 *
+			 * **A warning for the cancellation arm, which is where that invariant was expected to come
+			 * due.** The spec and the plan both describe cancel as submitting an ASYNC_CANCEL *under
+			 * the registry lock*, which is the OPPOSITE nesting -- registry, then submission -- and
+			 * against the order above that is a lock-order inversion, so the two together deadlock:
+			 * one thread in submit_to_ring()'s refusal path holding submission and waiting for
+			 * registry, one in cancel() holding registry and waiting for submission. Either cancel
+			 * takes the submission mutex first, or it copies what it needs out of the registry,
+			 * releases this mutex and submits afterwards -- which also keeps it off the path of
+			 * holding a lock across a liburing call. The registry lookup's purpose, not racing a
+			 * completion that is already withdrawing the record, survives either way. Issue #75,
+			 * which also records that the spec and the plan still carry the inverted instruction.
 			 */
 			std::mutex m_registry_mutex;
 
@@ -932,7 +989,20 @@ namespace alt::detail
 			std::size_t m_submission_depth = 0;
 			std::size_t m_completion_depth = 0;
 
-			/// Completions the reaper found no operation for.
+			/**
+			 * Completions the reaper delivered to nobody.
+			 *
+			 * Two kinds reach it, and the second arrived with the quarantine: a completion whose
+			 * user_data is in no registry at all -- stale, or never issued here -- and a completion
+			 * whose record WAS found but owes no callback, because its submission was refused and its
+			 * caller already has an error. What they have in common, and what this counter means, is
+			 * that no caller's callback ran for them.
+			 *
+			 * What it must not grow to include is this backend's own bookkeeping. The wake-up NOP is
+			 * excluded by the branch above the lookup, and a cancel SQE's own completion belongs in
+			 * that same branch rather than here: it is not a completion delivered to nobody, it is not
+			 * a completion of an operation at all. Issue #73.
+			 */
 			std::atomic<std::size_t> m_ignored{0};
 			/// Operations forwarded to the pool backend whose trampoline has not yet run.
 			std::atomic<std::size_t> m_forwarded{0};

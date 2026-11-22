@@ -321,8 +321,16 @@ validating the `OVERLAPPED` address against its registry; carrying the token is 
 idea expressed so that the unsafe operation does not exist. Two `user_data` values are
 reserved and belong to no operation: one for the wake-up NOP and one for cancel SQEs.
 
-A completion whose token is not in the registry is **ignored and counted**, and the count
-is exposed for testing, mirroring the IOCP backend's ignored-packet counter.
+A completion the reaper **delivers to nobody is ignored and counted**, and the count is
+exposed for testing, roughly mirroring the IOCP backend's ignored-packet counter. Two
+kinds qualify: a completion whose token is in no registry, and — once the quarantine of
+phase 7b Task 4 exists — a completion whose record is found but owes no callback, because
+its submission was refused and its caller already has an error. *(The counter was
+originally defined as "no operation found for it", which the quarantine falsified: that
+case finds its record. Restated here, in the plan, and in both of the backend's own
+files.)* What the counter must **not** absorb is this backend's own bookkeeping: the
+wake-up NOP is excluded by a branch ahead of the lookup, and a cancel SQE's own
+completion belongs in that same branch.
 
 ### The reaper thread
 
@@ -487,7 +495,8 @@ same harness rather than growing a parallel set of file-layer tests.
   race the caller cannot observe (see Cancellation), so a test asserting
   `operation_canceled` would be asserting the outcome of a race and would flake.
 - A cancel after completion: harmless.
-- A completion whose token is no longer registered: ignored, and the counter moves.
+- A completion the reaper delivers to nobody — no record, or a quarantined one: ignored,
+  and the counter moves. See "Records and `user_data`" for what the counter means.
 - Destruction preconditions, as death tests, following
   `2026-11-17-precondition-death-tests-design.md`.
 - Operations forwarded to the pool, and that their tokens carry no tag.
