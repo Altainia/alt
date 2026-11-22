@@ -376,9 +376,22 @@ from `wait_cqe` immediately, rather than polling with a timeout.
 `cancel(token)` is a hint, as the seam says.
 
 - Tag says pool → forward to the internal pool backend's `cancel`.
-- Otherwise, under the registry lock, if the token is still pending, submit
-  `IORING_OP_ASYNC_CANCEL` targeting that `user_data`. Taking the lock is what stops a
-  cancel racing a completion that is already removing the record.
+- Otherwise: take the registry lock, confirm the token is still pending, copy its
+  `user_data`, **release the lock**, and only then submit `IORING_OP_ASYNC_CANCEL` under the
+  submission mutex.
+
+  **The SQE must not be submitted while the registry lock is held.** An earlier draft of this
+  document said to submit under that lock, which would invert the one lock order the backend
+  has: the quarantine path in `submit_to_ring` takes the registry lock *while holding* the
+  submission mutex, so cancel taking them the other way round is an ABBA deadlock. Issue #75
+  records the discovery.
+
+  Releasing first is safe, and the lock was recruited for a job it was never needed for. If
+  the operation completes between the release and the submission, the cancel names a
+  `user_data` the kernel no longer knows and completes with `-ENOENT` or `-EALREADY`, which
+  this backend already ignores. A stale cancel is a harmless no-op — which is precisely what
+  "cancel is a hint" already permits. The lookup under the lock establishes that the operation
+  *was* pending; nothing more is required of it.
 - The original operation still completes, and that completion is what resumes the awaiting
   frame. Nothing about cancellation shortcuts the completion path.
 

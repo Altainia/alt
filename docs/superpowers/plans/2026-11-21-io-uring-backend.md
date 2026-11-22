@@ -349,7 +349,9 @@ TEST(IoUringBackendTest, ACompletionForAnUnregisteredTokenIsIgnoredAndCounted)
 
 - [ ] **Step 3: Implement `cancel`**
 
-Tag says pool → forward to the internal pool backend's `cancel`. Otherwise, **under the registry lock**, if the token is still pending, submit `IORING_OP_ASYNC_CANCEL` targeting that `user_data`. Taking the lock is what stops a cancel racing a completion that is already removing the record. Use `io_uring_prep_cancel` — **not** `io_uring_prep_cancel64`, which is liburing 2.2 and above the floor.
+Tag says pool → forward to the internal pool backend's `cancel`. Otherwise: take the registry lock, confirm the token is still pending, copy its `user_data`, **release the lock**, and only then submit `IORING_OP_ASYNC_CANCEL` under the submission mutex. Use `io_uring_prep_cancel` — **not** `io_uring_prep_cancel64`, which is liburing 2.2 and above the floor.
+
+**Do not hold the registry lock across the submission.** This plan previously said to submit under it, which would invert the backend's one lock order — `submit_to_ring`'s quarantine path takes the registry lock while holding the submission mutex — and deadlock. See issue #75. Releasing first is safe because a cancel that arrives after its operation completed names a `user_data` the kernel no longer knows and comes back `-ENOENT` or `-EALREADY`, which the backend already ignores; a stale cancel is a no-op, which is what "cancel is a hint" permits.
 
 The original operation's completion is what drives the callback. The cancel SQE's own completion carries the reserved `user_data` and is ignored — in the branch ahead of the registry lookup, with the wake-up NOP, **not** by falling through to the ignored-completions counter. That counter means "a completion the reaper delivered to nobody": a completion whose token is in no registry, or whose record is quarantined and owes no callback. (It was originally defined as "not in the registry", which Task 4's quarantine falsified; the spec's "Records and `user_data`" section carries the restated meaning.)
 
