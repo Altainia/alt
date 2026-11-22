@@ -13,12 +13,15 @@
 #	include <chrono>
 #	include <cstddef>
 #	include <cstdint>
+#	include <array>
 #	include <cstdlib>
 #	include <cstring>
 #	include <expected>
 #	include <filesystem>
 #	include <fstream>
+#	include <deque>
 #	include <iterator>
+#	include <limits>
 #	include <memory>
 #	include <semaphore>
 #	include <string>
@@ -133,15 +136,20 @@ namespace
 		w.done.release();
 	}
 
-	alt::io_request positional(alt::io_op op, const alt::detail::io_handle& file, alt::io_buffer buffer, std::uint64_t offset, std::size_t size)
+	alt::io_request positional(alt::io_op op, alt::native_handle handle, alt::io_buffer buffer, std::uint64_t offset, std::size_t size)
 	{
 		alt::io_request request;
 		request.op     = op;
-		request.handle = file.native();
+		request.handle = handle;
 		request.buffer = std::move(buffer);
 		request.offset = offset;
 		request.size   = size;
 		return request;
+	}
+
+	alt::io_request positional(alt::io_op op, const alt::detail::io_handle& file, alt::io_buffer buffer, std::uint64_t offset, std::size_t size)
+	{
+		return positional(op, file.native(), std::move(buffer), offset, size);
 	}
 
 	std::string text_of(const alt::io_buffer& buffer, std::size_t count)
@@ -220,6 +228,14 @@ namespace
 		{
 			waiter w;
 			return run(request, w);
+		}
+
+		/// Runs @p request and expects a completion of zero bytes and no error. @p what names the case.
+		void expect_moves_nothing(const alt::io_request& request, const std::string& what)
+		{
+			const auto done = run(request);
+			EXPECT_FALSE(done.error) << what << ": " << done.error.message();
+			EXPECT_EQ(done.bytes, 0U) << what;
 		}
 
 		/// Opens @p path through the backend, which forwards the open to its internal pool backend.
@@ -448,6 +464,293 @@ TEST_F(IoUringBackendTest, AWriteAtPutsBytesAtTheOffset)
 	EXPECT_EQ(read_whole(path), "0123abc789");
 }
 
+TEST_F(IoUringBackendTest, ARingOperationsTokenCarriesTheTag)
+{
+	const auto path = write_file("data.txt", "tagged");
+	auto       file = open_file(path, alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	waiter     w;
+	const auto token = backend().submit(positional(alt::io_op::read, **file, buffer_of(6), 0, 6), deliver, &w);
+	w.submitted.store(true);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+
+	// The tag is what tells a ring operation's token from a forwarded one's, and it is what
+	// routes a cancel. ForwardsAnOperationItDoesNotHandleToThePool pins the other half.
+	EXPECT_NE(token->value() & alt::detail::io_uring_token_tag, 0U) << "a ring operation's token does not carry the tag";
+	// And neither reserved value: the wake-up NOP's user_data is the tag with an id of zero, and
+	// the id above it is held for a cancel SQE, so an operation may take neither.
+	EXPECT_NE(token->value(), alt::detail::io_uring_token_tag);
+	EXPECT_NE(token->value(), alt::detail::io_uring_token_tag | 1U);
+
+	ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the read never completed";
+	EXPECT_EQ(w.calls.load(), 1);
+	EXPECT_FALSE(w.result.error) << w.result.error.message();
+	EXPECT_EQ(w.result.bytes, 6U);
+	// A ring completion comes from the reaper thread: the submission never completes it inline,
+	// unlike the IOCP arm, where a synchronous transfer does.
+	EXPECT_FALSE(w.ran_inline.load());
+	EXPECT_NE(w.thread, std::this_thread::get_id());
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+TEST_F(IoUringBackendTest, AnAppendWriteLandsAtTheEndWhateverOffsetIsAsked)
+{
+	// An O_APPEND descriptor appends whatever offset the submission entry names, which is the
+	// property phase 7c pinned for IOCP. Neither offset below is the end of the file: honoring
+	// the first would overwrite the start, and honoring the second would leave a hole.
+	const auto path = write_file("data.txt", "start");
+	auto       file = open_file(path, alt::flags(alt::open_flag::write) | alt::flags(alt::open_flag::append));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	constexpr std::array<std::pair<std::string_view, std::uint64_t>, 2> writes{{{"-one", 0}, {"-two", 1000}}};
+	for(const auto& [text, offset]: writes)
+	{
+		auto buffer = buffer_of(text.size());
+		std::memcpy(buffer.bytes().data(), text.data(), text.size());
+		const auto done = run(positional(alt::io_op::write, **file, std::move(buffer), offset, text.size()));
+		EXPECT_FALSE(done.error) << "offset " << offset << ": " << done.error.message();
+		EXPECT_EQ(done.bytes, text.size()) << "offset " << offset;
+	}
+	file->reset();
+	EXPECT_EQ(read_whole(path), "start-one-two");
+	// The content check alone would pass on a file with a hole after it; the size is what says
+	// the offset of 1000 moved nothing.
+	EXPECT_EQ(std::filesystem::file_size(path), 13U);
+}
+
+TEST_F(IoUringBackendTest, AShortReadReportsTheShortCountAndNoError)
+{
+	auto file = open_file(write_file("short.txt", "short"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	auto       buffer = buffer_of(16);
+	const auto view   = buffer;
+	const auto done   = run(positional(alt::io_op::read, **file, std::move(buffer), 2, 16));
+
+	// Three bytes left in the file and sixteen asked for: a short count is a real result, not an
+	// error, and it is returned as-is rather than looped over.
+	EXPECT_FALSE(done.error) << done.error.message();
+	EXPECT_EQ(done.bytes, 3U);
+	EXPECT_EQ(text_of(view, 3), "ort");
+}
+
+TEST_F(IoUringBackendTest, AReadAtEndOfFileReportsZeroBytesAndNoError)
+{
+	// "hello world" is eleven bytes, so offset eleven is the first position past the last byte.
+	auto file = open_file(write_file("data.txt", "hello world"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	expect_moves_nothing(positional(alt::io_op::read, **file, buffer_of(4), 11, 4), "at the end");
+}
+
+TEST_F(IoUringBackendTest, AReadPastEndOfFileReportsZeroBytesAndNoError)
+{
+	// Well past it, rather than at it: the kernel reports both as a zero-byte success, which is
+	// what the pool arm's pread already reports and what the file layer treats as a real result.
+	auto file = open_file(write_file("data.txt", "hello world"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	expect_moves_nothing(positional(alt::io_op::read, **file, buffer_of(4), 4096, 4), "past the end");
+}
+
+TEST_F(IoUringBackendTest, ARequestLargerThanItsBufferIsClampedToTheBuffer)
+{
+	auto file = open_file(write_file("data.txt", "0123456789"), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	auto       buffer = buffer_of(4);
+	const auto view   = buffer;
+	const auto done   = run(positional(alt::io_op::read, **file, std::move(buffer), 0, std::numeric_limits<std::size_t>::max()));
+
+	// The clamp itself is what is asserted, not that the call succeeded: a request past the end
+	// of the buffer must report at most what the buffer holds, and here exactly that, since the
+	// file is longer than the buffer.
+	EXPECT_FALSE(done.error) << done.error.message();
+	EXPECT_LE(done.bytes, 4U);
+	EXPECT_EQ(done.bytes, 4U);
+	EXPECT_EQ(text_of(view, 4), "0123");
+}
+
+TEST_F(IoUringBackendTest, AZeroSizeTransferCompletesWithZeroBytes)
+{
+	// A transfer that moves nothing must still complete exactly once, rather than be skipped or
+	// wait for a completion the kernel is not going to post.
+	const auto path = write_file("data.txt", "0123456789");
+	auto       file = open_file(path, alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	for(const auto op: {alt::io_op::read, alt::io_op::write})
+	{
+		const std::string what = op == alt::io_op::read ? "read" : "write";
+		expect_moves_nothing(positional(op, **file, buffer_of(4), 2, 0), what + " of size 0");
+		// The other way to ask for nothing: a request whose buffer is empty, which the shared
+		// clamp turns into a count of zero over a null address.
+		expect_moves_nothing(positional(op, **file, alt::io_buffer{}, 2, 4), what + " with an empty buffer");
+	}
+	file->reset();
+	EXPECT_EQ(read_whole(path), "0123456789");
+}
+
+TEST_F(IoUringBackendTest, AnOperationOnAClosedDescriptorReportsBadFileDescriptor)
+{
+	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	const auto stale = (*file)->native();
+	file->reset(); // closes the descriptor; the value now names nothing
+
+	for(const auto op: {alt::io_op::read, alt::io_op::write})
+	{
+		const auto done = run(positional(op, stale, buffer_of(1), 0, 1));
+		// A completion entry carries a NEGATED errno. The named condition is what pins the sign:
+		// handing the raw res to the errno mapping would produce an error_code holding a negative
+		// number, which is still an error and would pass a bare "it failed" assertion.
+		EXPECT_EQ(done.error, std::errc::bad_file_descriptor) << done.error.message();
+		EXPECT_EQ(done.bytes, 0U);
+	}
+}
+
+namespace
+{
+	/// One read of ManyConcurrentTransfersAllComplete: its callback state, and a view of its buffer.
+	struct concurrent_read
+	{
+		alt::io_buffer view;
+		waiter         w;
+	};
+
+	/// Submits one chunk read of @p read, and returns whether it was accepted with a ring token.
+	bool submit_chunk_read(alt::io_backend& ring, const alt::detail::io_handle& file, concurrent_read& read, std::size_t index, std::size_t chunk)
+	{
+		auto buffer = alt::io_buffer::allocate(chunk);
+		EXPECT_TRUE(buffer.has_value());
+		if(!buffer)
+		{
+			return false;
+		}
+		read.view        = *buffer;
+		const auto token = ring.submit(positional(alt::io_op::read, file, std::move(*buffer), index * chunk, chunk), deliver, &read.w);
+		read.w.submitted.store(true);
+		if(!token)
+		{
+			ADD_FAILURE() << "submission " << index << ": " << token.error().message();
+			return false;
+		}
+		EXPECT_NE(token->value() & alt::detail::io_uring_token_tag, 0U) << "submission " << index;
+		return true;
+	}
+
+	/// Waits for @p read and checks that it moved exactly @p expected.
+	void expect_chunk_read(concurrent_read& read, std::size_t index, const std::string& expected)
+	{
+		ASSERT_TRUE(read.w.done.try_acquire_for(completion_guard)) << "transfer " << index << " never completed";
+		EXPECT_EQ(read.w.calls.load(), 1) << "transfer " << index;
+		EXPECT_FALSE(read.w.result.error) << "transfer " << index << ": " << read.w.result.error.message();
+		EXPECT_EQ(read.w.result.bytes, expected.size()) << "transfer " << index;
+		EXPECT_EQ(text_of(read.view, expected.size()), expected) << "transfer " << index;
+	}
+} // namespace
+
+TEST_F(IoUringBackendTest, ManyConcurrentTransfersAllComplete)
+{
+	// Many times more operations outstanding at once than the submission ring has entries, which
+	// is the sizing's own claim: io_uring_submit() drains the queue inside the submission lock,
+	// so the depth bounds a burst and not the work in flight. The completion ring, which does
+	// bound it, is sized from max_in_flight.
+	constexpr std::size_t transfers = 256;
+	constexpr std::size_t chunk     = 4;
+	constexpr std::size_t depth     = 8;
+
+	std::string content(transfers * chunk, '\0');
+	for(std::size_t i = 0; i < content.size(); ++i)
+	{
+		content[i] = static_cast<char>('a' + (i % 26));
+	}
+	const auto path = write_file("many.bin", content);
+
+	const auto ring = build(depth, transfers);
+	ASSERT_NE(ring, nullptr);
+	ASSERT_EQ(alt::detail::io_uring_submission_depth_for_testing(*ring), depth);
+	// The descriptor is an ordinary one, so the fixture's backend opens it and the ring under
+	// test performs the transfers; a ring needs nothing special of a descriptor.
+	auto file = open_file(path, alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	std::deque<concurrent_read> reads(transfers); // deque: waiter holds semaphores and cannot move
+	std::size_t                 submitted = 0;
+	while(submitted < transfers && submit_chunk_read(*ring, **file, reads[submitted], submitted, chunk))
+	{
+		++submitted;
+	}
+	for(std::size_t i = 0; i < submitted; ++i)
+	{
+		expect_chunk_read(reads[i], i, content.substr(i * chunk, chunk));
+	}
+	EXPECT_EQ(submitted, transfers);
+	// Every completion found its record: a user_data that did not match its token would leave the
+	// callbacks unrun and this count equal to the number of transfers.
+	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(*ring), 0U);
+}
+
+namespace
+{
+	/// State for ACompletionCallbackMaySubmitAnotherOperation: the outcome of the first read, and
+	/// the second read the callback submits from inside it.
+	struct nested_submission
+	{
+		alt::io_backend*      backend = nullptr;
+		alt::io_request       next;
+		waiter                inner;
+		alt::io_completion    outer{};
+		std::binary_semaphore outer_done{0};
+		std::atomic<bool>     inner_submitted{false};
+	};
+
+	void submit_from_callback(void* state, alt::io_completion result) noexcept
+	{
+		auto& nested     = *static_cast<nested_submission*>(state);
+		nested.outer     = result;
+		const auto token = nested.backend->submit(nested.next, deliver, &nested.inner);
+		nested.inner.submitted.store(true);
+		nested.inner_submitted.store(token.has_value());
+		nested.outer_done.release();
+	}
+} // namespace
+
+TEST_F(IoUringBackendTest, ACompletionCallbackMaySubmitAnotherOperation)
+{
+	// No callback runs under a lock of this backend's. A callback is the file layer's operation
+	// block's entry point, takes locks of its own, and may call straight back into submit() --
+	// which this one does, from the reaper thread. A reaper that held the registry lock across
+	// the callback would deadlock in the nested enroll and this test would never return.
+	const auto path = write_file("nested.txt", "0123456789");
+	auto       file = open_file(path, alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+
+	nested_submission nested;
+	nested.backend        = &backend();
+	auto       inner_data = buffer_of(3);
+	const auto inner_view = inner_data;
+	nested.next           = positional(alt::io_op::read, **file, std::move(inner_data), 5, 3);
+
+	auto       outer_data = buffer_of(4);
+	const auto outer_view = outer_data;
+	const auto token      = backend().submit(positional(alt::io_op::read, **file, std::move(outer_data), 0, 4), submit_from_callback, &nested);
+	ASSERT_TRUE(token.has_value()) << token.error().message();
+
+	ASSERT_TRUE(nested.outer_done.try_acquire_for(completion_guard)) << "the first read never completed";
+	EXPECT_FALSE(nested.outer.error) << nested.outer.error.message();
+	EXPECT_EQ(nested.outer.bytes, 4U);
+	EXPECT_EQ(text_of(outer_view, 4), "0123");
+
+	ASSERT_TRUE(nested.inner_submitted.load()) << "the callback could not submit from the reaper thread";
+	ASSERT_TRUE(nested.inner.done.try_acquire_for(completion_guard)) << "the read submitted from the callback never completed";
+	EXPECT_EQ(nested.inner.calls.load(), 1);
+	EXPECT_FALSE(nested.inner.result.error) << nested.inner.result.error.message();
+	EXPECT_EQ(nested.inner.result.bytes, 3U);
+	EXPECT_EQ(text_of(inner_view, 3), "567");
+}
+
 /**
  * An ENVIRONMENT canary, and nothing more: this runner can build a backend at all.
  *
@@ -593,6 +896,113 @@ TEST(IoUringBackendDeathTest, DestroyingItWithAForwardedOperationInFlightTermina
 
 	const alt_test::scoped_death_test_style style{"threadsafe"};
 	EXPECT_DEATH(destroy_the_backend_with_a_forwarded_operation_in_flight(), "io_uring backend destroyed with forwarded operations in flight");
+}
+
+namespace
+{
+	/// A pipe nothing is ever written to, so a read submitted on its read end stays in flight.
+	class empty_pipe
+	{
+	public:
+		empty_pipe()
+		{
+			if(::pipe(m_fds.data()) != 0)
+			{
+				m_fds = {-1, -1};
+			}
+		}
+
+		~empty_pipe()
+		{
+			for(const int fd: m_fds)
+			{
+				if(fd >= 0)
+				{
+					::close(fd);
+				}
+			}
+		}
+
+		empty_pipe(const empty_pipe&)            = delete;
+		empty_pipe& operator=(const empty_pipe&) = delete;
+		empty_pipe(empty_pipe&&)                 = delete;
+		empty_pipe& operator=(empty_pipe&&)      = delete;
+
+		[[nodiscard]] bool valid() const
+		{
+			return m_fds[0] >= 0;
+		}
+
+		[[nodiscard]] alt::native_handle read_end() const
+		{
+			return m_fds[0];
+		}
+
+	private:
+		std::array<int, 2> m_fds{-1, -1};
+	};
+
+	/**
+	 * The third death test's body: a read submitted to the RING, left pending on an empty pipe,
+	 * when the backend is destroyed.
+	 *
+	 * This is the ring arm's half of the precondition the other two death tests cover for the
+	 * pool arm. Freeing the record would hand the kernel a buffer that is gone to write into,
+	 * which no sanitizer reliably reports, so the destructor stops the process instead.
+	 *
+	 * Any setup failure aborts too, but with no message, so it cannot pass for the assert.
+	 */
+	void destroy_the_backend_with_a_ring_operation_in_flight()
+	{
+		auto pool = alt::thread_pool::create(1);
+		if(!pool)
+		{
+			std::abort();
+		}
+		auto made = alt::detail::make_io_uring_backend(*pool, 0, default_max_in_flight);
+		if(!made)
+		{
+			std::abort();
+		}
+		std::unique_ptr<alt::io_backend> backend = std::move(*made);
+		const empty_pipe                 pipe;
+		auto                             buffer = alt::io_buffer::allocate(4);
+		if(!pipe.valid() || !buffer)
+		{
+			std::abort();
+		}
+		waiter          pending;
+		alt::io_request read;
+		read.op          = alt::io_op::read;
+		read.handle      = pipe.read_end();
+		read.buffer      = std::move(*buffer);
+		read.size        = 4;
+		const auto token = backend->submit(read, deliver, &pending);
+		// A token without the tag would mean the read went to the pool, which would make this the
+		// forwarded case over again rather than the ring's.
+		if(!token || (token->value() & alt::detail::io_uring_token_tag) == 0)
+		{
+			std::abort();
+		}
+		backend.reset(); // the read is still pending: nothing was written to the pipe
+	}
+} // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): as the death test above, whose note explains the measurement.
+TEST(IoUringBackendDeathTest, DestroyingItWithARingOperationInFlightTerminates)
+{
+	if(!alt_test::asserts_are_compiled_in)
+	{
+		GTEST_SKIP() << "the in-flight check is an assert in debug builds and std::terminate() under NDEBUG; "
+		                "the death test pins the assert's message, so it runs only where the assert is compiled in.";
+	}
+	if(alt_test::thread_sanitizer_is_active)
+	{
+		GTEST_SKIP() << alt_test::thread_sanitizer_forks_death_tests << ' ' << alt_test::debug_and_asan_presets_run_it;
+	}
+
+	const alt_test::scoped_death_test_style style{"threadsafe"};
+	EXPECT_DEATH(destroy_the_backend_with_a_ring_operation_in_flight(), "io_uring backend destroyed with ring operations in flight");
 }
 
 #endif

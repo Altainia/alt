@@ -53,10 +53,11 @@ namespace alt::detail
 	 * covering it needs `2 * max_in_flight + 1` completion entries and the kernel's ceiling is
 	 * 65536, so the ring is clamped to that ceiling and overflow becomes possible. It is still
 	 * safe. Every kernel that passes the capability check below is 5.6 or newer, hence sets
-	 * IORING_FEAT_NODROP, under which the kernel holds overflowing completions in a backlog and
-	 * refuses further submissions with EBUSY rather than dropping a completion; no callback is
-	 * lost. An extreme @p max_in_flight is therefore accepted, not refused -- refusing a legal
-	 * std::size_t for it would be the worse contract.
+	 * IORING_FEAT_NODROP, under which the kernel holds overflowing completions in a backlog
+	 * rather than dropping them, and the reaper's wait drains that backlog -- measured against a
+	 * deliberately overflowed ring, not assumed; see derive_ring_sizes() in the implementation
+	 * for how. No callback is lost. An extreme @p max_in_flight is therefore accepted, not
+	 * refused -- refusing a legal std::size_t for it would be the worse contract.
 	 *
 	 * @p queue_depth and @p max_in_flight are **both std::size_t and are not distinguishable by
 	 * type**, so a call site that passes them in the wrong order gets a working ring of the wrong

@@ -244,8 +244,14 @@ So the design is:
 - **Above that bound the value is accepted, not refused**, and the guarantee weakens from
   unreachable to merely safe. Every kernel that passes the capability check is 5.6 or
   newer, hence sets `IORING_FEAT_NODROP`, under which an overflowing completion goes to a
-  kernel-side backlog and further submissions are refused with `EBUSY` rather than a
-  completion being dropped. No callback is lost at any `max_in_flight`. `file_io::create`
+  kernel-side backlog rather than being dropped, and the reaper's `io_uring_wait_cqe`
+  drains that backlog — it enters the kernel with `IORING_ENTER_GETEVENTS` once the mapped
+  ring is empty, and the kernel flushes the overflow list there. *(Measured in phase 7b
+  Task 4 against a deliberately overflowed ring, because the acceptance decision rests on
+  it. The same measurement showed that the earlier clause here — "further submissions are
+  refused with `EBUSY`" — is an older-kernel behaviour: a current kernel accepts the
+  submission and backlogs its completion. Neither loses a completion, so the decision is
+  unaffected.)* No callback is lost at any `max_in_flight`. `file_io::create`
   validates `max_in_flight` only against zero, so an extreme value is reachable through
   the public API, and refusing a legal `std::size_t` there would be the worse contract.
 - Consequently **the factory takes `max_in_flight` as well as `queue_depth`**. The two

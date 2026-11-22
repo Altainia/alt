@@ -5,6 +5,7 @@
 
 #	include <algorithm>
 #	include <alt/io_backend.hpp>
+#	include <alt/io_buffer.hpp>
 #	include <alt/thread_pool.hpp>
 #	include <atomic>
 #	include <bit>
@@ -20,6 +21,8 @@
 #	include <new>
 #	include <system_error>
 #	include <thread>
+#	include <unordered_map>
+#	include <utility>
 
 #	include "io_backend_internal.hpp"
 
@@ -44,6 +47,36 @@ namespace alt::detail
 		 * which is what lets the reaper recognize its own wake-up without consulting anything.
 		 */
 		constexpr std::uint64_t wake_up_user_data = io_uring_token_tag;
+
+		/**
+		 * The first operation id this backend issues, which is 2 rather than 1.
+		 *
+		 * Two values of the tagged space belong to no operation. Zero is the wake-up NOP's, above.
+		 * One is held for the user_data of a cancel SQE, whose own completion the reaper must be
+		 * able to tell from an operation's; it has no constant of its own yet because nothing
+		 * submits a cancel SQE, and a constant nothing reads is a warning under -Werror. Starting
+		 * the ids above it is what keeps that value free without defining it, so the arm that
+		 * submits cancels does not have to renumber tokens that are already issued.
+		 */
+		constexpr std::uint64_t first_operation_id = 2;
+
+		/**
+		 * The most bytes one read or write SQE may carry: the kernel's own cap, MAX_RW_COUNT.
+		 *
+		 * `INT_MAX & PAGE_MASK` with 4 KiB pages, which is what the kernel silently truncates a
+		 * larger transfer to. Applying it here rather than leaving it to the kernel is what makes
+		 * the count this code hands liburing -- an `unsigned` -- the count it means: a
+		 * transfer_size() above 2^32 would otherwise be truncated to its low 32 bits, turning a
+		 * huge request into an arbitrary small one instead of into the kernel's cap.
+		 *
+		 * A request above the cap is a SHORT transfer, reported as-is: this backend does not loop.
+		 * The file layer already treats a short count as a real result, and looping here would
+		 * hide a partial transfer the caller is entitled to see. **Untested, deliberately**: the
+		 * case needs a buffer of more than 2 GiB, which is not a reasonable allocation to make in
+		 * CI, and a test that asked for the cap with a smaller buffer would be testing the
+		 * buffer clamp instead.
+		 */
+		constexpr std::size_t max_single_transfer = 0x7ffff000;
 
 		/// The kernel's ceiling on submission ring entries (IORING_MAX_ENTRIES).
 		constexpr std::size_t max_submission_entries = 32768;
@@ -127,10 +160,22 @@ namespace alt::detail
 		 * max_in_flight is accepted rather than refused: refusing a legal std::size_t for it would
 		 * be the worse contract, and the degradation is benign. Every kernel that passes the
 		 * capability check is 5.6 or newer, hence sets IORING_FEAT_NODROP, under which an
-		 * overflowing completion goes to a kernel-side backlog and further submissions are refused
-		 * with EBUSY -- which submit() already reports as the errno it is -- rather than a
-		 * completion being dropped. No callback is lost at any max_in_flight; only the "cannot
-		 * happen" claim is.
+		 * overflowing completion goes to a kernel-side backlog rather than being dropped. No
+		 * callback is lost at any max_in_flight; only the "cannot happen" claim is.
+		 *
+		 * That rests on the reaper draining the backlog, which is not automatic -- a backlogged
+		 * completion is not in the mapped ring and only an io_uring_enter moves it there -- so it
+		 * was MEASURED rather than assumed, against a ring deliberately overflowed. reap() does
+		 * drain it: io_uring_wait_cqe() peeks the mapped ring and, finding it empty, enters with
+		 * IORING_ENTER_GETEVENTS, and the kernel flushes the overflow list before deciding whether
+		 * to sleep. The enter therefore happens exactly when the visible ring is empty, which is
+		 * the only state in which the backlog matters, and a submission's own enter flushes what
+		 * fits as well. No IORING_SQ_CQ_OVERFLOW handling of this backend's own is needed.
+		 *
+		 * What a submission attempted while the ring is overflown does is kernel-dependent and
+		 * NOT load-bearing here: older kernels refuse it with EBUSY, which submit() reports as the
+		 * errno it is, while a current one accepts it and appends its completion to the backlog
+		 * (measured on 7.0). Either way nothing is lost.
 		 *
 		 * Both counts are clamped to the kernel's ceilings here, which is what turns an
 		 * out-of-range request into a working ring instead of the EINVAL io_uring_setup answers it
@@ -147,6 +192,77 @@ namespace alt::detail
 			const std::size_t wanted_completion = std::max(in_flight + reserved, submission);
 			const std::size_t completion        = round_up_to_power_of_two(std::min(wanted_completion, max_completion_entries));
 			return ring_sizes{.submission_entries = static_cast<unsigned>(submission), .completion_entries = static_cast<unsigned>(completion)};
+		}
+
+		/// The file descriptor @p handle carries. A ring operates on ordinary descriptors.
+		int to_fd(const native_handle handle) noexcept
+		{
+			return static_cast<int>(handle);
+		}
+
+		/**
+		 * One read or write on the ring, owned by the backend from submission until the reaper has
+		 * consumed its completion.
+		 *
+		 * The buffer copy is what keeps the bytes alive while the kernel owns them; it is released
+		 * only after the callback has returned, which is why the record outlives the callback and
+		 * the callback does not outlive the record.
+		 *
+		 * It carries no operation kind, unlike the IOCP backend's transfer_record. There, a read
+		 * has to map ERROR_HANDLE_EOF to a zero count while a write must not; here the kernel
+		 * reports end of file as a zero-byte success for both, so the mapping from a completion
+		 * entry to an io_completion is the same for every operation on this ring and nothing would
+		 * read the field.
+		 */
+		struct transfer_record
+		{
+			io_buffer        buffer;
+			io_completion_fn on_done = nullptr;
+			void*            state   = nullptr;
+		};
+
+		/// Everything a submission needs, read from the record before the record can be completed.
+		struct transfer_submission
+		{
+			std::uint64_t user_data = 0;
+			int           fd        = -1;
+			void*         data      = nullptr;
+			unsigned      count     = 0;
+			std::uint64_t offset    = 0;
+			bool          is_write  = false;
+		};
+
+		/// The bytes one SQE may carry for @p request: the shared buffer clamp, then the kernel's cap.
+		unsigned transfer_count(const io_request& request) noexcept
+		{
+			return static_cast<unsigned>(std::min(transfer_size(request), max_single_transfer));
+		}
+
+		/**
+		 * What a completion entry's @p res means to the caller of submit().
+		 *
+		 * A non-negative res is a byte count, zero included: a read at or past the end of file is
+		 * a short count of zero and no error, which is what the pool arm's pread already reports
+		 * and what the file layer already treats as a real result. Short counts are returned
+		 * as-is.
+		 *
+		 * A negative res is a NEGATED errno -- the completion queue carries it there rather than
+		 * in errno, which the reaper thread's errno would not hold anyway. detail::errno_error
+		 * wants the positive value, so the sign is flipped here; handing it res directly would
+		 * produce an error_code in the system category holding a negative number, which compares
+		 * equal to no std::errc condition the seam documents and would fail no test that only
+		 * asserts "some error".
+		 */
+		io_completion completion_of(const int res) noexcept
+		{
+			io_completion result;
+			if(res >= 0)
+			{
+				result.bytes = static_cast<std::size_t>(res);
+				return result;
+			}
+			result.error = errno_error(-res);
+			return result;
 		}
 
 		class io_uring_backend final: public io_backend
@@ -180,10 +296,25 @@ namespace alt::detail
 				// into a destroyed backend, so neither is a way out: debug builds say why, and every
 				// build stops.
 				//
-				// Every operation this backend accepts is forwarded to the pool, so this one count is
-				// the whole of the in-flight count. An arm that submits to the ring keeps a registry
-				// of its own records and answers the same question from it, under the same rule: ANY
-				// operation in flight, the ring's or the pool's, is a precondition violation.
+				// ANY operation in flight is a precondition violation, the ring's or the pool's, so
+				// both arms are asked and each says which one it was. The ring's answer is the
+				// registry's emptiness rather than a counter: the registry IS the set of records the
+				// kernel may still be writing into, which is exactly what must not be freed here.
+				//
+				// A record is withdrawn before its callback runs, so an empty registry does not mean
+				// that no callback is running -- it means none is still owed, which is the question
+				// that matters: a callback already under way wants nothing of this backend's, and the
+				// join below waits for the reaper thread it runs on in any case.
+				bool ring_in_flight = false;
+				{
+					const std::scoped_lock lock(m_registry_mutex);
+					ring_in_flight = !m_records.empty();
+				}
+				if(ring_in_flight)
+				{
+					assert(false && "io_uring backend destroyed with ring operations in flight");
+					std::terminate();
+				}
 				if(m_forwarded.load() != 0)
 				{
 					assert(false && "io_uring backend destroyed with forwarded operations in flight");
@@ -285,12 +416,15 @@ namespace alt::detail
 
 			[[nodiscard]] std::expected<io_token, std::error_code> submit(const io_request& request, io_completion_fn on_done, void* state) override
 			{
-				// Forwarded without exception: nothing is performed on the ring here, and seven of
-				// the eleven operations never can be. open, the two stats, rename and unlink have
-				// opcodes that arrived across kernels 5.6 to 5.11 and would each need their own probe
-				// and fallback for no latency anyone is waiting on; a directory listing has no opcode
-				// at all, since getdents is not exposed; and invoke runs an arbitrary callable, which
-				// a submission queue has nowhere to run.
+				if(request.op == io_op::read || request.op == io_op::write)
+				{
+					return submit_transfer(request, on_done, state);
+				}
+				// Everything else is forwarded, and seven of the nine never can be anything else. open,
+				// the two stats, rename and unlink have opcodes that arrived across kernels 5.6 to 5.11
+				// and would each need their own probe and fallback for no latency anyone is waiting on; a
+				// directory listing has no opcode at all, since getdents is not exposed; and invoke runs
+				// an arbitrary callable, which a submission queue has nowhere to run.
 				return submit_forwarded(request, on_done, state);
 			}
 
@@ -300,9 +434,13 @@ namespace alt::detail
 				{
 					return;
 				}
-				// Only the internal pool backend issues tokens here, and a pool token never carries
-				// the tag, which submit_forwarded() asserts. So the tag is what routes a cancel, and
-				// a tagged token names no operation this backend is holding.
+				// The tag is what routes a cancel: a pool token never carries it, which
+				// submit_forwarded() asserts, and every token submit_transfer() issues does.
+				//
+				// A tagged token is accepted and nothing is asked of the kernel for it. That is within
+				// the seam's contract -- cancel is a hint, and a ring operation completes on its own
+				// whatever happens here -- and it is where an IORING_OP_ASYNC_CANCEL naming the token's
+				// user_data belongs once this backend submits one.
 				if((token.value() & io_uring_token_tag) == 0)
 				{
 					m_pool_backend->cancel(token);
@@ -330,6 +468,155 @@ namespace alt::detail
 			}
 
 		private:
+			/**
+			 * Submits @p request to the ring as one read or write SQE.
+			 *
+			 * The record is registered BEFORE the SQE reaches the kernel, so a completion that lands
+			 * while this call is still inside io_uring_submit() finds it. From that moment the record
+			 * is the reaper's to complete and free -- possibly before this function's next statement --
+			 * so everything the submission still needs is taken out of it first, exactly as the IOCP
+			 * backend's submit_transfer() does.
+			 */
+			std::expected<io_token, std::error_code> submit_transfer(const io_request& request, io_completion_fn on_done, void* state)
+			{
+				std::unique_ptr<transfer_record> owned;
+				try
+				{
+					owned = std::make_unique<transfer_record>();
+				}
+				catch(const std::bad_alloc&)
+				{
+					return std::unexpected(bad_alloc_error());
+				}
+				// The buffer copy is what keeps the bytes alive while the kernel owns them, and the
+				// pointer handed to the SQE below is taken from that copy rather than from the request.
+				owned->buffer  = request.buffer;
+				owned->on_done = on_done;
+				owned->state   = state;
+
+				const transfer_submission submission{.user_data = io_uring_token_tag | m_next_id.fetch_add(1),
+				                                     .fd        = to_fd(request.handle),
+				                                     .data      = owned->buffer.bytes().data(),
+				                                     .count     = transfer_count(request),
+				                                     .offset    = request.offset,
+				                                     .is_write  = request.op == io_op::write};
+
+				if(const auto error = enroll(submission.user_data, std::move(owned)))
+				{
+					return std::unexpected(error);
+				}
+				if(const auto error = submit_to_ring(submission))
+				{
+					// Nothing of this operation ever reaches a callback: the seam says a submission that
+					// returns an error has not run one and never will. So the record is withdrawn and
+					// freed here, which also releases its buffer copy.
+					const std::unique_ptr<transfer_record> mine = withdraw(submission.user_data);
+					static_cast<void>(mine);
+					return std::unexpected(error);
+				}
+				return io_token(submission.user_data);
+			}
+
+			/**
+			 * Registers @p record under @p user_data, which is the token value its SQE will carry.
+			 *
+			 * On failure the record is freed with its buffer copy and nothing has been submitted, so
+			 * the caller's std::unexpected is the whole of the outcome.
+			 */
+			std::error_code enroll(const std::uint64_t user_data, std::unique_ptr<transfer_record> record) noexcept
+			{
+				try
+				{
+					const std::scoped_lock lock(m_registry_mutex);
+					const bool             added = m_records.emplace(user_data, std::move(record)).second;
+					assert(added && "a token was issued twice");
+					static_cast<void>(added);
+				}
+				catch(const std::bad_alloc&)
+				{
+					return bad_alloc_error();
+				}
+				return {};
+			}
+
+			/**
+			 * Removes and returns the record registered under @p user_data, or null if none is.
+			 *
+			 * Taking it out under the mutex is what completes a record at most once. A user_data this
+			 * backend does not recognize -- a completion for an operation already withdrawn, or one it
+			 * never issued -- is a lookup that finds nothing, which is the whole reason the SQE carries
+			 * the token value rather than the record's address.
+			 */
+			std::unique_ptr<transfer_record> withdraw(const std::uint64_t user_data) noexcept
+			{
+				const std::scoped_lock lock(m_registry_mutex);
+				const auto             found = m_records.find(user_data);
+				if(found == m_records.end())
+				{
+					return nullptr;
+				}
+				std::unique_ptr<transfer_record> record = std::move(found->second);
+				m_records.erase(found);
+				return record;
+			}
+
+			/**
+			 * Puts @p submission on the ring and hands it to the kernel.
+			 *
+			 * Holds the submission mutex across both liburing calls, as post_wake_up() does and for the
+			 * same reason: io_uring_get_sqe() and io_uring_submit() are not safe to call concurrently on
+			 * a shared ring, and submit() may be called from any thread. Holding it across both is also
+			 * what makes the submission queue drain again before the lock is released, which is why a
+			 * ring of any depth can carry far more outstanding operations than it has entries.
+			 *
+			 * It never waits. submit() must not block, so a submission queue with no free entry is
+			 * reported as EAGAIN rather than waited out, and a refused io_uring_submit() is reported as
+			 * the errno it returned. **Both are documented rather than tested**: the completion ring is
+			 * sized to cover every operation that may be in flight, and the submission queue is drained
+			 * inside this lock, so neither is reachable from this backend's own API. A test for either
+			 * would be a test that cannot fail.
+			 *
+			 * One residual of the io_uring_submit() failure path is worth naming, since it is not
+			 * visible from here: liburing publishes the ring tail before entering the kernel, so a
+			 * refused submission leaves the entry in the ring for the next submission to flush. The
+			 * record is already gone by then, so its completion is a lookup that finds nothing and is
+			 * counted as ignored -- never a pointer followed into freed memory, which is what the token
+			 * in user_data buys. A read that lands after that would write into storage whose last
+			 * io_buffer reference may have gone, which is the reason this path is argued unreachable
+			 * rather than merely untested.
+			 *
+			 * @return Nothing when the kernel has taken the entry. A non-negative io_uring_submit() is
+			 *         enough to say so: it consumes everything queued, and this mutex is held across
+			 *         both calls, so the only entry queued is this one.
+			 */
+			std::error_code submit_to_ring(const transfer_submission& submission) noexcept
+			{
+				const std::scoped_lock lock(m_submission_mutex);
+				io_uring_sqe* const    sqe = io_uring_get_sqe(&m_ring);
+				if(sqe == nullptr)
+				{
+					return errno_error(EAGAIN);
+				}
+				if(submission.is_write)
+				{
+					io_uring_prep_write(sqe, submission.fd, submission.data, submission.count, submission.offset);
+				}
+				else
+				{
+					io_uring_prep_read(sqe, submission.fd, submission.data, submission.count, submission.offset);
+				}
+				// Assigned directly rather than through io_uring_sqe_set_data64(), for the reason
+				// post_wake_up() gives: the 2.1 floor does not promise that helper. io_uring_prep_read,
+				// io_uring_prep_write and io_uring_prep_nop are all older than it.
+				sqe->user_data      = submission.user_data;
+				const int submitted = io_uring_submit(&m_ring);
+				if(submitted < 0)
+				{
+					return errno_error(-submitted);
+				}
+				return {};
+			}
+
 			/// What a forwarded operation's trampoline needs: the caller's callback, and the count it lowers.
 			struct forwarded_operation
 			{
@@ -441,20 +728,32 @@ namespace alt::detail
 						}
 						std::terminate();
 					}
+					// Both fields are read before io_uring_cqe_seen(), which hands the entry back to the
+					// kernel: after it, that memory may already hold another completion.
 					const std::uint64_t user_data = cqe->user_data;
+					const int           res       = cqe->res;
 					io_uring_cqe_seen(&m_ring, cqe);
 					if(user_data == wake_up_user_data)
 					{
 						return;
 					}
-					// A completion with no operation behind it: counted, never acted on, and above all
-					// never dereferenced. user_data carries the token value rather than a record
-					// pointer precisely so that a stale or cancelled completion can be looked for and
-					// found absent instead of pointing at a record that is gone. The wake-up above is
-					// the only thing submitted to this ring, so nothing reaches this line today; the
-					// counter is what a completion this backend does not recognize would move, and the
-					// tests read it.
-					m_ignored.fetch_add(1);
+					std::unique_ptr<transfer_record> record = withdraw(user_data);
+					if(!record)
+					{
+						// A completion with no operation behind it: counted, never acted on, and above all
+						// never dereferenced. user_data carries the token value rather than a record
+						// pointer precisely so that a stale completion can be looked for and found absent
+						// instead of pointing at a record that is gone.
+						m_ignored.fetch_add(1);
+						continue;
+					}
+					// Outside withdraw()'s lock, which it has already released, and under no lock of this
+					// backend's at all: the callback is the file layer's operation block's entry point and
+					// takes locks of its own, and it may call straight back into submit(). The record, and
+					// with it the io_buffer copy the kernel has been writing into, is released when this
+					// statement's unique_ptr goes out of scope -- after the callback has RETURNED, which is
+					// what io_request documents.
+					record->on_done(record->state, completion_of(res));
 				}
 			}
 
@@ -466,6 +765,28 @@ namespace alt::detail
 
 			/// Serializes every submission to m_ring; liburing does not make a shared ring thread-safe.
 			std::mutex m_submission_mutex;
+
+			/**
+			 * Serializes the in-flight registry below.
+			 *
+			 * Two mutexes rather than one, and **never held at the same time**, so there is no lock
+			 * order between them to get wrong: a submission enrolls its record and releases this before
+			 * taking m_submission_mutex, and the reaper withdraws a record and releases this before
+			 * invoking anything. The reaper takes m_submission_mutex not at all.
+			 */
+			mutable std::mutex m_registry_mutex;
+
+			/**
+			 * Every ring operation submitted and not yet completed, keyed by the token value its SQE
+			 * carries as its user_data.
+			 *
+			 * This is the ring arm's half of the in-flight count the destructor checks, and the map the
+			 * reaper looks a completion up in. Nothing here is addressed by pointer from outside it.
+			 */
+			std::unordered_map<std::uint64_t, std::unique_ptr<transfer_record>> m_records;
+
+			/// The next operation id; see first_operation_id for why it does not start at one.
+			std::atomic<std::uint64_t> m_next_id{first_operation_id};
 
 			/// The ring sizes in effect, as the kernel reported them from create_ring().
 			std::size_t m_submission_depth = 0;
