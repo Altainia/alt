@@ -218,7 +218,7 @@ rather than a generic failure.
 
 **What `queue_depth` bounds.** Without `SQPOLL` the kernel consumes submission entries
 synchronously inside `io_uring_submit`, and `submit` holds its mutex across both the SQE
-acquisition and the submit, so a submission **the kernel accepts** leaves the queue empty
+acquisition and the submit, so a submission **the kernel consumes** leaves the queue empty
 again by the time the lock is released. A full *submission* queue is therefore all but
 unreachable at any depth. *(Qualified in phase 7b Task 4: a **refused** `io_uring_submit`
 consumes nothing and leaves its entry published, so unconsumed entries accumulate at one
