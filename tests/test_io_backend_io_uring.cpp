@@ -717,6 +717,96 @@ TEST_F(IoUringBackendTest, SyncDataOnAClosedDescriptorReportsBadFileDescriptorFr
 	expect_ring_fsync_to_fail_on(backend(), alt::io_op::sync_data, stale);
 }
 
+namespace
+{
+	/**
+	 * Submits @p op on @p directory, a read-only directory descriptor, and checks it was put on the
+	 * ring and succeeded.
+	 *
+	 * What this pins, together with the closed-descriptor pair: an fsync succeeds on a directory,
+	 * while a read of one with a nonzero count fails with EISDIR, and a write cannot be prepared on a
+	 * read-only descriptor at all. So an entry prepared as such a read or write, which the closed
+	 * descriptor alone cannot tell from an fsync because all three fail with EBADF there, fails here.
+	 *
+	 * A ZERO-count read does NOT fail here: measured through the ring, it completes with success on
+	 * a directory, exactly as an fsync does. The pipe test below is what tells those two apart.
+	 * Neither can tell the two fsync forms apart; see OnlyTheDataSyncFormCarriesTheDataSyncFlag.
+	 */
+	void expect_ring_fsync_to_succeed_on(alt::io_backend& backend, const alt::io_op op, const alt::native_handle directory)
+	{
+		waiter     w;
+		const auto token = backend.submit(sync_request(op, directory), deliver, &w);
+		w.submitted.store(true);
+		ASSERT_TRUE(token.has_value()) << token.error().message();
+		EXPECT_NE(token->value() & alt::detail::io_uring_token_tag, 0U);
+		ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the fsync never completed";
+		EXPECT_EQ(w.calls.load(), 1);
+		EXPECT_FALSE(w.result.error) << w.result.error.message();
+		EXPECT_EQ(w.result.bytes, 0U);
+	}
+} // namespace
+
+TEST_F(IoUringBackendTest, SyncFullOnADirectorySucceedsWhereAReadWouldNot)
+{
+	auto directory = open_file(dir(), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(directory.has_value()) << directory.error().message();
+	expect_ring_fsync_to_succeed_on(backend(), alt::io_op::sync_full, (*directory)->native());
+}
+
+TEST_F(IoUringBackendTest, SyncDataOnADirectorySucceedsWhereAReadWouldNot)
+{
+	auto directory = open_file(dir(), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(directory.has_value()) << directory.error().message();
+	expect_ring_fsync_to_succeed_on(backend(), alt::io_op::sync_data, (*directory)->native());
+}
+
+namespace
+{
+	/// A pipe whose descriptors close with it. A pipe cannot be synchronized, which a read of it does not care about.
+	struct pipe_pair
+	{
+		std::array<int, 2> fds{-1, -1};
+
+		pipe_pair()
+		{
+			if(::pipe(fds.data()) != 0)
+			{
+				fds = {-1, -1};
+			}
+		}
+
+		pipe_pair(const pipe_pair&)            = delete;
+		pipe_pair& operator=(const pipe_pair&) = delete;
+
+		~pipe_pair()
+		{
+			for(const int fd: fds)
+			{
+				if(fd >= 0)
+				{
+					::close(fd);
+				}
+			}
+		}
+	};
+} // namespace
+
+TEST_F(IoUringBackendTest, BothFsyncFormsOnAPipeReportInvalidArgumentWhereAZeroCountReadWouldSucceed)
+{
+	// Closes the gap the directory pair leaves: a zero-length read on a directory succeeds through
+	// the ring just as an fsync does, but fsync on a pipe is refused with EINVAL while a zero-length
+	// read of one completes with zero bytes. A read prepared in an fsync's place fails this.
+	const pipe_pair channel;
+	ASSERT_GE(channel.fds[0], 0) << "pipe() failed";
+
+	for(const auto op: {alt::io_op::sync_full, alt::io_op::sync_data})
+	{
+		const auto done = run(sync_request(op, static_cast<alt::native_handle>(channel.fds[0])));
+		EXPECT_EQ(done.error, std::errc::invalid_argument) << done.error.message();
+		EXPECT_EQ(done.bytes, 0U);
+	}
+}
+
 TEST_F(IoUringBackendTest, AnOperationOnAClosedDescriptorReportsBadFileDescriptor)
 {
 	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
