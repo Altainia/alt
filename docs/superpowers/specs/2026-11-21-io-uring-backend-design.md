@@ -389,7 +389,19 @@ from `wait_cqe` immediately, rather than polling with a timeout.
   Releasing first is safe, and the lock was recruited for a job it was never needed for. If
   the operation completes between the release and the submission, the cancel names a
   `user_data` the kernel no longer knows and completes with `-ENOENT` or `-EALREADY`, which
-  this backend already ignores. A stale cancel is a harmless no-op — which is precisely what
+  this backend already ignores.
+
+  **What makes that harmless is that `user_data` is monotonic and never recycled** — ids come
+  from an ever-increasing counter, so a stale cancel can never name a *different*, live
+  operation. Without that, "the kernel no longer knows that `user_data`" would be an
+  assumption about id reuse rather than a fact. This matters more than it first appears: a
+  *refused* cancel submission leaves its own SQE published-but-unconsumed, and some later
+  submission may flush it at an arbitrary time.
+
+  Two further points for whoever implements this. The "still pending" predicate must be
+  `callback_is_owed`, **not** mere presence in the registry: a quarantined record is present
+  and owes nothing, so a bare lookup would submit a pointless cancel for it. And a cancel that
+  cannot get an SQE simply does nothing, which "cancel is a hint" permits. A stale cancel is a harmless no-op — which is precisely what
   "cancel is a hint" already permits. The lookup under the lock establishes that the operation
   *was* pending; nothing more is required of it.
 - The original operation still completes, and that completion is what resumes the awaiting
