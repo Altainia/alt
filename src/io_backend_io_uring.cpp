@@ -208,8 +208,8 @@ namespace alt::detail
 		 * hold completions in a backlog. So it is sized from max_in_flight instead, plus the
 		 * reserved internal completions -- the wake-up NOP, and one cancel for each operation that
 		 * can be in flight at once -- and never below the submission ring, which the kernel
-		 * requires. Completion-queue overflow is then unreachable by construction rather than by
-		 * assumption, whatever depth the caller passes.
+		 * requires. Completion-queue overflow is then unreachable for any depth the caller passes,
+		 * subject to the single assumption named below.
 		 *
 		 * **"One cancel for each operation" is an ASSUMPTION about the caller, and the only one this
 		 * arithmetic makes.** The seam's cancel() is a hint with no once-only rule written into it,

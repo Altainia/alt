@@ -191,6 +191,14 @@ namespace alt::detail
 	 * if nothing was offered -- a case neither caller can present, because both read the count
 	 * after io_uring_get_sqe() has handed back an entry and while the submission mutex is held.
 	 *
+	 * **This rests on the ring NOT being IORING_SETUP_SQPOLL**, which create_ring() does not set.
+	 * Without it the kernel's head advances only inside an io_uring_enter this backend makes with
+	 * the submission mutex held, so the offered count cannot go stale between the two reads. A
+	 * polling thread would advance that head asynchronously, letting io_uring_sq_ready() exceed
+	 * what the submission went on to offer and turning this equality into a FALSE NEGATIVE -- which
+	 * quarantines a record whose completion will still arrive, on the ordinary path rather than an
+	 * unreachable one. Anyone adding SQPOLL owes this predicate a different question.
+	 *
 	 * A pure function of its argument, exported for the reason io_uring_probe_has_required_opcodes()
 	 * is: a short submit needs a kernel allocation failure and cannot be produced from a test, so
 	 * the decision is asserted here rather than through a submission that cannot be made to fail.
