@@ -25,7 +25,7 @@ Phase 7c is merged and phase 7b is the only phase of 7 left. The seam was built 
 `io_backend_kind::io_uring` already exists in the public enum and currently resolves to
 `std::errc::not_supported`, `file_io_options::queue_depth` is already public and
 documented as "the submission ring size for a backend that has one" with **no code
-reading it**, and the comment on `probe()` in `src/file_io.cpp` says in as many words that
+reading it**, and the comment on `probe()` in `src/file_io.cpp` (now `detail::probe_backend`) says in as many words that
 "a later backend adds its branch ahead of the fallback in the same way". This phase is
 the one that makes those three things true.
 
@@ -171,7 +171,7 @@ immediately why there is none.
 |------|----------|
 | `src/io_backend_io_uring.hpp` | Factory and test accessors, entire contents guarded by `#ifdef __linux__`, exactly as `io_backend_iocp.hpp` guards on `_WIN32`. Declares nothing elsewhere. |
 | `src/io_backend_io_uring.cpp` | The backend. The only translation unit that includes `<liburing.h>`. The test file reaches `<liburing/io_uring.h>`, the kernel ABI header alone, to synthesize an `io_uring_probe`; see Testing. |
-| `src/file_io.cpp` | A Linux `automatic` branch and the `io_uring` case in `probe()`; `probe()` gains the queue depth. |
+| `src/file_io.cpp` | A Linux `automatic` branch and the `io_uring` case in `detail::probe_backend` (formerly `probe()`), which takes the queue depth through the options. |
 | `tests/test_io_backend_io_uring.cpp` | The backend's own tests, registered in `tests/CMakeLists.txt`. |
 | `CMakeLists.txt`, `cmake/AltConfig.cmake.in`, `packaging/`, `.github/workflows/ci.yml`, `CLAUDE.md`, `README.md` | Dependency wiring and documentation. |
 
@@ -474,17 +474,22 @@ Order: verify quiescence, wake the reaper with the NOP, join it, then
 ```cpp
 #ifdef __linux__
 /** Linux' `automatic`: io_uring, or the thread pool if a ring cannot be created. */
-built_backend automatic_on_linux(thread_pool& workers, std::size_t queue_depth, std::size_t max_in_flight, io_uring_factory make_ring);
+std::expected<std::unique_ptr<io_backend>, std::error_code> automatic_on_linux(thread_pool& workers, std::size_t queue_depth, std::size_t max_in_flight, io_uring_factory make_ring);
 #endif
 ```
 
-and in `probe()`, a Linux branch for `automatic` and a real `io_uring` case. `automatic`
+and in `detail::probe_backend`, a Linux branch for `automatic` and a real `io_uring` case. `automatic`
 falls back to the pool; an explicit `io_uring` request fails with the ring's own error,
 which is precisely how `iocp` behaves today.
 
+The return type is spelled out because `built_backend`, the alias `file_io.cpp` uses for it, is local
+to that file's anonymous namespace and a declaration in `src/io_backend_internal.hpp` cannot name it.
+
 `probe()` was `(thread_pool&, io_backend_kind)`. As built it is `detail::probe_backend(thread_pool&,
-const file_io_options&, io_uring_factory)`: it takes the options whole, so `create()` has no
-pair of adjacent `std::size_t` to transpose, and it lives in `alt::detail` rather than an
+const file_io_options&, io_uring_factory)`: it takes the options whole, so `create()` itself has no
+pair of adjacent `std::size_t` to transpose. That is true of `create()` only: `automatic_on_linux` and
+the `io_uring_factory` typedef still take the adjacent `queue_depth` and `max_in_flight` pair, and
+nothing but their order tells them apart. `probe_backend` lives in `alt::detail` rather than an
 anonymous namespace so a test can inject the factory for an explicit `io_uring` request too.
 No public signature changes.
 

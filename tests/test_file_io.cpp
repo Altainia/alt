@@ -602,6 +602,13 @@ TEST(FileIoTest, CreateSucceedsAndReportsTheAutomaticallySelectedBackend)
 	alt::thread_pool&     pool    = pool_of(created);
 	alt::manual_scheduler home;
 
+#ifdef __linux__
+	if(const auto unavailable = alt_test::io_uring_unavailable_reason())
+	{
+		GTEST_SKIP() << *unavailable;
+	}
+#endif
+
 	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home});
 
 	ASSERT_TRUE(io.has_value());
@@ -692,6 +699,11 @@ TEST(FileIoTest, AutomaticSelectsIoUringOnLinux)
 	alt::thread_pool&     pool    = pool_of(created);
 	alt::manual_scheduler home;
 
+	if(const auto unavailable = alt_test::io_uring_unavailable_reason())
+	{
+		GTEST_SKIP() << *unavailable;
+	}
+
 	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::automatic});
 
 	ASSERT_TRUE(io.has_value()) << io.error().message();
@@ -772,6 +784,56 @@ TEST(FileIoTest, TheProbePassesQueueDepthAndMaxInFlightToTheFactoryInThatOrder)
 }
 #endif
 
+namespace
+{
+	/// The kind ALT_TEST_IO_BACKEND's @p name stands for, or nothing for a name this suite does not define.
+	std::optional<alt::io_backend_kind> backend_named_by_the_run(const std::string& name)
+	{
+		if(name == "thread_pool")
+		{
+			return alt::io_backend_kind::thread_pool;
+		}
+		if(name == "io_uring")
+		{
+			return alt::io_backend_kind::io_uring;
+		}
+		if(name == "iocp")
+		{
+			return alt::io_backend_kind::iocp;
+		}
+		return std::nullopt;
+	}
+} // namespace
+
+/**
+ * The harness half of running the file layer once per backend: the backend a run names through
+ * ALT_TEST_IO_BACKEND is the backend the fixtures' service really has, not merely one the
+ * variable was parsed into. Without it, a name the harness stopped recognizing would leave
+ * every fixture on `automatic` while a ctest entry named after another backend passed.
+ */
+TEST(FileIoTest, TheBackendTheRunNamesIsTheOneTheFixturesGet)
+{
+	const auto requested = alt_test::environment_variable("ALT_TEST_IO_BACKEND");
+	if(!requested.has_value())
+	{
+		GTEST_SKIP() << "ALT_TEST_IO_BACKEND is unset, so the fixtures take whatever `automatic` gives";
+	}
+
+	auto                  created = alt::thread_pool::create(1);
+	alt::thread_pool&     pool    = pool_of(created);
+	alt::manual_scheduler home;
+
+	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, alt_test::file_io_options_under_test());
+
+	ASSERT_TRUE(io.has_value()) << io.error().message();
+	const auto expected = backend_named_by_the_run(*requested);
+	if(!expected.has_value())
+	{
+		FAIL() << "ALT_TEST_IO_BACKEND is \"" << *requested << "\", which this test does not know";
+	}
+	EXPECT_EQ(io->backend(), *expected);
+}
+
 TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 {
 	auto                  created = alt::thread_pool::create(1);
@@ -787,12 +849,9 @@ TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 	ASSERT_TRUE(injected.has_value());
 	EXPECT_EQ(injected->backend(), alt::io_backend_kind::manual);
 
-#ifdef __linux__
-	const auto uring = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
-	ASSERT_TRUE(uring.has_value()) << uring.error().message();
-	EXPECT_EQ(uring->backend(), alt::io_backend_kind::io_uring);
-#else
-	// A kind this build cannot provide is an error, not a silent substitution.
+#ifndef __linux__
+	// A kind this build cannot provide is an error, not a silent substitution. (Linux's io_uring
+	// is checked by AnExplicitIoUringRequestReportsIoUringOnLinux, which can skip on its own.)
 	const auto uring = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
 	ASSERT_FALSE(uring.has_value());
 	EXPECT_EQ(uring.error(), std::errc::not_supported);
@@ -803,6 +862,37 @@ TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 	ASSERT_FALSE(conjured.has_value());
 	EXPECT_EQ(conjured.error(), std::errc::invalid_argument);
 }
+
+#ifdef __linux__
+TEST(FileIoTest, AnExplicitIoUringRequestReportsIoUringOnLinux)
+{
+	auto                  created = alt::thread_pool::create(1);
+	alt::thread_pool&     pool    = pool_of(created);
+	alt::manual_scheduler home;
+
+	if(const auto unavailable = alt_test::io_uring_unavailable_reason())
+	{
+		GTEST_SKIP() << *unavailable;
+	}
+
+	const auto uring = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
+	ASSERT_TRUE(uring.has_value()) << uring.error().message();
+	EXPECT_EQ(uring->backend(), alt::io_backend_kind::io_uring);
+}
+
+TEST(FileIoTest, OnlyAnEnvironmentalRefusalOfARingCountsAsItBeingUnavailable)
+{
+	// These are what lets a test skip where the environment forbids io_uring.
+	EXPECT_TRUE(alt_test::io_uring_refusal_is_environmental(std::make_error_code(std::errc::operation_not_permitted)));
+	EXPECT_TRUE(alt_test::io_uring_refusal_is_environmental(std::make_error_code(std::errc::permission_denied)));
+	EXPECT_TRUE(alt_test::io_uring_refusal_is_environmental(std::make_error_code(std::errc::function_not_supported)));
+	EXPECT_TRUE(alt_test::io_uring_refusal_is_environmental(std::make_error_code(std::errc::not_supported)));
+	// Whereas these are verdicts on the library, and a skip on them would hide a regression.
+	EXPECT_FALSE(alt_test::io_uring_refusal_is_environmental(std::make_error_code(std::errc::invalid_argument)));
+	EXPECT_FALSE(alt_test::io_uring_refusal_is_environmental(std::make_error_code(std::errc::not_enough_memory)));
+	EXPECT_FALSE(alt_test::io_uring_refusal_is_environmental(std::error_code{}));
+}
+#endif
 
 TEST(FileIoTest, CreateWithABackendOverloadRejectsAMismatchingOptionsBackend)
 {

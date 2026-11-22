@@ -187,12 +187,15 @@ include(GoogleTest)
 # legitimate test, so it cannot fire on a slow machine, and it is short enough to
 # report a hang while the build is still being watched.
 #
-# On Windows the file layer has two real backends, so the suite runs over both. The
-# discovered tests name the thread pool explicitly through ALT_TEST_IO_BACKEND (which
-# tests/file_io_test_support.hpp reads), and file_layer_on_iocp below runs every FileIo*
-# and AsyncFile* test once more on IOCP. Elsewhere the variable is unset and the fixtures
-# take `automatic`, which is the thread pool there.
-if(WIN32)
+# The file layer has more than one real backend on Windows (IOCP) and on Linux (io_uring),
+# and `automatic` now resolves to the native one on both. So the discovered tests name the
+# thread pool explicitly through ALT_TEST_IO_BACKEND (which tests/file_io_test_support.hpp
+# reads): left unset they would take `automatic` and the whole file layer would silently move
+# to the native backend, leaving the thread pool, which is also the fallback where no ring or
+# port can be made, covered by nothing. file_layer_on_iocp and file_layer_on_io_uring below
+# run every FileIo* and AsyncFile* test once more on the native backend. On a platform with
+# no native backend the variable is unset and `automatic` is the thread pool anyway.
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(_alt_discovered_test_properties TIMEOUT 60 ENVIRONMENT "ALT_TEST_IO_BACKEND=thread_pool")
 else()
     set(_alt_discovered_test_properties TIMEOUT 60)
@@ -208,6 +211,14 @@ gtest_discover_tests(alt_tests
 if(WIN32)
     add_test(NAME file_layer_on_iocp COMMAND alt_tests "--gtest_filter=FileIo*:AsyncFile*")
     set_tests_properties(file_layer_on_iocp PROPERTIES ENVIRONMENT "ALT_TEST_IO_BACKEND=iocp" TIMEOUT 300)
+endif()
+
+# The same for io_uring on Linux. Where no ring can be made the fixtures' own service
+# creation fails, so this entry goes red there rather than skipping, as
+# IoUringAvailability.TheRunnerProvidesIoUring does.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME file_layer_on_io_uring COMMAND alt_tests "--gtest_filter=FileIo*:AsyncFile*")
+    set_tests_properties(file_layer_on_io_uring PROPERTIES ENVIRONMENT "ALT_TEST_IO_BACKEND=io_uring" TIMEOUT 300)
 endif()
 
 # Compile checks for alt::task's [[nodiscard]] await_resume (issue #61). A diagnostic is

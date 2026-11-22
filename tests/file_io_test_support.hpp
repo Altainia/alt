@@ -8,6 +8,14 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <system_error>
+
+#ifdef __linux__
+#	include <alt/thread_pool.hpp>
+#	include <expected>
+
+#	include "io_backend_io_uring.hpp"
+#endif
 
 namespace alt_test
 {
@@ -45,6 +53,7 @@ namespace alt_test
 	 *
 	 * The file-layer fixtures build their service through this, so one suite runs against
 	 * every built-in backend: `ALT_TEST_IO_BACKEND=iocp` selects io_backend_kind::iocp,
+	 * `ALT_TEST_IO_BACKEND=io_uring` selects io_backend_kind::io_uring,
 	 * `ALT_TEST_IO_BACKEND=thread_pool` selects io_backend_kind::thread_pool, and with the
 	 * variable unset @p base is returned unchanged. Any other value is a mistake in how
 	 * the suite was launched, reported as a test failure, and @p base is returned so the
@@ -63,15 +72,64 @@ namespace alt_test
 		{
 			base.backend = alt::io_backend_kind::iocp;
 		}
+		else if(*requested == "io_uring")
+		{
+			base.backend = alt::io_backend_kind::io_uring;
+		}
 		else if(*requested == "thread_pool")
 		{
 			base.backend = alt::io_backend_kind::thread_pool;
 		}
 		else
 		{
-			ADD_FAILURE() << "ALT_TEST_IO_BACKEND is \"" << *requested << "\"; expected \"iocp\", \"thread_pool\" or unset";
+			ADD_FAILURE() << "ALT_TEST_IO_BACKEND is \"" << *requested << "\"; expected \"iocp\", \"io_uring\", \"thread_pool\" or unset";
 		}
 		return base;
 	}
+
+#ifdef __linux__
+	/**
+	 * Whether @p error says this environment forbids io_uring, as opposed to saying the code
+	 * under test made a wrong decision.
+	 *
+	 * The refusals a container or an old kernel gives are EPERM (`kernel.io_uring_disabled`, or a
+	 * seccomp filter), EACCES (a restricted `io_uring_group`), ENOSYS (no io_uring in the kernel)
+	 * and ENOTSUP (the kernel lacks an opcode the backend needs). Anything else, notably EINVAL
+	 * from a sizing mistake or ENOMEM, is a verdict on this library and is never environmental.
+	 */
+	inline bool io_uring_refusal_is_environmental(const std::error_code& error) noexcept
+	{
+		return error == std::errc::operation_not_permitted || error == std::errc::permission_denied ||
+		       error == std::errc::function_not_supported || error == std::errc::not_supported;
+	}
+
+	/**
+	 * Why this machine cannot run io_uring tests, or nothing when it can.
+	 *
+	 * For a test that is about something other than io_uring's availability and should skip where
+	 * a ring cannot be made. It asks the instrument the code under test uses,
+	 * make_io_uring_backend(), rather than a syscall of its own, so "available" means "the backend
+	 * can be built", and it reports a reason ONLY for an environmental refusal. A ring that fails
+	 * for any other reason yields nothing: the test then runs and fails on its own assertions
+	 * instead of hiding behind a skip. The one test that fails when the answer is "unavailable" is
+	 * IoUringAvailability.TheRunnerProvidesIoUring, so a runner that stops permitting io_uring is
+	 * still a red build.
+	 */
+	inline std::optional<std::string> io_uring_unavailable_reason()
+	{
+		auto pool = alt::thread_pool::create(1);
+		if(!pool.has_value())
+		{
+			return std::nullopt;
+		}
+		const alt::file_io_options defaults;
+		const auto                 made = alt::detail::make_io_uring_backend(*pool, defaults.queue_depth, defaults.max_in_flight);
+		if(made.has_value() || !io_uring_refusal_is_environmental(made.error()))
+		{
+			return std::nullopt;
+		}
+		return "this environment does not permit io_uring: " + made.error().message();
+	}
+#endif
 
 }

@@ -24,8 +24,8 @@ void drive_by_hand(alt::scheduler_ref loop)
 
 Every platform has the thread-pool backend, which `file_io::backend()` reports as
 `io_backend_kind::thread_pool`. Windows also has the [IOCP backend](#the-iocp-backend-windows),
-which reports `io_backend_kind::iocp`. Linux also has an io_uring backend, which
-reports `io_backend_kind::io_uring`.
+which reports `io_backend_kind::iocp`. Linux also has the [io_uring backend](#the-io_uring-backend-linux),
+which reports `io_backend_kind::io_uring`.
 
 ## Interface
 
@@ -300,3 +300,88 @@ Forwarded operations are counted through a small trampoline around the caller's 
 It lowers the count *before* calling the caller's callback, and that is its last access to
 the backend: by then the operation is done with the backend, and `file_io`'s callback may
 end by letting `~file_io` destroy the backend at once.
+
+## The io_uring backend (Linux)
+
+Performs reads, writes and syncs through an io_uring submission ring, so a transfer in
+flight holds no thread at all. It is not public: its factory lives in a header under
+`src/`, and only `file_io::create(thread_pool&, ...)` builds one. `automatic` on Linux
+resolves to it, and falls back to the thread pool if no ring can be made.
+
+**What runs where.**
+
+| Operation | Where it runs |
+|-----------|---------------|
+| `read`, `write` | Submitted as `IORING_OP_READ`/`IORING_OP_WRITE` entries from the calling thread; completed on the backend's reaper thread |
+| `sync_full`, `sync_data` | The same, as `IORING_OP_FSYNC`, with `IORING_FSYNC_DATASYNC` set for the data-only form |
+| everything else | A pool worker: `open`, `stat`, `rename`, `unlink` and `list_directory` have no ring form this backend uses, and `invoke` has no kernel form anywhere |
+
+The pool is borrowed, as for the thread-pool backend; the ring and the reaper thread belong
+to the backend, which starts the thread when it is built and joins it when it is destroyed.
+The reaper runs nothing but completion dispatch.
+
+**Unlike IOCP, it needs nothing special of a descriptor.** io_uring operates on ordinary
+file descriptors, so the internal thread-pool backend is the plain one: no extra open flags,
+no association step. A descriptor from `async_file::adopt()` is as usable here as one this
+service opened.
+
+**Transfers.** Each ring operation gets a heap record holding its copy of the request's
+`io_buffer` (which keeps the bytes alive while the kernel owns them), the callback and the
+token. The record is registered in an in-flight registry, keyed by the token, *before* its
+entry is submitted. When the reaper finds the completion it does the same three steps as the
+IOCP backend, in order: remove the record from the registry, call the callback, free the
+record and its buffer copy. Submission to the ring is serialized by a mutex, because liburing
+does not make a shared ring thread-safe. A short read or write is reported as the short
+count, a read at or past end of file as zero bytes and no error, and a transfer larger than
+its buffer is clamped to the buffer, all as on the thread-pool backend. A refused submission
+reports its error to the caller at once and keeps the record, with its buffer, until the
+kernel's late completion for it arrives, because a write that may still land must not lose
+its storage.
+
+**Ring sizes.** `file_io_options::queue_depth` is the submission ring's size: rounded up to
+a power of two, clamped to what the kernel allows, and derived from `max_in_flight` when it
+is 0. The completion ring is sized separately, from `max_in_flight` plus the backend's own
+reserved entries, so a completion queue cannot overflow by construction for any
+`max_in_flight` up to 32767. Above that the ring is clamped to the kernel's ceiling and an
+overflow becomes possible, but it is still safe: every kernel this backend accepts holds
+overflowing completions in a backlog rather than dropping them, and the reaper drains it.
+
+**What the kernel must have.** Creating a ring is not evidence that the ring can do this
+work: on a 5.1 to 5.5 kernel `io_uring_setup` succeeds and every transfer then fails with
+`EINVAL`. The backend therefore asks the running kernel once, when it is built, whether it
+supports read, write, fsync and async-cancel, all or nothing. A kernel that does not, or
+that will not answer, fails the build of the backend with `std::errc::not_supported`.
+`EPERM` (`kernel.io_uring_disabled`, or a seccomp filter, which is common in containers) and
+`ENOSYS` fail it too. For `automatic` every one of these is the fallback to the thread pool;
+an explicit `io_uring` request reports the error instead.
+
+**Tokens.** A token for a ring operation has bit 63 set; every other token came from the
+internal thread-pool backend, and `cancel` forwards it there. Tokens are ids, never record
+addresses.
+
+**Cancellation.** `cancel` on a ring token looks the token up in the registry and, if it is
+still there, submits an `IORING_OP_ASYNC_CANCEL` entry naming it, after releasing the registry's lock. It is a hint: the read's completion comes either way, and the callback runs
+exactly once, with `operation_canceled` and 0 bytes if the kernel acted on the cancel, or the
+transfer's real result if it finished first. A cancel never makes a buffer safe to free; only
+the callback does, and the record's `io_buffer` copy is held until the callback has returned.
+A token not found has completed, or is completing, and the call does nothing.
+
+### What runs on the reaper thread
+
+Every ring transfer's callback runs on the one reaper thread, so the same caution applies as
+on the IOCP completion thread: the file layer drops an operation's backend reference there,
+and for a cancelled operation or an `async_file` already gone that is often the last one, so
+the operation's teardown, including the `close` of its descriptor, runs on the reaper. **A
+close that blocks, as one on a network filesystem can, delays every other ring completion on
+that `file_io` until it returns.** This is accepted rather than engineered around, for the
+reason it is on IOCP.
+
+### Shutdown
+
+The destructor submits a no-op entry to wake the reaper, which is otherwise blocked waiting
+for a completion, joins it, and only then tears the ring down. Destroying the backend with
+**any** operation still in flight is a precondition violation: a ring operation, or an
+operation forwarded to the pool whose callback has not yet run. `file_io` never does,
+because it waits for every outstanding operation first. It asserts in debug builds and calls
+`std::terminate()` under `NDEBUG`, rather than free a record the kernel may still write
+into. This is unlike the thread-pool backend, which may be destroyed with operations queued.

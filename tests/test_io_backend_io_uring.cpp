@@ -5,6 +5,7 @@
 
 #	include <alt/detail/file_types.hpp>
 #	include <alt/detail/io_handle.hpp>
+#	include <alt/file_io.hpp>
 #	include <alt/io_backend.hpp>
 #	include <alt/io_buffer.hpp>
 #	include <alt/thread_pool.hpp>
@@ -216,7 +217,7 @@ namespace
 		 *
 		 * Deliberately not a skip. A runner that stops permitting io_uring would otherwise leave
 		 * this whole backend unexercised behind a green sweep, which is the one outcome worth
-		 * failing for; see TheRunnerSupportsEveryOpcodeThisBackendNeeds.
+		 * failing for; see IoUringAvailability.TheRunnerProvidesIoUring.
 		 */
 		std::unique_ptr<alt::io_backend> build(std::size_t queue_depth, std::size_t max_in_flight)
 		{
@@ -1368,8 +1369,9 @@ namespace
  * whether the bytes were still owned when it ran -- by then the backend's record is the only
  * thing that can own them. An earlier version of this test asserted view.bytes().size() == 4 on a
  * copy of the buffer and called that the guard; it was vacuous, because io_buffer copies SHARE
- * storage and the copy kept the bytes alive by itself. Mutations H and I in the task report are
- * what this version is held to.
+ * storage and the copy kept the bytes alive by itself. This version fails when the record holds a bare
+ * span instead of an owning io_buffer copy, and when it releases that copy before the callback runs
+ * rather than after.
  *
  * It is what a cancel() that ignored ring tokens would fail. ARingOperationsTokenCarriesTheTag and
  * CancellingAForwardedOperationReachesThePool pin the routing either side of it.
@@ -1619,6 +1621,28 @@ TEST_F(IoUringBackendTest, ConcurrentCancelsAndSubmissionsAreSerialized)
 		worker.join();
 	}
 	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
+}
+
+/**
+ * THE availability canary. It FAILS, and never skips, when this runner cannot create a ring.
+ *
+ * That is its whole job, and it is why it must not be turned into a skip. Every other test that
+ * needs io_uring either fails through IoUringBackendTest::build() or skips through
+ * alt_test::io_uring_unavailable_reason(), and the skipping ones would leave the entire backend
+ * unexercised behind a green sweep on a runner that stopped permitting io_uring (a container
+ * with `kernel.io_uring_disabled`, a seccomp filter). This is the one place that outcome turns
+ * the build red. It asks the question the same way those skips do, through
+ * make_io_uring_backend(), so the two cannot disagree about what "available" means.
+ */
+TEST(IoUringAvailability, TheRunnerProvidesIoUring)
+{
+	auto pool = alt::thread_pool::create(1);
+	ASSERT_TRUE(pool.has_value());
+
+	const alt::file_io_options defaults;
+	const auto                 made = alt::detail::make_io_uring_backend(*pool, defaults.queue_depth, defaults.max_in_flight);
+
+	EXPECT_TRUE(made.has_value()) << "this runner cannot create an io_uring ring, so no io_uring test is running here: " << (made ? std::string{} : made.error().message());
 }
 
 #endif
