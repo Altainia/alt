@@ -57,7 +57,7 @@ namespace alt
     {
         io_backend_kind backend       = io_backend_kind::automatic;
         std::size_t     max_in_flight = 64;
-        std::size_t     queue_depth   = 0;   // unused by the thread-pool backend
+        std::size_t     queue_depth   = 0;   // the io_uring ring size; unused by the thread-pool backend
     };
 
     class file_io
@@ -103,25 +103,28 @@ thread:
   to an empty `scheduler_ref` asserts on whichever I/O thread finishes first, far from
   the mistake), and for `io_backend_kind::manual`, which cannot be selected by value;
 - `std::errc::not_supported` for a kind this build does not provide (`iocp` off Windows,
-  `io_uring` everywhere in this release);
+  `io_uring` off Linux);
 - the operating system's error for an explicit `iocp` on Windows whose completion port or
-  completion thread cannot be created;
+  completion thread cannot be created, and for an explicit `io_uring` on Linux whose ring
+  cannot be (`ENOSYS` without kernel support, `EPERM` where a policy forbids it, or
+  `not_supported` where the kernel lacks an opcode the backend needs);
 - `std::errc::not_enough_memory` if constructing the service throws `std::bad_alloc`.
 
 ### Which backend
 
 `backend()` reports what was chosen; it never reports `automatic`.
 
-| Requested | Windows | Elsewhere |
-|-----------|---------|-----------|
-| `automatic` | `iocp`; `thread_pool` if the port or its thread cannot be created | `thread_pool` |
-| `thread_pool` | `thread_pool` | `thread_pool` |
-| `iocp` | `iocp`, or `create` fails with the reason | `not_supported` |
-| `io_uring` | `not_supported` | `not_supported` |
-| `manual` | `invalid_argument` | `invalid_argument` |
+| Requested | Windows | Linux | Elsewhere |
+|-----------|---------|-------|-----------|
+| `automatic` | `iocp`; `thread_pool` if the port or its thread cannot be created | `io_uring`; `thread_pool` if a ring cannot be created or the kernel lacks an opcode the backend needs | `thread_pool` |
+| `thread_pool` | `thread_pool` | `thread_pool` | `thread_pool` |
+| `iocp` | `iocp`, or `create` fails with the reason | `not_supported` | `not_supported` |
+| `io_uring` | `not_supported` | `io_uring`, or `create` fails with the reason | `not_supported` |
+| `manual` | `invalid_argument` | `invalid_argument` | `invalid_argument` |
 
-A fallback is never silent: a Windows `automatic` service that could not build IOCP
-reports `thread_pool`.
+A fallback is never silent: a Windows `automatic` service that could not build IOCP, or a
+Linux one that could not build a ring, reports `thread_pool`. Containers commonly forbid
+io_uring, so on Linux the fallback is an ordinary operating condition, not an error.
 
 **The IOCP backend** performs an opened file's reads and writes as overlapped I/O,
 completed through a private completion port by the IOCP backend's own completion thread
@@ -175,12 +178,12 @@ This is not a compromise reluctantly accepted. io_uring and IOCP both deliver
 completions *after* a cancel request rather than at it, so a cancel can only ever be a
 hint, and detaching is the only portable truth. What each backend does with the hint:
 
-- **Thread pool** (the one this release ships): a job not yet started finds itself
-  cancelled and returns without doing the I/O. A running job runs to completion and
-  its result is discarded.
-- A submission-queue or completion-port backend would issue its native cancel request as
-  a hint and still consume the completion that follows. The [`io_backend`](io_backend.md)
-  contract is written so those backends need nothing more than the thread-pool one does.
+- **Thread pool**: a job not yet started finds itself cancelled and returns without
+  doing the I/O. A running job runs to completion and its result is discarded.
+- **io_uring and IOCP**: a transfer already submitted is sent its native cancel request as
+  a hint, and the completion that follows is still consumed. The
+  [`io_backend`](io_backend.md) contract is written so those backends need nothing more
+  than the thread-pool one does.
 
 It already matches the contract of the consumer this was designed for: cpwf's README says
 of a cancelled upload handler that work it started on another thread is not stopped. The

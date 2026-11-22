@@ -24,8 +24,8 @@ void drive_by_hand(alt::scheduler_ref loop)
 
 Every platform has the thread-pool backend, which `file_io::backend()` reports as
 `io_backend_kind::thread_pool`. Windows also has the [IOCP backend](#the-iocp-backend-windows),
-which reports `io_backend_kind::iocp`. The enumerator `io_uring` names a backend this
-release does not provide.
+which reports `io_backend_kind::iocp`. Linux also has an io_uring backend, which
+reports `io_backend_kind::io_uring`.
 
 ## Interface
 

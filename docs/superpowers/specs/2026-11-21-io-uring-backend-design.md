@@ -474,7 +474,7 @@ Order: verify quiescence, wake the reaper with the NOP, join it, then
 ```cpp
 #ifdef __linux__
 /** Linux' `automatic`: io_uring, or the thread pool if a ring cannot be created. */
-built_backend automatic_on_linux(thread_pool& workers, std::size_t queue_depth);
+built_backend automatic_on_linux(thread_pool& workers, std::size_t queue_depth, std::size_t max_in_flight, io_uring_factory make_ring);
 #endif
 ```
 
@@ -482,10 +482,11 @@ and in `probe()`, a Linux branch for `automatic` and a real `io_uring` case. `au
 falls back to the pool; an explicit `io_uring` request fails with the ring's own error,
 which is precisely how `iocp` behaves today.
 
-`probe()` currently takes `(thread_pool&, io_backend_kind)` and must also take the queue
-depth and `max_in_flight`, so `create()` passes `options.queue_depth` and
-`options.max_in_flight` through. This is a private function in an anonymous namespace; no
-public signature changes.
+`probe()` was `(thread_pool&, io_backend_kind)`. As built it is `detail::probe_backend(thread_pool&,
+const file_io_options&, io_uring_factory)`: it takes the options whole, so `create()` has no
+pair of adjacent `std::size_t` to transpose, and it lives in `alt::detail` rather than an
+anonymous namespace so a test can inject the factory for an explicit `io_uring` request too.
+No public signature changes.
 
 **The fallback must be testable on a machine that does have io_uring.** `automatic_on_linux`
 therefore takes the factory as a parameter defaulted to the real one, declared in

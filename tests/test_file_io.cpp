@@ -36,6 +36,7 @@
 #include "coroutine_test_support.hpp"
 #include "death_test_support.hpp"
 #include "file_io_test_support.hpp"
+#include "io_backend_internal.hpp"
 
 namespace
 {
@@ -606,6 +607,8 @@ TEST(FileIoTest, CreateSucceedsAndReportsTheAutomaticallySelectedBackend)
 	ASSERT_TRUE(io.has_value());
 #ifdef _WIN32
 	EXPECT_EQ(io->backend(), alt::io_backend_kind::iocp);
+#elif defined(__linux__)
+	EXPECT_EQ(io->backend(), alt::io_backend_kind::io_uring);
 #else
 	EXPECT_EQ(io->backend(), alt::io_backend_kind::thread_pool);
 #endif
@@ -654,6 +657,121 @@ TEST(FileIoTest, AnExplicitIocpRequestIsNotSupported)
 }
 #endif
 
+#ifdef __linux__
+namespace
+{
+
+	/** What the injected ring factories were last called with. */
+	struct factory_call
+	{
+		int         calls         = 0;
+		std::size_t queue_depth   = 0;
+		std::size_t max_in_flight = 0;
+	};
+
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): the factory is a plain function pointer, which can carry no state of its own, so what it was called with has to live here.
+	factory_call last_factory_call;
+
+	/** The error the failing factory reports; one the real factory never produces. */
+	std::error_code injected_ring_error()
+	{
+		return std::make_error_code(std::errc::address_in_use);
+	}
+
+	std::expected<std::unique_ptr<alt::io_backend>, std::error_code> failing_ring_factory(alt::thread_pool& /*pool*/, const std::size_t queue_depth, const std::size_t max_in_flight)
+	{
+		last_factory_call = factory_call{.calls = last_factory_call.calls + 1, .queue_depth = queue_depth, .max_in_flight = max_in_flight};
+		return std::unexpected(injected_ring_error());
+	}
+
+}
+
+TEST(FileIoTest, AutomaticSelectsIoUringOnLinux)
+{
+	auto                  created = alt::thread_pool::create(1);
+	alt::thread_pool&     pool    = pool_of(created);
+	alt::manual_scheduler home;
+
+	const auto io = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::automatic});
+
+	ASSERT_TRUE(io.has_value()) << io.error().message();
+	EXPECT_EQ(io->backend(), alt::io_backend_kind::io_uring);
+}
+
+TEST(FileIoTest, AutomaticFallsBackToTheThreadPoolWhenNoRingCanBeMade)
+{
+	auto              created = alt::thread_pool::create(1);
+	alt::thread_pool& pool    = pool_of(created);
+	last_factory_call         = {};
+
+	auto built = alt::detail::probe_backend(pool, alt::file_io_options{.backend = alt::io_backend_kind::automatic}, &failing_ring_factory);
+
+	ASSERT_TRUE(built.has_value()) << built.error().message();
+	EXPECT_EQ((*built)->kind(), alt::io_backend_kind::thread_pool);
+	EXPECT_EQ(last_factory_call.calls, 1) << "the fallback never consulted the factory, so it proves nothing about falling back";
+}
+
+TEST(FileIoTest, AnExplicitIoUringRequestSurfacesTheFactorysError)
+{
+	auto              created = alt::thread_pool::create(1);
+	alt::thread_pool& pool    = pool_of(created);
+	last_factory_call         = {};
+
+	const auto built = alt::detail::probe_backend(pool, alt::file_io_options{.backend = alt::io_backend_kind::io_uring}, &failing_ring_factory);
+
+	ASSERT_FALSE(built.has_value());
+	EXPECT_EQ(built.error(), injected_ring_error());
+	EXPECT_EQ(last_factory_call.calls, 1);
+}
+
+TEST(FileIoTest, AnExplicitIocpRequestIsNotSupportedAndNeverReachesTheRingFactory)
+{
+	auto              created = alt::thread_pool::create(1);
+	alt::thread_pool& pool    = pool_of(created);
+	last_factory_call         = {};
+
+	const auto built = alt::detail::probe_backend(pool, alt::file_io_options{.backend = alt::io_backend_kind::iocp}, &failing_ring_factory);
+
+	ASSERT_FALSE(built.has_value());
+	EXPECT_EQ(built.error(), std::errc::not_supported);
+	EXPECT_EQ(last_factory_call.calls, 0);
+}
+
+TEST(FileIoTest, AThreadPoolRequestNeverConsultsTheRingFactory)
+{
+	auto              created = alt::thread_pool::create(1);
+	alt::thread_pool& pool    = pool_of(created);
+	last_factory_call         = {};
+
+	const auto built = alt::detail::probe_backend(pool, alt::file_io_options{.backend = alt::io_backend_kind::thread_pool}, &failing_ring_factory);
+
+	ASSERT_TRUE(built.has_value());
+	EXPECT_EQ((*built)->kind(), alt::io_backend_kind::thread_pool);
+	EXPECT_EQ(last_factory_call.calls, 0);
+}
+
+TEST(FileIoTest, TheProbePassesQueueDepthAndMaxInFlightToTheFactoryInThatOrder)
+{
+	auto              created = alt::thread_pool::create(1);
+	alt::thread_pool& pool    = pool_of(created);
+
+	// Two different values, so a transposition shows; a pair of equal ones would hide it.
+	const alt::file_io_options options{.backend = alt::io_backend_kind::io_uring, .max_in_flight = 7, .queue_depth = 4096};
+
+	last_factory_call           = {};
+	const auto explicit_request = alt::detail::probe_backend(pool, options, &failing_ring_factory);
+	EXPECT_FALSE(explicit_request.has_value());
+	EXPECT_EQ(last_factory_call.queue_depth, 4096U);
+	EXPECT_EQ(last_factory_call.max_in_flight, 7U);
+
+	last_factory_call            = {};
+	const auto automatic_request = alt::detail::probe_backend(pool, alt::file_io_options{.backend = alt::io_backend_kind::automatic, .max_in_flight = 7, .queue_depth = 4096}, &failing_ring_factory);
+	EXPECT_TRUE(automatic_request.has_value());
+	EXPECT_EQ(last_factory_call.queue_depth, 4096U);
+	EXPECT_EQ(last_factory_call.max_in_flight, 7U);
+}
+#endif
+
 TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 {
 	auto                  created = alt::thread_pool::create(1);
@@ -669,10 +787,16 @@ TEST(FileIoTest, CreateWithAnExplicitBackendReportsThatBackendsKind)
 	ASSERT_TRUE(injected.has_value());
 	EXPECT_EQ(injected->backend(), alt::io_backend_kind::manual);
 
+#ifdef __linux__
+	const auto uring = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
+	ASSERT_TRUE(uring.has_value()) << uring.error().message();
+	EXPECT_EQ(uring->backend(), alt::io_backend_kind::io_uring);
+#else
 	// A kind this build cannot provide is an error, not a silent substitution.
 	const auto uring = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::io_uring});
 	ASSERT_FALSE(uring.has_value());
 	EXPECT_EQ(uring.error(), std::errc::not_supported);
+#endif
 
 	// manual cannot be conjured from an enumerator.
 	const auto conjured = alt::file_io::create(pool, alt::scheduler_ref{home}, alt::file_io_options{.backend = alt::io_backend_kind::manual});
@@ -1249,9 +1373,9 @@ TEST_F(FileIoRunTest, RunConsumesAnInFlightSlot)
 
 	const auto first = occupy_the_worker(hold, worker, entered);
 	const auto next  = begin(io().run([second] {
-		second->store(true);
-		return 7;
-	}));
+    second->store(true);
+    return 7;
+  }));
 
 	// A second worker is idle, so only the slot bound can be what holds the second job back.
 	std::this_thread::sleep_for(std::chrono::milliseconds{100});
