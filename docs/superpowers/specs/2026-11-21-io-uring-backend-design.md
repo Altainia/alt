@@ -224,7 +224,10 @@ unreachable at any depth. *(Qualified in phase 7b Task 4: a **refused** `io_urin
 consumes nothing and leaves its entry published, so unconsumed entries accumulate at one
 per refusal and could fill the queue after all. The consequence is benign — the next
 `io_uring_get_sqe` returns null, which has published nothing and whose record is safe to
-free — but the claim is "until the first refusal", not "never". See the submission-failure
+free — but the claim is "until the first refusal", not "never". Widened in the final review:
+`io_uring_submit` returns how many SQEs the kernel **consumed**, so a non-negative return of
+*fewer than were offered* leaves an entry published in exactly the same way, and "accepts"
+means "consumed everything offered" throughout this section. See the submission-failure
 bullet below.)* What
 actually bounds outstanding work is the **completion** queue, which defaults to twice the
 submission queue and, when it overflows, makes `io_uring_submit` fail or forces the kernel
@@ -265,7 +268,8 @@ So the design is:
 - **Submission is serialized by a mutex.** liburing's `io_uring_get_sqe` and
   `io_uring_submit` are not safe to call concurrently on a shared ring, and `submit` may be
   called from any thread.
-- A failure from `io_uring_get_sqe` or from `io_uring_submit` is reported as its errno and
+- A failure from `io_uring_get_sqe`, or an `io_uring_submit` that did not take the entry, is
+  reported as an errno and
   never waited on, because `submit` must not block. **The two are otherwise not
   interchangeable, and treating them as one case is a memory-safety defect.** *(Corrected
   during Task 4; the sentence here previously said "a failure from `io_uring_get_sqe` or
@@ -273,10 +277,12 @@ So the design is:
   implementation to free a record on both paths. The error above is mine.)*
   - A null `io_uring_get_sqe` has published nothing. The kernel will never see the
     operation, so its record is freed at once. Unreachable while the submission mutex is
-    held across both calls **and every submission is accepted**, since an accepted one
-    empties the queue before the lock is released — and reachable once a refusal has left
-    an entry unconsumed, which is why this path exists rather than being argued away.
-  - A refused `io_uring_submit` has **already published the entry** — liburing advances the
+    held across both calls **and every submission is consumed**, since a consumed one
+    empties the queue before the lock is released — and reachable once an unconsumed
+    submission has left
+    an entry behind, which is why this path exists rather than being argued away.
+  - An `io_uring_submit` that **did not take the entry** has already published it — liburing
+    advances the
     ring tail with a release store before entering the kernel — so a later submission, the
     destructor's wake-up NOP included, flushes it and the kernel may perform the transfer.
     Its record must therefore be **quarantined**, not freed: kept registered with no
@@ -284,23 +290,40 @@ So the design is:
     late completion arrives, and leaked by the destructor if it has not. Freeing it is a
     kernel write into freed heap, which this project has recorded as invisible to
     AddressSanitizer *and* ThreadSanitizer, so no gate would catch the regression.
-  - Reachability differs too. The refused-submit path is reachable in principle: a kernel
+  - Reachability differs too. The unconsumed-submission path is reachable in principle by
+    either of two routes. A **refusal**: a kernel
     old enough to answer `EBUSY` on completion-queue overflow is one the capability check
     admits, and `max_in_flight` is a caller contract rather than an invariant this backend
     enforces, so a caller that exceeds it reaches overflow at any depth. It is not
     reproducible on the kernel phase 7b was written against, which accepts a submission
-    while the ring is overflown. Both paths are **documented as untested** rather than
+    while the ring is overflown. A **short submit**: `io_submit_sqes` breaks out of its loop
+    where it cannot allocate an `io_kiocb` and returns the count it managed, which with one
+    entry offered is zero. That needs a kernel allocation failure and is not reproducible
+    either. Both paths are **documented as untested** rather than
     given a test that cannot fail, and the quarantine is correctness by argument.
-  - A non-negative `io_uring_submit` means the kernel took everything queued, not that what
+  - **`io_uring_submit`'s return value is a count, not a verdict**, and reading only its sign
+    is a defect: it says how many SQEs the kernel consumed, which may be fewer than were
+    offered. The decision is therefore the count against `io_uring_sq_ready` read
+    immediately before the submit, under the same mutex — equal means consumed, anything
+    else means this entry was not taken, since the kernel submits in ring order and this
+    entry is the last of the offered ones. That comparison lives in the pure, exported
+    `io_uring_submission_was_consumed`, which the suite asserts over every shape of the
+    pair, because no test can produce the condition itself. *(Found by the final review of
+    phase 7b: the code tested only `submitted < 0`, so a zero return was reported as
+    success and handed the caller a token for an operation the kernel never took.)*
+  - A count equal to what was offered means the kernel took everything queued, not that what
     it took was only the entry just added. That is permanently false after the first
-    refused submission, because an unconsumed published entry rides along with every later
+    unconsumed submission, because an entry left published rides along with every later
     submission.
+  - The errno reported is the one `io_uring_submit` returned, or `EAGAIN` where it returned a
+    short count instead of an error: an `std::error_code` built from errno 0 is **falsy** and
+    would send the caller down its success arm holding no token.
 
   An earlier draft claimed a `queue_depth` below `max_in_flight`
   would reach this path and prescribed a test to force it — that was wrong on both counts, since
   an accepted submission empties the queue on every call and the completion queue is now sized
-  independently. (What *can* leave the queue non-empty is a refused submission, which no
-  `queue_depth` choice produces.)
+  independently. (What *can* leave the queue non-empty is a submission the kernel did not
+  take, which no `queue_depth` choice produces.)
 
 ### Capability check
 
@@ -343,8 +366,8 @@ completion is excluded by a second branch beside it (phase 7b Task 6; issue #73)
 
 Neither of the two producers can be reached from the suite, so the tests assert the counter
 is still **zero** rather than that it counted something. A quarantined record's late
-completion needs a refused `io_uring_submit`, which no kernel this project builds on
-produces (issue #72); a genuinely stale completion cannot be produced at all, because a
+completion needs an `io_uring_submit` that does not take its entry, which no kernel this
+project builds on produces by either route (issue #72); a genuinely stale completion cannot be produced at all, because a
 record is registered before its entry reaches the kernel and withdrawn only by its own
 completion, so no completion can arrive for a `user_data` the registry has forgotten. The
 counter's value is therefore in what it refuses to count.

@@ -333,10 +333,11 @@ IOCP backend, in order: remove the record from the registry, call the callback, 
 record and its buffer copy. Submission to the ring is serialized by a mutex, because liburing
 does not make a shared ring thread-safe. A short read or write is reported as the short
 count, a read at or past end of file as zero bytes and no error, and a transfer larger than
-its buffer is clamped to the buffer, all as on the thread-pool backend. A refused submission
-reports its error to the caller at once and keeps the record, with its buffer, until the
-kernel's late completion for it arrives, because a write that may still land must not lose
-its storage.
+its buffer is clamped to the buffer, all as on the thread-pool backend. A submission the kernel
+does not take -- refused, or taken short of what was offered, which `io_uring_submit` reports as a
+count rather than as an error -- reports an error to the caller at once and keeps the record, with
+its buffer, until the kernel's late completion for it arrives, because a write that may still land
+must not lose its storage.
 
 **Ring sizes.** `file_io_options::queue_depth` is the submission ring's size: rounded up to
 a power of two, clamped to what the kernel allows, and derived from `max_in_flight` when it

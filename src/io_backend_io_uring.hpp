@@ -47,8 +47,10 @@ namespace alt::detail
 	 *
 	 * @p queue_depth is the submission ring size, or 0 to derive it from @p max_in_flight; it is
 	 * rounded up to a power of two and clamped to what the kernel allows. The completion ring is
-	 * sized separately, from @p max_in_flight plus the reserved internal completions, so
-	 * completion-queue overflow is unreachable by construction whatever depth the caller asks for
+	 * sized separately, from @p max_in_flight plus the reserved internal completions -- the
+	 * wake-up NOP, and **one cancel per in-flight operation, which assumes a caller that does not
+	 * cancel the same token twice** -- so
+	 * completion-queue overflow is unreachable whatever depth the caller asks for
 	 * -- **for @p max_in_flight up to and including 32767.** Above that the bound cannot be met:
 	 * covering it needs `2 * max_in_flight + 1` completion entries and the kernel's ceiling is
 	 * 65536, so the ring is clamped to that ceiling and overflow becomes possible. It is still
@@ -146,6 +148,54 @@ namespace alt::detail
 	 * fdatasync and zero for everything else. A pure function, exported for the reason above.
 	 */
 	[[nodiscard]] unsigned io_uring_fsync_flags_of(io_uring_operation operation) noexcept;
+
+	/**
+	 * What one io_uring_submit() call offered the kernel, and what the kernel took.
+	 *
+	 * The pair is carried as a struct rather than as two adjacent integers because an `int` and an
+	 * `unsigned` convert to one another implicitly: a call site that transposed them would get no
+	 * diagnostic from the compiler, and none from clang-tidy either. derive_ring_sizes()'s
+	 * ring_bounds in the implementation is the same device against the same hazard.
+	 */
+	struct io_uring_submit_counts
+	{
+		/// What io_uring_submit() returned: how many SQEs the kernel took, or a negated errno.
+		int submitted = 0;
+		/// What io_uring_sq_ready() reported immediately before that call: the SQEs offered to it.
+		unsigned offered = 0;
+	};
+
+	/**
+	 * Whether the entry at the tail of @p counts.offered reached the kernel.
+	 *
+	 * **io_uring_submit() returns how many SQEs the kernel CONSUMED, not whether it succeeded.**
+	 * io_uring_enter submits in ring order and breaks out of its loop where it cannot allocate an
+	 * io_kiocb, returning the count it managed -- which with one entry offered is zero, and with
+	 * several offered is any number below the count. liburing says so in its own header, in the
+	 * comment on io_uring_sq_ready: "always use real head, to avoid losing sync for short submit".
+	 *
+	 * So a non-negative return is NOT a successful submission, and a check that reads only the
+	 * sign hands the caller a token for an operation the kernel never took: it never completes,
+	 * the caller's in-flight permit is never released, and the backend's destructor then stops the
+	 * process over a caller that did nothing wrong.
+	 *
+	 * The entry this backend has just prepared is the LAST of the offered ones -- io_uring_get_sqe()
+	 * takes from the tail -- and the kernel consumes from the head in order, so that entry was
+	 * taken if and only if every offered entry was. That is the whole of this predicate: a count
+	 * equal to what was offered. A genuine short submit (`0 < submitted < offered`), which an entry
+	 * left published by an earlier unconsumed submission makes reachable, therefore answers false
+	 * exactly as a zero does.
+	 *
+	 * A negated errno is negative and answers false; there is no offered count it could equal. An
+	 * @p offered of zero also answers false, since an entry cannot have been among what was taken
+	 * if nothing was offered -- a case neither caller can present, because both read the count
+	 * after io_uring_get_sqe() has handed back an entry and while the submission mutex is held.
+	 *
+	 * A pure function of its argument, exported for the reason io_uring_probe_has_required_opcodes()
+	 * is: a short submit needs a kernel allocation failure and cannot be produced from a test, so
+	 * the decision is asserted here rather than through a submission that cannot be made to fail.
+	 */
+	[[nodiscard]] bool io_uring_submission_was_consumed(const io_uring_submit_counts& counts) noexcept;
 } // namespace alt::detail
 
 #endif

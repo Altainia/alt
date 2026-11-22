@@ -68,6 +68,15 @@ namespace alt::detail
 		return operation == io_uring_operation::fdatasync ? IORING_FSYNC_DATASYNC : 0U;
 	}
 
+	bool io_uring_submission_was_consumed(const io_uring_submit_counts& counts) noexcept
+	{
+		// `> 0` rather than `>= 0` is what carries the negated-errno case as well: no offered count
+		// a negative return could equal, so the comparison below never has to see one. The equality
+		// is the real content -- the caller's entry is the last of the offered ones, so it was taken
+		// only if all of them were. See the declaration for why a lesser count is not success.
+		return counts.submitted > 0 && static_cast<unsigned>(counts.submitted) == counts.offered;
+	}
+
 	namespace
 	{
 		/**
@@ -179,16 +188,20 @@ namespace alt::detail
 		 * The submission ring is what queue_depth names, or max_in_flight when queue_depth is
 		 * zero. Without SQPOLL the kernel consumes submission entries synchronously inside
 		 * io_uring_submit, and a submission here holds the submission mutex across both acquiring
-		 * the entry and submitting it, so **a submission the kernel accepts** leaves the queue
+		 * the entry and submitting it, so **a submission the kernel CONSUMES** leaves the queue
 		 * empty again before the lock is released: a full submission queue is all but unreachable
 		 * at any depth, which is what makes the depth the caller's to choose freely.
 		 *
-		 * "Accepts" is the load-bearing word, and it is not decoration. A REFUSED io_uring_submit
-		 * consumes nothing and leaves its entry published in the ring, so unconsumed entries
-		 * accumulate at one per refusal and enough of them would fill the queue after all. That
+		 * "Consumes" is the load-bearing word, and it is not decoration. io_uring_submit returns a
+		 * COUNT of the SQEs the kernel took, which may be an error, a zero, or fewer than were
+		 * offered; any of the three leaves this submission's entry published in the ring, so
+		 * unconsumed entries
+		 * accumulate at one per such call and enough of them would fill the queue after all. That
 		 * does not weaken the depth argument much -- the queue then hands back a null SQE, which
 		 * publishes nothing and whose record is safe to free, and submit() reports EAGAIN -- but
-		 * the claim is "until the first refusal", not "never". submit_to_ring() carries the rest.
+		 * the claim is "until the first unconsumed submission", not "never". submit_to_ring()
+		 * carries the rest, and io_uring_submission_was_consumed() is where the three are made one
+		 * case.
 		 *
 		 * What actually bounds outstanding work is the completion ring, which defaults to twice
 		 * the submission ring and, on overflow, makes io_uring_submit fail or forces the kernel to
@@ -197,6 +210,19 @@ namespace alt::detail
 		 * can be in flight at once -- and never below the submission ring, which the kernel
 		 * requires. Completion-queue overflow is then unreachable by construction rather than by
 		 * assumption, whatever depth the caller passes.
+		 *
+		 * **"One cancel for each operation" is an ASSUMPTION about the caller, and the only one this
+		 * arithmetic makes.** The seam's cancel() is a hint with no once-only rule written into it,
+		 * and each call on a still-pending token submits another IORING_OP_ASYNC_CANCEL with a
+		 * completion of its own, so a caller that cancels the same operation twice spends a
+		 * reserved entry this sizing did not reserve. The library's only caller cannot:
+		 * src/io_operation.cpp's stop_handler returns without cancelling unless the state is
+		 * phase::waiting, sets phase::detached before it submits, and is driven by a
+		 * std::stop_callback, which fires once. So the bound holds for this library -- but it holds
+		 * BECAUSE of that caller and not by construction, which is why it is stated here rather
+		 * than left for a future caller to discover. Breaking it costs what exceeding the 32767
+		 * bound below costs and nothing worse: overflow becomes possible, and the NODROP backlog
+		 * and the reaper's drain keep it safe.
 		 *
 		 * **That holds for max_in_flight up to and including 32767, and not above it.** Covering
 		 * max_in_flight needs `2 * max_in_flight + 1` completion entries, and the kernel's ceiling
@@ -225,10 +251,14 @@ namespace alt::detail
 		 * kernels refuse it with EBUSY, while a current one accepts it and appends its completion to
 		 * the backlog (measured on 7.0). No completion is lost either way, which is all this sizing
 		 * argument needs -- but the EBUSY arm is NOT inconsequential, and must not be read as such:
-		 * it is the one reachable producer of a refused io_uring_submit(), and therefore of
-		 * submit_to_ring()'s published-entry path and the quarantine that path exists for. A caller
+		 * it is the one reachable producer of a NEGATIVE io_uring_submit(), and therefore one of the
+		 * two routes to submit_to_ring()'s published-entry path and the quarantine that path exists
+		 * for. A caller
 		 * that exceeds the max_in_flight it declared reaches overflow at any depth, since that bound
-		 * is a contract and not something this backend enforces.
+		 * is a contract and not something this backend enforces. The other route is a short submit,
+		 * which needs no overflow at all: a kernel that cannot allocate an io_kiocb takes fewer SQEs
+		 * than it was offered and reports the count, not an error. See
+		 * io_uring_submission_was_consumed().
 		 *
 		 * Both counts are clamped to the kernel's ceilings here, which is what turns an
 		 * out-of-range request into a working ring instead of the EINVAL io_uring_setup answers it
@@ -277,8 +307,9 @@ namespace alt::detail
 			/**
 			 * Whether the caller is still owed this record's callback.
 			 *
-			 * False for a QUARANTINED record: one whose io_uring_submit() was refused after liburing
-			 * had already published its submission entry to the kernel. The caller has been handed an
+			 * False for a QUARANTINED record: one whose io_uring_submit() did not take its entry --
+			 * refused, or short of what it was offered -- after liburing had already published that
+			 * entry to the kernel. The caller has been handed an
 			 * error, so its callback must never run -- the seam says a submission that returns an
 			 * error has not run one and never will -- but the published entry may still be flushed by
 			 * a later submission, and the kernel would then write into the storage this record's
@@ -305,11 +336,12 @@ namespace alt::detail
 		};
 
 		/**
-		 * What a refused submission did before it failed, which is what decides the record's fate.
+		 * What a failed submission did before it failed, which is what decides the record's fate.
 		 *
 		 * The two ways submit_to_ring() can fail are NOT interchangeable, and merging them into one
 		 * std::error_code is what made an earlier version of this file unsafe. A null SQE publishes
-		 * nothing, so its record can be freed. A refused io_uring_submit() has already had the ring
+		 * nothing, so its record can be freed. An io_uring_submit() that did not take the entry --
+		 * refused, or short of what it was offered -- has already had the ring
 		 * tail published with a release store, so its entry may still reach the kernel and its record
 		 * must not be freed. Only the caller of submit_to_ring() can act on that difference, so it is
 		 * carried out rather than reasoned about again at the call site.
@@ -423,14 +455,23 @@ namespace alt::detail
 					// Without the wake-up the join below never returns: the reaper is blocked in
 					// io_uring_wait_cqe, which has no timeout. The check above establishes that no
 					// CALLER'S operation is left, which is not the same as no completion being left:
-					// this submission may flush an entry left published by a refused submit -- a
+					// this submission may flush an entry an earlier submission did not take -- a
 					// quarantined operation's, or a cancel's -- and the reaper may see that completion
 					// before or after the NOP's. Either order is fine: a quarantined completion runs no
 					// callback and frees its record, a cancel's is discarded, and the NOP returns the
 					// reaper whenever it arrives. So what the wake-up guarantees is that the reaper
 					// stops, not that it stops with nothing else to see.
+					//
+					// The terminate below hinges on post_wake_up()'s answer, so that answer has to
+					// be about the NOP and not about the call. It is: post_wake_up() compares the
+					// count the kernel took against the count it was offered, so an entry an earlier
+					// submission left published cannot satisfy it on the NOP's behalf. Reading only
+					// the sign would have made this a HANG rather than a terminate -- the destructor
+					// would conclude the reaper was woken and join a thread still blocked in
+					// io_uring_wait_cqe.
 					if(!post_wake_up())
 					{
+						assert(false && "the io_uring backend's wake-up NOP was not taken, so the reaper cannot be joined");
 						std::terminate();
 					}
 					m_thread.join();
@@ -447,7 +488,7 @@ namespace alt::detail
 				// ones that did not.
 				//
 				// They are RELEASED rather than freed: a deliberate, bounded leak of one record and its
-				// buffer per refused submission. Freeing them is the use-after-free the quarantine
+				// buffer per unconsumed submission. Freeing them is the use-after-free the quarantine
 				// exists to prevent, since the kernel may still write into that storage, and waiting
 				// for them is not on offer either -- a quarantined read on a pipe nothing writes to
 				// never completes, so the wait would be unbounded and this destructor would hang
@@ -568,7 +609,7 @@ namespace alt::detail
 			 * asserts, and every token submit_transfer() issues does.
 			 *
 			 * **The registry lock is released before the entry is submitted, and that order is not
-			 * negotiable.** submit_to_ring()'s refusal path takes the registry lock while HOLDING the
+			 * negotiable.** submit_to_ring()'s quarantine path takes the registry lock while HOLDING the
 			 * submission mutex, so this backend's one lock order is submission then registry.
 			 * Submitting from inside the registry lock would be the reverse, and the two together
 			 * deadlock: one thread holding submission and waiting for registry, one holding registry
@@ -745,12 +786,13 @@ namespace alt::detail
 			 *
 			 * **Correctness by argument, not by test, and measured as such.** Weakening this to mere
 			 * presence passes the whole suite, and so does deleting the call site: telling the two
-			 * apart needs a quarantined record, which needs a refused io_uring_submit() that no kernel
-			 * this project builds on produces (issue #72), and a cancel submitted for a user_data the
+			 * apart needs a quarantined record, which needs an io_uring_submit() that does not take
+			 * its entry and that no kernel this project builds on produces, by either route (issue
+			 * #72), and a cancel submitted for a user_data the
 			 * kernel does not know is discarded by reap() without a trace. What this buys is a
 			 * pointless entry kept off the ring; what it does not buy is a failing test.
 			 */
-			bool callback_is_owed_for(const std::uint64_t user_data) noexcept
+			[[nodiscard]] bool callback_is_owed_for(const std::uint64_t user_data) noexcept
 			{
 				const std::scoped_lock lock(m_registry_mutex);
 				const auto             found = m_records.find(user_data);
@@ -783,13 +825,16 @@ namespace alt::detail
 			{
 				const std::scoped_lock lock(m_registry_mutex);
 				const auto             found = m_records.find(user_data);
-				// The record is still here. NOT because a refused submission produces no completion --
-				// it may well produce one later, which is the reason this function exists -- but
+				// The record is still here. NOT because an unconsumed submission produces no completion
+				// -- it may well produce one later, which is the reason this function exists -- but
 				// because it cannot have produced one YET. Two facts, and both are needed: an entry
 				// reaches the kernel only through an io_uring_submit() under the submission mutex this
-				// call holds, and the one call that could have taken this entry consumed NOTHING,
-				// because io_uring_submit reports an error only when it submitted zero SQEs (see
-				// submit_to_ring()). So no completion for it exists at this instant, nothing can have
+				// call holds, and the one call that could have taken this entry DID NOT take it, which
+				// is precisely what io_uring_submission_was_consumed() answered false to (see
+				// submit_to_ring()). Note what is not claimed: that the call consumed nothing. It may
+				// have taken entries ahead of this one -- a short submit -- and that is immaterial,
+				// because the kernel submits in ring order and this entry is the last of them. So no
+				// completion for it exists at this instant, nothing can have
 				// withdrawn it, and the window closes before the mutex is released.
 				assert(found != m_records.end() && "a record was quarantined after it was withdrawn");
 				if(found != m_records.end())
@@ -804,11 +849,11 @@ namespace alt::detail
 			 * Holds the submission mutex across both liburing calls, as post_wake_up() does and for the
 			 * same reason: io_uring_get_sqe() and io_uring_submit() are not safe to call concurrently on
 			 * a shared ring, and submit() may be called from any thread. Holding it across both is also
-			 * what lets a submission the kernel ACCEPTS leave the queue empty again before the lock is
+			 * what lets a submission the kernel CONSUMES leave the queue empty again before the lock is
 			 * released, which is why a ring of any depth can carry far more outstanding operations than
-			 * it has entries. A refused submission is the exception, and the whole subject of the rest
-			 * of this comment: it consumes nothing and its entry stays published, so the queue does not
-			 * drain and this function must not be read as guaranteeing that it does.
+			 * it has entries. An unconsumed submission is the exception, and the whole subject of the
+			 * rest of this comment: its entry stays published, so the queue does not drain and this
+			 * function must not be read as guaranteeing that it does.
 			 *
 			 * It never waits. submit() must not block, so neither failure is retried or waited out.
 			 * **THE TWO FAILURES ARE NOT THE SAME, and the difference is memory safety rather than
@@ -818,26 +863,38 @@ namespace alt::detail
 			 * published, the kernel will never see this operation, and its record can be freed at
 			 * once. Reported as EAGAIN.
 			 *
-			 * A refused io_uring_submit() is reported as the errno it returned, and the entry is
-			 * ALREADY PUBLISHED: liburing advances the ring tail with a release store before it enters
-			 * the kernel, so the entry stays in the ring and the next submission -- any later
-			 * operation's, any cancel's, or the destructor's own wake-up NOP -- flushes it. The kernel
-			 * may then perform this operation. For a read or write, freeing the record here would hand it a
+			 * **A submission the kernel did not TAKE is the second failure, and io_uring_submit()'s
+			 * return value is a count and not a verdict.** It reports how many SQEs the kernel
+			 * consumed, which may be fewer than were offered -- zero with one entry offered -- so the
+			 * decision is io_uring_submission_was_consumed() over that count and the count
+			 * io_uring_sq_ready() reported just before the call, never the sign alone. Its declaration
+			 * carries the kernel and liburing evidence; what matters here is that a refused submit, a
+			 * zero and a short count are ONE case to this function, because in all three the entry
+			 * this call prepared was not taken.
+			 *
+			 * In that case the entry is ALREADY PUBLISHED: liburing advances the ring tail with a
+			 * release store before it enters the kernel, so the entry stays in the ring and the next
+			 * submission -- any later operation's, any cancel's, or the destructor's own wake-up NOP --
+			 * flushes it. The kernel may then perform this operation. For a read or write, freeing the
+			 * record here would hand it a
 			 * buffer that is gone to write into: a kernel write into freed heap, which this project
 			 * has already recorded as invisible to AddressSanitizer AND ThreadSanitizer, so no gate
 			 * would ever catch it. An fsync's record holds no buffer, so freeing that one would be
 			 * harmless; it is quarantined all the same, because nothing on this path asks which
 			 * operation it is and a second rule for one kind would be a second path to get wrong.
 			 *
-			 * **A refused io_uring_submit() consumed NO entry, this one included**, and every
-			 * interleaving argument below rests on that. io_uring_enter reports an error only when it
-			 * submitted zero SQEs -- a call that submitted some and then failed returns the count, not
-			 * the error -- and the EBUSY that makes this path reachable at all is raised before any
-			 * submission is attempted. So at the moment of the refusal the entry is published and
-			 * untouched by the kernel: no completion for it can exist, and none can until some later
-			 * submission flushes it. (Do not read that back into the success path, whose own caveat is
-			 * two paragraphs down: a non-negative return says the kernel took everything queued, not
-			 * what was queued.)
+			 * It is reported as the errno io_uring_submit() returned, or as EAGAIN where it returned a
+			 * count instead of an error: errno_error(0) is a falsy error_code and would send the
+			 * caller down its success arm with no token at all.
+			 *
+			 * **An unconsumed submission did NOT take this entry**, and every interleaving argument
+			 * below rests on that -- on exactly that, and not on the stronger claim that the call
+			 * consumed nothing. io_uring_enter submits in ring order, and this entry is the last of
+			 * the offered ones because io_uring_get_sqe() takes from the tail, so a count short of
+			 * what was offered leaves this entry where it was however many entries ahead of it the
+			 * kernel took. So at the moment of the failure the entry is published and untouched by
+			 * the kernel: no completion for it can exist, and none can until some later submission
+			 * flushes it.
 			 *
 			 * So this function QUARANTINES the record itself, before it returns and while it still
 			 * holds the submission mutex, rather than leaving that to its caller. The flush that makes
@@ -849,24 +906,30 @@ namespace alt::detail
 			 *
 			 * **Neither failure is tested, and the reason differs.** A null SQE is unreachable while
 			 * this lock is held across both calls AND every submission is consumed -- which is true
-			 * until the first refused submit and false afterwards, since a refused submit leaves its
-			 * entry unconsumed, and enough of them would fill the submission queue. That costs nothing:
+			 * until the first unconsumed submit and false afterwards, since such a submit leaves its
+			 * entry behind, and enough of them would fill the submission queue. That costs nothing:
 			 * a null SQE published nothing whatever came before it, so its record is still safe to
-			 * free. A
-			 * refused submit is reachable in principle -- a kernel old enough to answer EBUSY on
+			 * free. An unconsumed submit is reachable in principle, by either of its two routes -- a
+			 * kernel old enough to answer EBUSY on
 			 * completion-queue overflow, which the capability check admits, reached by a caller that
 			 * exceeds the max_in_flight it declared, since that is a contract and not an invariant this
-			 * backend enforces -- but it cannot be produced on the kernel this was written against,
+			 * backend enforces; or a kernel that cannot allocate an io_kiocb and takes fewer SQEs than
+			 * it was offered -- but neither can be produced on the kernel this was written against,
 			 * which accepts a submission while the ring is overflown instead of refusing it (measured;
-			 * see derive_ring_sizes()). So the quarantine is correctness by argument, not by test, and
-			 * the argument is the only safety net there is. What that leaves open -- no test, and the
-			 * destructor's leak below -- is issue #72.
+			 * see derive_ring_sizes()) and whose allocation failure a test cannot arrange. So the
+			 * quarantine is correctness by argument, not by test, and the argument is the only safety
+			 * net there is. What that leaves open -- no test of this path, and the destructor's leak
+			 * below -- is issue #72. The one piece that IS tested is the decision itself:
+			 * io_uring_submission_was_consumed() is a pure function and the suite asserts it over
+			 * every shape of (submitted, offered), which is why the sign-only reading this comment
+			 * used to defend cannot come back unnoticed.
 			 *
-			 * One thing a reader should not infer from the success path: a non-negative
-			 * io_uring_submit() means the kernel took everything queued, but NOT that what it took was
-			 * only this entry. That was true until the first refused submission, and is permanently
-			 * false afterwards, because an unconsumed published entry rides along with every later
-			 * submission. Nothing here depends on the count, which is why only the sign is read.
+			 * One thing a reader should not infer from the success path: a count equal to what was
+			 * offered means the kernel took everything queued, but NOT that what it took was only this
+			 * entry. That was true until the first unconsumed submission, and is permanently false
+			 * afterwards, because an entry left published rides along with every later submission.
+			 * Nothing here depends on which of them the kernel took, only on its having taken all of
+			 * them, which is what makes the equality the right question.
 			 */
 			submission_outcome submit_to_ring(const transfer_submission& submission) noexcept
 			{
@@ -892,15 +955,28 @@ namespace alt::detail
 				// Assigned directly rather than through io_uring_sqe_set_data64(), for the reason
 				// post_wake_up() gives: the 2.1 floor does not promise that helper. io_uring_prep_read,
 				// io_uring_prep_write, io_uring_prep_fsync and io_uring_prep_nop are all older than it.
-				sqe->user_data      = submission.user_data;
-				const int submitted = io_uring_submit(&m_ring);
-				if(submitted < 0)
+				sqe->user_data = submission.user_data;
+				// Read after the entry is at the tail and with the submission mutex still held, so it
+				// counts this entry and nothing can be queued between this call and the submit below.
+				// io_uring_sq_ready() is exactly the count liburing will hand io_uring_enter as its
+				// to_submit: sqe_tail minus the kernel's real head.
+				const unsigned offered   = io_uring_sq_ready(&m_ring);
+				const int      submitted = io_uring_submit(&m_ring);
+				if(!io_uring_submission_was_consumed(io_uring_submit_counts{.submitted = submitted, .offered = offered}))
 				{
 					// Still holding m_submission_mutex, and that is the point: the flag has to be
 					// installed before any other thread can submit, because any other thread's
 					// submission flushes this entry too. See quarantine().
 					quarantine(submission.user_data);
-					return submission_outcome{.error = errno_error(-submitted), .entry_published = true};
+					// A refused submit reports the errno it returned. A submit that merely did not
+					// take this entry -- a zero, or a short count -- returned no errno at all, and
+					// errno_error(0) is a FALSY std::error_code, which would send the caller down its
+					// success arm holding no token. EAGAIN stands in: nothing about the condition is
+					// permanent and the operation was not performed, which is what the null-SQE arm
+					// above already reports EAGAIN for. (EBUSY would read as "the ring is busy", which
+					// names a cause this code cannot distinguish from a kernel allocation failure.)
+					const std::error_code error = submitted < 0 ? errno_error(-submitted) : errno_error(EAGAIN);
+					return submission_outcome{.error = error, .entry_published = true};
 				}
 				return {};
 			}
@@ -975,7 +1051,12 @@ namespace alt::detail
 			 * (This comment used to say the reaper takes no lock of this backend's at all. The reaper
 			 * takes the registry mutex through withdraw(), and has since records existed.)
 			 *
-			 * @return Whether the NOP reached the ring. False means the reaper will not wake.
+			 * @return Whether the kernel TOOK the NOP. False means the reaper will not wake, and the
+			 *         destructor stops the process rather than hang in join(). The count is compared
+			 *         against what was offered rather than merely tested for a positive value: a
+			 *         published entry left behind by an earlier unconsumed submission rides along
+			 *         with this one, so "something was consumed" does not say the NOP was. See
+			 *         io_uring_submission_was_consumed().
 			 */
 			bool post_wake_up() noexcept
 			{
@@ -995,7 +1076,11 @@ namespace alt::detail
 				// on the oldest supported distribution. Every liburing call in this file is one 2.1
 				// is known to have, by care rather than by a check.
 				sqe->user_data = wake_up_user_data;
-				return io_uring_submit(&m_ring) > 0;
+				// Read before the submit, and with the submission mutex held, so that it counts this
+				// NOP along with anything an earlier unconsumed submission left published.
+				const unsigned offered   = io_uring_sq_ready(&m_ring);
+				const int      submitted = io_uring_submit(&m_ring);
+				return io_uring_submission_was_consumed(io_uring_submit_counts{.submitted = submitted, .offered = offered});
 			}
 
 			/**
@@ -1020,8 +1105,9 @@ namespace alt::detail
 			 * liburing from 2.1 onward -- rather than by casting an integer to a pointer and back.
 			 *
 			 * **Failure is silence**, which the seam permits: cancel is a hint and must not block, so
-			 * there is nothing to retry and nobody to report to. A null entry publishes nothing. A
-			 * refused io_uring_submit() leaves its entry published, and some later submission may
+			 * there is nothing to retry and nobody to report to. A null entry publishes nothing. An
+			 * io_uring_submit() that does not take the entry -- refused, zero, or short -- leaves it
+			 * published, and some later submission may
 			 * flush it at an arbitrary time -- which for a cancel is harmless rather than merely
 			 * tolerated: the entry owns no record and no buffer, so there is nothing to quarantine
 			 * and nothing the kernel can write into after the fact, and the user_data it names cannot
@@ -1042,7 +1128,10 @@ namespace alt::detail
 				// Assigned directly rather than through io_uring_sqe_set_data64(), for the reason
 				// post_wake_up() gives at length: the 2.1 floor does not promise that helper.
 				sqe->user_data = cancel_user_data;
-				// The count is not read, and neither is the sign: see above.
+				// Neither the count nor the sign is read, and unlike every other submission here this
+				// one asks io_uring_submission_was_consumed() nothing: see above. An entry this call
+				// leaves published is harmless whenever a later submission flushes it, so there is
+				// nothing for a verdict to decide.
 				static_cast<void>(io_uring_submit(&m_ring));
 			}
 
@@ -1093,7 +1182,7 @@ namespace alt::detail
 					std::unique_ptr<transfer_record> record = withdraw(user_data);
 					if(record && !record->callback_is_owed)
 					{
-						// A quarantined record's completion: its submission was refused, its caller
+						// A quarantined record's completion: the kernel never took its submission, its caller
 						// already has an error, and its callback must never run. All that was owed was
 						// the storage, and this scope's end frees it now that the kernel is done with
 						// it. Counted with the completions below, under the meaning m_ignored carries
@@ -1109,6 +1198,15 @@ namespace alt::detail
 						// never dereferenced. user_data carries the token value rather than a record
 						// pointer precisely so that a stale completion can be looked for and found absent
 						// instead of pointing at a record that is gone.
+						//
+						// **This branch is a MANDATORY null check and not a counter's arrangement.**
+						// withdraw() returns a std::unique_ptr and documents null as a result, and the
+						// statement below this block dereferences it, so deleting the branch is an
+						// unconditional null dereference on every completion. Only the fetch_add is
+						// unexercisable -- m_ignored's own comment says why no test can make it
+						// nonzero -- and that is a fact about the COUNTER, not about the guard. A
+						// reader who concludes from "nothing reaches it" that the `if` can go has
+						// confused the two.
 						m_ignored.fetch_add(1);
 						continue;
 					}
@@ -1139,7 +1237,7 @@ namespace alt::detail
 			 * Serializes the in-flight registry below.
 			 *
 			 * **Lock order: m_submission_mutex then m_registry_mutex, never the reverse.** One place
-			 * nests them -- submit_to_ring()'s refusal path, which quarantines a record while still
+			 * nests them -- submit_to_ring()'s quarantine path, which marks a record while still
 			 * holding the submission mutex, because the flush it is racing needs that same mutex and
 			 * the flag has to be installed before another thread can perform one. Everything else
 			 * takes one at a time: enroll() takes this and releases it before the submission mutex is
@@ -1156,7 +1254,7 @@ namespace alt::detail
 			 * then submits its IORING_OP_ASYNC_CANCEL under the submission mutex -- so it takes one at
 			 * a time like everything else, and holds no lock across a liburing call. The spec and the
 			 * plan both used to describe it as submitting *under the registry lock*, which is the
-			 * opposite nesting and deadlocks against the refusal path above: one thread in
+			 * opposite nesting and deadlocks against the quarantine path above: one thread in
 			 * submit_to_ring() holding submission and waiting for registry, one in cancel() holding
 			 * registry and waiting for submission. Issue #75 records the discovery, made before any
 			 * cancel existed; the spec, the plan, this comment and the code now all agree on the one
@@ -1188,8 +1286,8 @@ namespace alt::detail
 			 *
 			 * Two kinds reach it, and the second arrived with the quarantine: a completion whose
 			 * user_data is in no registry at all -- stale, or never issued here -- and a completion
-			 * whose record WAS found but owes no callback, because its submission was refused and its
-			 * caller already has an error. What they have in common, and what this counter means, is
+			 * whose record WAS found but owes no callback, because the kernel did not take its
+			 * submission and its caller already has an error. What they have in common, and what this counter means, is
 			 * that no caller's callback ran for them.
 			 *
 			 * What it does not include is this backend's own bookkeeping, and both kinds of that are
@@ -1199,8 +1297,9 @@ namespace alt::detail
 			 *
 			 * **Nothing in the suite makes it nonzero**, and that is a property of the counter rather
 			 * than a gap in the tests. Of its two producers, a quarantined record's late completion
-			 * needs a refused io_uring_submit() that cannot be produced on any kernel this builds on
-			 * (issue #72), and a genuinely stale completion cannot be produced at all: a record is
+			 * needs an io_uring_submit() that does not take its entry, which cannot be produced on any
+			 * kernel this builds on by either of its two routes (issue #72), and a genuinely stale
+			 * completion cannot be produced at all: a record is
 			 * registered before its entry reaches the kernel and withdrawn only by the completion
 			 * itself, so no completion can arrive for a user_data this registry has forgotten. The
 			 * tests assert it stays zero, which is what they can assert and what the cancellation arm

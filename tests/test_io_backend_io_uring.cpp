@@ -11,6 +11,7 @@
 #	include <alt/thread_pool.hpp>
 #	include <liburing/io_uring.h>
 #	include <atomic>
+#	include <cerrno>
 #	include <chrono>
 #	include <cstddef>
 #	include <cstdint>
@@ -706,6 +707,59 @@ TEST(IoUringOperationTest, OnlyTheDataSyncFormCarriesTheDataSyncFlag)
 	EXPECT_EQ(alt::detail::io_uring_fsync_flags_of(io_uring_operation::write), 0U);
 }
 
+/**
+ * io_uring_submit()'s return value is a COUNT of the SQEs the kernel took, and the backend's
+ * verdict on it is this pure function.
+ *
+ * Asserted here rather than through a submission, because no submission can produce the cases
+ * that matter: a short submit needs a kernel allocation failure, and the EBUSY refusal needs a
+ * kernel old enough to answer it on completion-queue overflow (issue #72). The decision was
+ * factored out for exactly that reason, as io_uring_probe_has_required_opcodes() and
+ * io_uring_fsync_flags_of() were before it.
+ *
+ * Every assertion below fails for a different wrong reading of the value, which is the point:
+ * `submitted < 0` alone -- what the backend did until the final review of phase 7b -- passes the
+ * whole rest of the suite while reporting a zero return as a successful submission.
+ */
+TEST(IoUringSubmitCountsTest, OnlyACountEqualToWhatWasOfferedIsAConsumedSubmission)
+{
+	using alt::detail::io_uring_submission_was_consumed;
+	using counts = alt::detail::io_uring_submit_counts;
+
+	// The ordinary case, and the only one the running kernel produces: everything offered was
+	// taken, this backend's one entry included.
+	EXPECT_TRUE(io_uring_submission_was_consumed(counts{.submitted = 1, .offered = 1}));
+	EXPECT_TRUE(io_uring_submission_was_consumed(counts{.submitted = 4, .offered = 4}));
+
+	// Zero with one entry offered: what io_submit_sqes() returns when it cannot allocate an
+	// io_kiocb for the first entry. A check on the sign alone calls this a success.
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = 0, .offered = 1}));
+
+	// A genuine short submit, which an entry left published by an earlier unconsumed submission
+	// makes reachable. The kernel submits in ring order and this backend's entry is the last of
+	// the offered ones, so a count short of the offer means that entry was not taken, however
+	// many ahead of it were. A check that read the count only for "something moved" calls both of
+	// these a success.
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = 1, .offered = 2}));
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = 3, .offered = 4}));
+
+	// A negated errno. EBUSY is the refusal a kernel gives on completion-queue overflow; EAGAIN
+	// and EINTR are negative in the same way and none of them can equal an offered count.
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = -EBUSY, .offered = 1}));
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = -EAGAIN, .offered = 2}));
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = -1, .offered = 1}));
+
+	// Nothing offered, so there was no entry to take. Neither caller can present this -- both read
+	// io_uring_sq_ready() after io_uring_get_sqe() handed back an entry -- but the predicate is
+	// total, and answering true here would make an empty submission look like a performed one.
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = 0, .offered = 0}));
+
+	// More taken than offered, which the kernel cannot do. Answered conservatively rather than
+	// treated as success, so a liburing or kernel contract this code has misread cannot become a
+	// token for an operation nobody holds.
+	EXPECT_FALSE(io_uring_submission_was_consumed(counts{.submitted = 2, .offered = 1}));
+}
+
 namespace
 {
 	/**
@@ -906,11 +960,11 @@ namespace
 TEST_F(IoUringBackendTest, ManyConcurrentTransfersAllComplete)
 {
 	// Many times more operations outstanding at once than the submission ring has entries, which
-	// is the sizing's own claim: an io_uring_submit() the kernel accepts empties the queue inside
-	// the submission lock, so the depth bounds a burst and not the work in flight. The completion
-	// ring, which does bound it, is sized from max_in_flight. (Every submission here is accepted;
-	// a refused one would leave its entry unconsumed, which is submit_to_ring()'s subject and not
-	// something this test can produce.)
+	// is the sizing's own claim: an io_uring_submit() whose entries the kernel consumes empties the
+	// queue inside the submission lock, so the depth bounds a burst and not the work in flight. The
+	// completion ring, which does bound it, is sized from max_in_flight. (Every submission here is
+	// consumed; one the kernel did not take would leave its entry behind, which is
+	// submit_to_ring()'s subject and not something this test can produce.)
 	constexpr std::size_t transfers = 256;
 	constexpr std::size_t chunk     = 4;
 	constexpr std::size_t depth     = 8;
