@@ -157,9 +157,7 @@ endif()
 # must name it, and its absence is a failure. Elsewhere there is no Linux block to
 # strip and no liburing, so the cases are skipped.
 file(GLOB_RECURSE _targets_file "${prefix}/*/AltTargets.cmake")
-file(GLOB_RECURSE _config_file "${prefix}/*/AltConfig.cmake")
 list(GET _targets_file 0 _targets_file)
-list(GET _config_file 0 _config_file)
 file(READ "${_targets_file}" _targets)
 
 # Configures and builds the linking consumer against one prefix. Sets CASE_RC and

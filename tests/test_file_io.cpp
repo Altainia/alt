@@ -274,7 +274,7 @@ namespace
 		void SetUp() override
 		{
 			static std::atomic<int> counter{0};
-			m_dir.path = std::filesystem::temp_directory_path() / ("alt_file_io_path_" + std::to_string(counter.fetch_add(1)) + "_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+			m_dir.path = std::filesystem::temp_directory_path() / ("alt_file_io_path_" + std::to_string(counter.fetch_add(1)) + "_" + std::to_string(alt_test::process_id()));
 			std::filesystem::create_directories(m_dir.path);
 			ASSERT_TRUE(m_pool.has_value());
 			ASSERT_TRUE(m_io.has_value());

@@ -27,12 +27,25 @@ if(NOT _count EQUAL 1)
 endif()
 
 string(JSON _property_count LENGTH "${_json}" tests 0 properties)
+# Guarded ahead of the math: `foreach(_index RANGE -1)` does not error, it iterates 0 and
+# then -1, and the FATAL_ERROR then comes from the string(JSON ... GET) below as an
+# out-of-range message about index 0. Never a false pass, but a confusing failure instead of
+# the informative one this script exists to give. (Measured; an earlier note here had the
+# mechanism wrong and blamed foreach itself.)
+if(_property_count EQUAL 0)
+    message(FATAL_ERROR "${TEST_NAME} carries no test properties at all, so it has no "
+                        "ENVIRONMENT and runs on whatever `automatic` gives")
+endif()
 math(EXPR _last "${_property_count} - 1")
 foreach(_index RANGE ${_last})
     string(JSON _property_name GET "${_json}" tests 0 properties ${_index} name)
     if(_property_name STREQUAL "ENVIRONMENT")
         string(JSON _values GET "${_json}" tests 0 properties ${_index} value)
-        if(_values MATCHES "ALT_TEST_IO_BACKEND=thread_pool")
+        # Matched WITH the quotes string(JSON ... GET ... value) hands back around each array
+        # element. Unanchored, the bare substring would also accept ALT_TEST_IO_BACKEND=thread_pool_x;
+        # no such value exists, but a guard whose whole purpose is not to pass for the wrong
+        # reason should not be able to.
+        if(_values MATCHES "\"ALT_TEST_IO_BACKEND=thread_pool\"")
             return()
         endif()
         message(FATAL_ERROR "${TEST_NAME} has ENVIRONMENT ${_values}, not ALT_TEST_IO_BACKEND=thread_pool")

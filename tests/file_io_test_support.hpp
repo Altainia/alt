@@ -9,6 +9,14 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#ifdef _WIN32
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include <windows.h>
+#else
+#	include <unistd.h>
+#endif
 
 #ifdef __linux__
 #	include <alt/thread_pool.hpp>
@@ -19,6 +27,25 @@
 
 namespace alt_test
 {
+
+	/**
+	 * This process's id.
+	 *
+	 * For a scratch path a fixture builds. An atomic counter alone is NOT enough: `ctest -j` runs
+	 * each test as its own process, so every process starts its counter at the same value, and a
+	 * `this` pointer is no better -- two processes running the same binary readily place a fixture
+	 * at the same address. Either one on its own lets two concurrent test processes compute the same
+	 * directory and delete each other's files, which is issue #76. The counter distinguishes
+	 * fixtures within a process and this distinguishes the processes.
+	 */
+	inline unsigned long process_id() noexcept
+	{
+#ifdef _WIN32
+		return ::GetCurrentProcessId();
+#else
+		return static_cast<unsigned long>(::getpid());
+#endif
+	}
 
 	/**
 	 * The value of the environment variable @p name, or nothing when it is unset.

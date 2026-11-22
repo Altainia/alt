@@ -117,23 +117,30 @@ namespace
 		b.release.acquire();
 	}
 
-	/// Collects one completion, lets a test wait for it, and says whether it ran inside submit().
+	/// Collects one completion and lets a test wait for it.
 	struct waiter
 	{
 		std::binary_semaphore done{0};
 		alt::io_completion    result{};
 		std::atomic<int>      calls{0};
-		/// Set by the test once submit() has returned; read by the callback.
+		/**
+		 * Set by the test once submit() has returned.
+		 *
+		 * Read by nothing. It used to compute a `ran_inline` flag the callback wrote, which no
+		 * assertion in this file ever read: a ring completion can beat the store, so the flag was
+		 * racy by construction, and the one test that cares whether a completion ran inside submit()
+		 * asserts on the COMPLETING THREAD instead -- see
+		 * IoUringBackendTest.ARingOperationsTokenCarriesTheTag, whose comment says so. The marker is
+		 * kept because the ordering it records is real and a future assertion may want it; the
+		 * derived flag is gone because a value no assertion reads is not coverage.
+		 */
 		std::atomic<bool> submitted{false};
-		/// Whether the callback ran before submit() returned.
-		std::atomic<bool> ran_inline{false};
 		std::thread::id   thread;
 	};
 
 	void deliver(void* state, alt::io_completion result) noexcept
 	{
-		auto& w = *static_cast<waiter*>(state);
-		w.ran_inline.store(!w.submitted.load());
+		auto& w  = *static_cast<waiter*>(state);
 		w.thread = std::this_thread::get_id();
 		w.result = result;
 		w.calls.fetch_add(1);
@@ -447,9 +454,10 @@ TEST_F(IoUringBackendTest, AcceptsAMaxInFlightAboveTheBoundAndClampsTheCompletio
 		GTEST_SKIP() << largest_ring_skip_reason << made.error().message();
 	}
 	ASSERT_TRUE(made.has_value()) << "a max_in_flight past the covered bound must still build a ring: " << made.error().message();
+	// The kernel's ceiling, which is 65536 and one short of the 65537 that covering 32768 would
+	// take -- the whole point of the bound. Asserted as the exact value rather than as `< 2 *
+	// in_flight + 1`, which it implies and which would also hold for a ring far too small.
 	EXPECT_EQ(alt::detail::io_uring_completion_depth_for_testing(**made), max_completion_entries);
-	// One short of what covering 32768 would take, which is the whole point of the bound.
-	EXPECT_LT(alt::detail::io_uring_completion_depth_for_testing(**made), in_flight + in_flight + 1);
 }
 
 TEST_F(IoUringBackendTest, ForwardsAnOperationItDoesNotHandleToThePool)
@@ -531,9 +539,10 @@ TEST_F(IoUringBackendTest, ARingOperationsTokenCarriesTheTag)
 	EXPECT_EQ(w.result.bytes, 6U);
 	// A ring completion comes from the reaper thread: the submission never completes it inline,
 	// unlike the IOCP arm, where a synchronous transfer does. Asserted on the completing THREAD
-	// rather than on waiter::ran_inline, which this test cannot read without a race -- ran_inline
-	// is derived from a flag the test sets after submit() returns, and a ring completion can beat
-	// that store. The thread identity is the same property with no race in it.
+	// rather than on a flag derived from waiter::submitted, which this test cannot read without a
+	// race -- the test sets that flag after submit() returns and a ring completion can beat the
+	// store. The thread identity is the same property with no race in it. (A waiter::ran_inline
+	// member did derive such a flag; no assertion anywhere read it, and it is gone.)
 	EXPECT_NE(w.thread, std::this_thread::get_id());
 	EXPECT_EQ(alt::detail::io_uring_ignored_completions_for_testing(backend()), 0U);
 }
@@ -611,7 +620,6 @@ TEST_F(IoUringBackendTest, ARequestLargerThanItsBufferIsClampedToTheBuffer)
 	// of the buffer must report at most what the buffer holds, and here exactly that, since the
 	// file is longer than the buffer.
 	EXPECT_FALSE(done.error) << done.error.message();
-	EXPECT_LE(done.bytes, 4U);
 	EXPECT_EQ(done.bytes, 4U);
 	EXPECT_EQ(text_of(view, 4), "0123");
 }
