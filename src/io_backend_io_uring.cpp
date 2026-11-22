@@ -137,9 +137,16 @@ namespace alt::detail
 		 * The submission ring is what queue_depth names, or max_in_flight when queue_depth is
 		 * zero. Without SQPOLL the kernel consumes submission entries synchronously inside
 		 * io_uring_submit, and a submission here holds the submission mutex across both acquiring
-		 * the entry and submitting it, so the submission queue is drained again before the lock is
-		 * released: a full submission queue is all but unreachable at any depth, which is what
-		 * makes the depth the caller's to choose freely.
+		 * the entry and submitting it, so **a submission the kernel accepts** leaves the queue
+		 * empty again before the lock is released: a full submission queue is all but unreachable
+		 * at any depth, which is what makes the depth the caller's to choose freely.
+		 *
+		 * "Accepts" is the load-bearing word, and it is not decoration. A REFUSED io_uring_submit
+		 * consumes nothing and leaves its entry published in the ring, so unconsumed entries
+		 * accumulate at one per refusal and enough of them would fill the queue after all. That
+		 * does not weaken the depth argument much -- the queue then hands back a null SQE, which
+		 * publishes nothing and whose record is safe to free, and submit() reports EAGAIN -- but
+		 * the claim is "until the first refusal", not "never". submit_to_ring() carries the rest.
 		 *
 		 * What actually bounds outstanding work is the completion ring, which defaults to twice
 		 * the submission ring and, on overflow, makes io_uring_submit fail or forces the kernel to
@@ -679,11 +686,12 @@ namespace alt::detail
 				const auto             found = m_records.find(user_data);
 				// The record is still here. NOT because a refused submission produces no completion --
 				// it may well produce one later, which is the reason this function exists -- but
-				// because it cannot have produced one YET: the entry reaches the kernel only through an
-				// io_uring_submit() under the submission mutex this call holds, and the one call that
-				// could have taken it is the submit that just failed. So no completion for it exists at
-				// this instant, nothing can have withdrawn it, and the window closes before the mutex
-				// is released.
+				// because it cannot have produced one YET. Two facts, and both are needed: an entry
+				// reaches the kernel only through an io_uring_submit() under the submission mutex this
+				// call holds, and the one call that could have taken this entry consumed NOTHING,
+				// because io_uring_submit reports an error only when it submitted zero SQEs (see
+				// submit_to_ring()). So no completion for it exists at this instant, nothing can have
+				// withdrawn it, and the window closes before the mutex is released.
 				assert(found != m_records.end() && "a record was quarantined after it was withdrawn");
 				if(found != m_records.end())
 				{
@@ -697,8 +705,11 @@ namespace alt::detail
 			 * Holds the submission mutex across both liburing calls, as post_wake_up() does and for the
 			 * same reason: io_uring_get_sqe() and io_uring_submit() are not safe to call concurrently on
 			 * a shared ring, and submit() may be called from any thread. Holding it across both is also
-			 * what makes the submission queue drain again before the lock is released, which is why a
-			 * ring of any depth can carry far more outstanding operations than it has entries.
+			 * what lets a submission the kernel ACCEPTS leave the queue empty again before the lock is
+			 * released, which is why a ring of any depth can carry far more outstanding operations than
+			 * it has entries. A refused submission is the exception, and the whole subject of the rest
+			 * of this comment: it consumes nothing and its entry stays published, so the queue does not
+			 * drain and this function must not be read as guaranteeing that it does.
 			 *
 			 * It never waits. submit() must not block, so neither failure is retried or waited out.
 			 * **THE TWO FAILURES ARE NOT THE SAME, and the difference is memory safety rather than
@@ -715,6 +726,16 @@ namespace alt::detail
 			 * perform this read or write. Freeing the record here would hand it a buffer that is gone
 			 * to write into: a kernel write into freed heap, which this project has already recorded as
 			 * invisible to AddressSanitizer AND ThreadSanitizer, so no gate would ever catch it.
+			 *
+			 * **A refused io_uring_submit() consumed NO entry, this one included**, and every
+			 * interleaving argument below rests on that. io_uring_enter reports an error only when it
+			 * submitted zero SQEs -- a call that submitted some and then failed returns the count, not
+			 * the error -- and the EBUSY that makes this path reachable at all is raised before any
+			 * submission is attempted. So at the moment of the refusal the entry is published and
+			 * untouched by the kernel: no completion for it can exist, and none can until some later
+			 * submission flushes it. (Do not read that back into the success path, whose own caveat is
+			 * two paragraphs down: a non-negative return says the kernel took everything queued, not
+			 * what was queued.)
 			 *
 			 * So this function QUARANTINES the record itself, before it returns and while it still
 			 * holds the submission mutex, rather than leaving that to its caller. The flush that makes
@@ -841,8 +862,11 @@ namespace alt::detail
 			 *
 			 * Holds the submission mutex, which every submission to this ring must hold: liburing's
 			 * io_uring_get_sqe() and io_uring_submit() are not safe to call concurrently on a shared
-			 * ring, and submit() may be called from any thread. The reaper takes no lock of this
-			 * backend's at all, so there is no lock order between the two arms to get wrong.
+			 * ring, and submit() may be called from any thread. This is itself one of the two arms
+			 * that take it, and it takes nothing else, so it cannot be a party to a lock-order
+			 * problem; the order that does exist, submission then registry, is on m_registry_mutex.
+			 * (This comment used to say the reaper takes no lock of this backend's at all. The reaper
+			 * takes the registry mutex through withdraw(), and has since records existed.)
 			 *
 			 * @return Whether the NOP reached the ring. False means the reaper will not wake.
 			 */
@@ -950,9 +974,11 @@ namespace alt::detail
 			 * holding the submission mutex, because the flush it is racing needs that same mutex and
 			 * the flag has to be installed before another thread can perform one. Everything else
 			 * takes one at a time: enroll() takes this and releases it before the submission mutex is
-			 * taken, withdraw() takes only this, and the reaper takes only this and never the
-			 * submission mutex at all. No path anywhere takes the submission mutex while holding this
-			 * one, which is what makes the nesting deadlock-free rather than merely untested.
+			 * taken, withdraw() takes only this, and the reaper's own loop takes only this. The reaper
+			 * THREAD does reach the submission mutex -- a completion callback may call submit(), which
+			 * the suite pins -- but only once withdraw() has released this one, which is the point: no
+			 * path anywhere takes the submission mutex while holding this one, and that is what makes
+			 * the nesting deadlock-free rather than merely untested.
 			 *
 			 * This comment said "never held at the same time" until the quarantine made that false.
 			 *
@@ -965,8 +991,9 @@ namespace alt::detail
 			 * takes the submission mutex first, or it copies what it needs out of the registry,
 			 * releases this mutex and submits afterwards -- which also keeps it off the path of
 			 * holding a lock across a liburing call. The registry lookup's purpose, not racing a
-			 * completion that is already withdrawing the record, survives either way. Issue #75,
-			 * which also records that the spec and the plan still carry the inverted instruction.
+			 * completion that is already withdrawing the record, survives either way. Issue #75
+			 * records the discovery; the spec and the plan have since been corrected to this order,
+			 * so they and this comment now agree.
 			 */
 			std::mutex m_registry_mutex;
 

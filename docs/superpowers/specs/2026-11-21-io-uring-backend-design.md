@@ -218,8 +218,14 @@ rather than a generic failure.
 
 **What `queue_depth` bounds.** Without `SQPOLL` the kernel consumes submission entries
 synchronously inside `io_uring_submit`, and `submit` holds its mutex across both the SQE
-acquisition and the submit, so the submission queue is drained again by the time the lock
-is released. A full *submission* queue is therefore all but unreachable at any depth. What
+acquisition and the submit, so a submission **the kernel accepts** leaves the queue empty
+again by the time the lock is released. A full *submission* queue is therefore all but
+unreachable at any depth. *(Qualified in phase 7b Task 4: a **refused** `io_uring_submit`
+consumes nothing and leaves its entry published, so unconsumed entries accumulate at one
+per refusal and could fill the queue after all. The consequence is benign — the next
+`io_uring_get_sqe` returns null, which has published nothing and whose record is safe to
+free — but the claim is "until the first refusal", not "never". See the submission-failure
+bullet below.)* What
 actually bounds outstanding work is the **completion** queue, which defaults to twice the
 submission queue and, when it overflows, makes `io_uring_submit` fail or forces the kernel
 to hold completions in a backlog.
@@ -267,7 +273,9 @@ So the design is:
   implementation to free a record on both paths. The error above is mine.)*
   - A null `io_uring_get_sqe` has published nothing. The kernel will never see the
     operation, so its record is freed at once. Unreachable while the submission mutex is
-    held across both calls, since the queue drains before it is released.
+    held across both calls **and every submission is accepted**, since an accepted one
+    empties the queue before the lock is released — and reachable once a refusal has left
+    an entry unconsumed, which is why this path exists rather than being argued away.
   - A refused `io_uring_submit` has **already published the entry** — liburing advances the
     ring tail with a release store before entering the kernel — so a later submission, the
     destructor's wake-up NOP included, flushes it and the kernel may perform the transfer.
@@ -290,8 +298,9 @@ So the design is:
 
   An earlier draft claimed a `queue_depth` below `max_in_flight`
   would reach this path and prescribed a test to force it — that was wrong on both counts, since
-  the submission queue drains on every call and the completion queue is now sized
-  independently.
+  an accepted submission empties the queue on every call and the completion queue is now sized
+  independently. (What *can* leave the queue non-empty is a refused submission, which no
+  `queue_depth` choice produces.)
 
 ### Capability check
 
@@ -601,7 +610,7 @@ is on record:
 
 | Raised | Settled as |
 |--------|-----------|
-| `queue_depth`'s real meaning, given the submission queue drains on every submit | It sizes the submission ring; the completion ring is sized independently with `IORING_SETUP_CQSIZE`, covering `max_in_flight` up to 32767 and clamped to the kernel's ceiling above that (see "The ring, its depth, and submission"). The factory takes both bounds. The earlier "full queue" test was wrong and is removed. |
+| `queue_depth`'s real meaning, given that an accepted submission empties the queue on every submit | It sizes the submission ring; the completion ring is sized independently with `IORING_SETUP_CQSIZE`, covering `max_in_flight` up to 32767 and clamped to the kernel's ceiling above that (see "The ring, its depth, and submission"). The factory takes both bounds. The earlier "full queue" test was wrong and is removed. |
 | Whether opcode support needs probing | Yes — one all-or-nothing check. The earlier claim that ring creation implies support was false. |
 | Whether a cancelled operation must report `operation_canceled` | No. The `detached` branch never reads the completion, so tests assert invariants only. |
 | Parity with the pool arm's clamping, `EINTR` and error mapping | Share one `transfer_size` and one errno mapping via `io_backend_internal.hpp`; `EINTR` is the reaper's concern; the ~2 GiB cap is a short count returned as-is. |

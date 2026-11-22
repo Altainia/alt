@@ -660,9 +660,11 @@ namespace
 TEST_F(IoUringBackendTest, ManyConcurrentTransfersAllComplete)
 {
 	// Many times more operations outstanding at once than the submission ring has entries, which
-	// is the sizing's own claim: io_uring_submit() drains the queue inside the submission lock,
-	// so the depth bounds a burst and not the work in flight. The completion ring, which does
-	// bound it, is sized from max_in_flight.
+	// is the sizing's own claim: an io_uring_submit() the kernel accepts empties the queue inside
+	// the submission lock, so the depth bounds a burst and not the work in flight. The completion
+	// ring, which does bound it, is sized from max_in_flight. (Every submission here is accepted;
+	// a refused one would leave its entry unconsumed, which is submit_to_ring()'s subject and not
+	// something this test can produce.)
 	constexpr std::size_t transfers = 256;
 	constexpr std::size_t chunk     = 4;
 	constexpr std::size_t depth     = 8;
