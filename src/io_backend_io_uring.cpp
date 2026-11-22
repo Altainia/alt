@@ -40,15 +40,27 @@ namespace alt::detail
 	{
 		switch(op)
 		{
+		case io_op::read:
+			return io_uring_operation::read;
 		case io_op::write:
 			return io_uring_operation::write;
 		case io_op::sync_full:
 			return io_uring_operation::fsync;
 		case io_op::sync_data:
 			return io_uring_operation::fdatasync;
-		default:
-			return io_uring_operation::read;
+		// Listed rather than defaulted, so that a new io_op is a -Wswitch warning here instead of
+		// silently becoming a read. None of these is ever submitted to the ring.
+		case io_op::stat_handle:
+		case io_op::stat_path:
+		case io_op::open:
+		case io_op::rename:
+		case io_op::unlink:
+		case io_op::list_directory:
+		case io_op::invoke:
+			break;
 		}
+		assert(false && "io_uring_operation_of: an operation this backend does not put on the ring");
+		return io_uring_operation::read;
 	}
 
 	unsigned io_uring_fsync_flags_of(const io_uring_operation operation) noexcept
@@ -230,12 +242,6 @@ namespace alt::detail
 		int to_fd(const native_handle handle) noexcept
 		{
 			return static_cast<int>(handle);
-		}
-
-		/// Whether @p kind is one of the two fsync forms, which carry no buffer, count or offset.
-		bool is_sync(const io_uring_operation kind) noexcept
-		{
-			return kind == io_uring_operation::fsync || kind == io_uring_operation::fdatasync;
 		}
 
 		/**
@@ -613,7 +619,7 @@ namespace alt::detail
 				const transfer_submission submission{.user_data = io_uring_token_tag | m_next_id.fetch_add(1),
 				                                     .fd        = to_fd(request.handle),
 				                                     .data      = owned->buffer.bytes().data(),
-				                                     .count     = is_sync(operation) ? 0U : transfer_count(request),
+				                                     .count     = transfer_count(request),
 				                                     .offset    = request.offset,
 				                                     .kind      = operation};
 
@@ -813,10 +819,9 @@ namespace alt::detail
 					io_uring_prep_read(sqe, submission.fd, submission.data, submission.count, submission.offset);
 					break;
 				case io_uring_operation::fsync:
-				case io_uring_operation::fdatasync: {
+				case io_uring_operation::fdatasync:
 					io_uring_prep_fsync(sqe, submission.fd, io_uring_fsync_flags_of(submission.kind));
 					break;
-				}
 				}
 				// Assigned directly rather than through io_uring_sqe_set_data64(), for the reason
 				// post_wake_up() gives: the 2.1 floor does not promise that helper. io_uring_prep_read,
@@ -1067,7 +1072,6 @@ namespace alt::detail
 			 * a completion of an operation at all. Issue #73.
 			 */
 			std::atomic<std::size_t> m_ignored{0};
-
 			/// Operations forwarded to the pool backend whose trampoline has not yet run.
 			std::atomic<std::size_t> m_forwarded{0};
 			std::thread              m_thread;

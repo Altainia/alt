@@ -128,7 +128,7 @@ namespace alt::detail
 
 	/**
 	 * The ring operation that serves @p op. Precondition: @p op is read, write, sync_full or
-	 * sync_data; any other value maps to read, which is meaningless for it.
+	 * sync_data. Any other value is a bug: it asserts in a debug build and maps to read otherwise.
 	 *
 	 * Declared here, with io_uring_fsync_flags_of(), for the reason io_uring_probe_has_required_opcodes()
 	 * is: both are pure functions of their argument that submit() decides with, and exported so the

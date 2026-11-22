@@ -669,6 +669,54 @@ TEST(IoUringOperationTest, OnlyTheDataSyncFormCarriesTheDataSyncFlag)
 	EXPECT_EQ(alt::detail::io_uring_fsync_flags_of(io_uring_operation::write), 0U);
 }
 
+namespace
+{
+	/**
+	 * Submits @p op on @p stale, a closed descriptor, and checks it was put on the ring and failed.
+	 *
+	 * What this pins that nothing else does: a real IORING_OP_FSYNC on a closed descriptor
+	 * completes with EBADF, whereas an entry that was never prepared -- a NOP -- completes
+	 * successfully. The two Sync*ReachesTheRing tests succeed either way, so this is what shows an
+	 * fsync entry is prepared as an operation at all.
+	 *
+	 * Its reach is narrower than "prepared as an fsync". A zero-count read on the same descriptor
+	 * also completes with EBADF, so it cannot tell those two apart; the flag and the mapping each
+	 * have their own pure test, and no test closes the call site between them.
+	 */
+	void expect_ring_fsync_to_fail_on(alt::io_backend& backend, const alt::io_op op, const alt::native_handle stale)
+	{
+		waiter     w;
+		const auto token = backend.submit(sync_request(op, stale), deliver, &w);
+		w.submitted.store(true);
+		ASSERT_TRUE(token.has_value()) << token.error().message();
+		// Routing as well: the pool's fsync reports EBADF too, so the error alone would not show
+		// this one was put on the ring.
+		EXPECT_NE(token->value() & alt::detail::io_uring_token_tag, 0U);
+		ASSERT_TRUE(w.done.try_acquire_for(completion_guard)) << "the fsync never completed";
+		EXPECT_EQ(w.calls.load(), 1);
+		EXPECT_EQ(w.result.error, std::errc::bad_file_descriptor) << w.result.error.message();
+		EXPECT_EQ(w.result.bytes, 0U);
+	}
+} // namespace
+
+TEST_F(IoUringBackendTest, SyncFullOnAClosedDescriptorReportsBadFileDescriptorFromTheRing)
+{
+	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	const auto stale = (*file)->native();
+	file->reset();
+	expect_ring_fsync_to_fail_on(backend(), alt::io_op::sync_full, stale);
+}
+
+TEST_F(IoUringBackendTest, SyncDataOnAClosedDescriptorReportsBadFileDescriptorFromTheRing)
+{
+	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	const auto stale = (*file)->native();
+	file->reset();
+	expect_ring_fsync_to_fail_on(backend(), alt::io_op::sync_data, stale);
+}
+
 TEST_F(IoUringBackendTest, AnOperationOnAClosedDescriptorReportsBadFileDescriptor)
 {
 	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
