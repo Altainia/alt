@@ -376,14 +376,26 @@ Mapping a completion to `io_completion`:
 - A cancelled operation completes with `ECANCELED`, which maps to
   `std::errc::operation_canceled`. That completion is the one that drives the callback;
   the cancel SQE's own completion is reserved `user_data` and is ignored.
-- **But a cancel usually loses the race.** For an ordinary file the operation is typically
-  already running or finished, so `ASYNC_CANCEL` returns `-EALREADY` or `-ENOENT` and the
-  operation completes *normally*, with a byte count and no error. This is not a defect and
-  the code must not try to synthesize a cancellation: on the cancelled path the awaiting
-  frame is already gone, and `src/io_operation.cpp`'s `phase::detached` branch tears the
-  block down **without reading the completion's error or byte count at all**. The error
-  code on a cancelled operation is therefore unobservable, which is what makes the race
-  harmless.
+- **Either arm of the race occurs, and which is likelier was measured rather than guessed.**
+  An earlier draft of this document asserted that a cancel "usually loses the race" because
+  the operation is "typically already running or finished". That was wrong, and phase 7b
+  measured it **through the ring** rather than through libc: cancelling a read of a regular
+  file immediately after submitting it produced `ECANCELED` in 485 of 500 trials directly,
+  and in 200 of 200 through the backend. Delay the cancel by a millisecond and it loses
+  instead, 200 of 200.
+
+  So both arms are ordinary: the cancel may win, and the operation then completes with
+  `ECANCELED` mapping to `std::errc::operation_canceled`; or it may lose, `ASYNC_CANCEL`
+  returns `-EALREADY` or `-ENOENT`, and the operation completes *normally* with a byte count
+  and no error.
+
+  Neither is a defect, and **the code must not try to synthesize a cancellation.** On the
+  cancelled path the awaiting frame is already gone, and `src/io_operation.cpp`'s
+  `phase::detached` branch tears the block down **without reading the completion's error or
+  byte count at all**. The error code on a cancelled operation is therefore unobservable,
+  which is what makes the race harmless — and it is why a test here must assert the
+  invariants (exactly one completion, no resumption, the buffer outliving the kernel) and
+  never the error code, which would be asserting the outcome of a race.
 
 **Shutdown** submits a NOP with the reserved wake-up `user_data` so the thread returns
 from `wait_cqe` immediately, rather than polling with a timeout.
