@@ -66,6 +66,7 @@ add_executable(alt_tests
     test_io_buffer.cpp
     test_io_backend.cpp
     test_io_backend_iocp.cpp
+    test_io_backend_io_uring.cpp
     test_io_handle.cpp
     test_io_operation.cpp
     test_async_file.cpp
@@ -93,6 +94,17 @@ target_include_directories(alt_tests
     PRIVATE
         ${PROJECT_SOURCE_DIR}/src
 )
+
+# test_io_backend_io_uring.cpp includes <liburing/io_uring.h> -- the kernel ABI definitions
+# alone, not liburing's API -- so that it can build an io_uring_probe by hand and put it through
+# the backend's capability predicate. A probe reporting a missing opcode is not obtainable from
+# any kernel this project builds on, so synthesizing one is the only way that refusal is
+# observable. The header needs no link, only its include directory, which on Debian and Ubuntu is
+# /usr/include and contributes no -I at all; linking the imported target is what carries the
+# directory where a distribution puts it elsewhere.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(alt_tests PRIVATE PkgConfig::LIBURING)
+endif()
 
 alt_add_warnings(alt_tests)
 
@@ -175,12 +187,15 @@ include(GoogleTest)
 # legitimate test, so it cannot fire on a slow machine, and it is short enough to
 # report a hang while the build is still being watched.
 #
-# On Windows the file layer has two real backends, so the suite runs over both. The
-# discovered tests name the thread pool explicitly through ALT_TEST_IO_BACKEND (which
-# tests/file_io_test_support.hpp reads), and file_layer_on_iocp below runs every FileIo*
-# and AsyncFile* test once more on IOCP. Elsewhere the variable is unset and the fixtures
-# take `automatic`, which is the thread pool there.
-if(WIN32)
+# The file layer has more than one real backend on Windows (IOCP) and on Linux (io_uring),
+# and `automatic` now resolves to the native one on both. So the discovered tests name the
+# thread pool explicitly through ALT_TEST_IO_BACKEND (which tests/file_io_test_support.hpp
+# reads): left unset they would take `automatic` and the whole file layer would silently move
+# to the native backend, leaving the thread pool, which is also the fallback where no ring or
+# port can be made, covered by nothing. file_layer_on_iocp and file_layer_on_io_uring below
+# run every FileIo* and AsyncFile* test once more on the native backend. On a platform with
+# no native backend the variable is unset and `automatic` is the thread pool anyway.
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(_alt_discovered_test_properties TIMEOUT 60 ENVIRONMENT "ALT_TEST_IO_BACKEND=thread_pool")
 else()
     set(_alt_discovered_test_properties TIMEOUT 60)
@@ -196,6 +211,28 @@ gtest_discover_tests(alt_tests
 if(WIN32)
     add_test(NAME file_layer_on_iocp COMMAND alt_tests "--gtest_filter=FileIo*:AsyncFile*")
     set_tests_properties(file_layer_on_iocp PROPERTIES ENVIRONMENT "ALT_TEST_IO_BACKEND=iocp" TIMEOUT 300)
+endif()
+
+# The same for io_uring on Linux. Where no ring can be made the fixtures' own service
+# creation fails, so this entry goes red there rather than skipping, as
+# IoUringAvailability.TheRunnerProvidesIoUring does.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME file_layer_on_io_uring COMMAND alt_tests "--gtest_filter=FileIo*:AsyncFile*")
+    set_tests_properties(file_layer_on_io_uring PROPERTIES ENVIRONMENT "ALT_TEST_IO_BACKEND=io_uring" TIMEOUT 300)
+endif()
+
+# Guards the discovered tests' ALT_TEST_IO_BACKEND=thread_pool above, which no test can
+# observe from inside: dropped, every discovered test takes `automatic` (io_uring here) and
+# still passes, and the thread pool is covered by nothing. This reads the property back from
+# ctest's own description of one discovered file-layer test. Linux only because that is
+# where it was measured; the Windows setting is unguarded.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME discovered_tests_name_the_thread_pool
+        COMMAND ${CMAKE_COMMAND}
+            -DCTEST_COMMAND=${CMAKE_CTEST_COMMAND}
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DTEST_NAME=FileIoTest.CreateRejectsAZeroMaxInFlight
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_discovered_test_environment.cmake)
 endif()
 
 # Compile checks for alt::task's [[nodiscard]] await_resume (issue #61). A diagnostic is
@@ -243,8 +280,25 @@ set_tests_properties(task_await_discard_discard PROPERTIES WILL_FAIL TRUE)
 # where one fresh consumer configure measures 0.19s. The timeout is set far above that
 # rather than near it, because a cold CI runner performing full compiler-ABI detection
 # per case is a different number and this measurement says nothing about it.
+#
+# The same driver also builds a consumer that links alt::alt, because configuring one
+# cannot detect a package config that fails to define a dependency the export names.
+# A static alt keeps its sanitizer and coverage link options PRIVATE, so the flags the
+# consumer needs to resolve them are passed in.
+set(alt_consumer_link_flags "")
+if(ALT_SANITIZE STREQUAL "address")
+    list(APPEND alt_consumer_link_flags -fsanitize=address,undefined)
+elseif(ALT_SANITIZE STREQUAL "thread")
+    list(APPEND alt_consumer_link_flags -fsanitize=thread)
+elseif(ALT_SANITIZE STREQUAL "memory")
+    list(APPEND alt_consumer_link_flags -fsanitize=memory)
+endif()
+if(ALT_COVERAGE)
+    list(APPEND alt_consumer_link_flags --coverage)
+endif()
 add_test(NAME package_version_gate
     COMMAND ${CMAKE_COMMAND}
+        "-DALT_CONSUMER_LINK_FLAGS=${alt_consumer_link_flags}"
         -DALT_BUILD_DIR=${CMAKE_BINARY_DIR}
         -DALT_BUILD_CONFIG=$<CONFIG>
         -DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/package/consumer

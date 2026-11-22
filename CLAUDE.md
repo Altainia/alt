@@ -1,6 +1,6 @@
 # alt
 
-A generic C++23 utility library. Namespace: `alt`. Version: `1.17.0`.
+A generic C++23 utility library. Namespace: `alt`. Version: `1.18.0`.
 
 ## Directory layout
 
@@ -26,7 +26,8 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release -DALT_BUILD_TESTS=OFF
 cmake --build build/release
 ```
 
-Requires GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026). The
+Requires GCC 13+, Clang 19+, or MSVC 19.50+ (Visual Studio 2026). Linux builds also
+require liburing 2.1 or later (`liburing-dev`) and `pkg-config`; Windows does not. The
 same presets work on Windows — see "MSVC" under Quality checks.
 
 ## Tests
@@ -203,26 +204,31 @@ Produces `altlib_<version>_amd64.deb` in the project root:
 bash packaging/build-deb.sh
 ```
 
-Install with `sudo dpkg -i altlib_1.17.0_amd64.deb`.
+Install with `sudo dpkg -i altlib_1.18.0_amd64.deb`.
 
 ## Consuming the library
 
 After installing, other CMake projects can use:
 
 ```cmake
-find_package(Alt 1.17.0 REQUIRED)
+find_package(Alt 1.18.0 REQUIRED)
 target_link_libraries(mytarget PRIVATE alt::alt)
 ```
 
 Headers and the installed library must come from the same minor release: the inline
 sizes of the async primitives (`async_event`, `async_mutex`, `task_group`, ...) can
-change between minors. The package config enforces this: `find_package(Alt 1.17.0)`
-accepts 1.17.0 and later 1.17.x releases, but rejects 1.18.0 and 1.16.x, and a request for
-a higher patch than the installed one (1.17.1 against 1.17.0) also fails. When upgrading
+change between minors. The package config enforces this: `find_package(Alt 1.18.0)`
+accepts 1.18.0 and later 1.18.x releases, but rejects 1.19.0 and 1.17.x, and a request for
+a higher patch than the installed one (1.18.1 against 1.18.0) also fails. When upgrading
 across a minor release, update the version your project requests.
 
 A refused request prints which minor series the installed package accepts and why, so a
 deliberate refusal is distinguishable from a broken install.
+
+On Linux a consumer needs `liburing-dev` and `pkg-config` installed too, not only the
+machine that built alt. alt is a static library, so it passes its liburing link
+dependency on to your target, and the package config rediscovers it through
+`pkg-config` when `find_package(Alt)` runs.
 
 ## Coding guidelines
 

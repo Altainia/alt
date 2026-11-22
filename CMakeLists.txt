@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Alt VERSION 1.17.0 LANGUAGES CXX)
+project(Alt VERSION 1.18.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,29 @@ target_include_directories(alt
 )
 
 target_link_libraries(alt PUBLIC Threads::Threads)
+
+# The io_uring backend is Linux-only and a hard dependency there: liburing is linked
+# PRIVATE and no public header names it. alt is a static library unless
+# BUILD_SHARED_LIBS is set, and a static library hands even its PRIVATE link
+# dependencies to consumers as $<LINK_ONLY:PkgConfig::LIBURING>, so AltConfig.cmake.in
+# must define that same imported target. 2.1 is the oldest release supported
+# (Ubuntu 22.04, Debian 12); neither this machine nor CI's runner has one that old,
+# so the version constraint below is the only place the floor is ENFORCED for this
+# build. cmake/AltConfig.cmake.in carries the same constraint and enforces it for
+# consumers; README.md, CLAUDE.md and the phase 7b design state it in prose. So the
+# number lives in five places and this is the one that stops a too-old liburing from
+# building alt itself.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBURING IMPORTED_TARGET liburing>=2.1)
+    if(NOT LIBURING_FOUND)
+        message(FATAL_ERROR
+            "alt requires liburing 2.1 or later on Linux. Install the development "
+            "package (liburing-dev on Debian and Ubuntu, liburing-devel on Fedora).")
+    endif()
+    message(STATUS "Found liburing ${LIBURING_VERSION}")
+    target_link_libraries(alt PRIVATE PkgConfig::LIBURING)
+endif()
 
 alt_add_warnings(alt)
 alt_add_sanitizers(alt)

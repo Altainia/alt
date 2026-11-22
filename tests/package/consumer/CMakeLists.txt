@@ -22,3 +22,17 @@ else()
     find_package(Alt ${ALT_WANT} REQUIRED PATHS "${ALT_PREFIX}" NO_DEFAULT_PATH)
     message(STATUS "consumer: accepted Alt ${Alt_VERSION}")
 endif()
+
+# Configuring is not enough to catch a broken package config. An installed
+# AltTargets.cmake may name an imported target the config never defined (on Linux,
+# $<LINK_ONLY:PkgConfig::LIBURING>), and CMake resolves that only at generate time,
+# when something links alt::alt. ALT_LINK adds that something, and the driver builds it.
+if(ALT_LINK)
+    add_executable(consumer main.cpp)
+    target_link_libraries(consumer PRIVATE alt::alt)
+    # A static alt built with a sanitizer or coverage keeps those runtime references
+    # PRIVATE, so the consumer must carry the same link flags to resolve them.
+    if(ALT_CONSUMER_LINK_FLAGS)
+        target_link_options(consumer PRIVATE ${ALT_CONSUMER_LINK_FLAGS})
+    endif()
+endif()

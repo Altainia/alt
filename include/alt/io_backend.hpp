@@ -150,7 +150,11 @@ namespace alt
 	 * is indistinguishable from a real short read. The Windows arm also clamps to
 	 * `std::numeric_limits<DWORD>::max()` bytes, because ReadFile and WriteFile take a
 	 * 32-bit count, so a transfer above that is short in the same way whatever the
-	 * buffer holds. A layer that must refuse that
+	 * buffer holds. **Linux has a lower cap than that**: `0x7ffff000` bytes, the
+	 * kernel's `MAX_RW_COUNT`, which both backends there apply -- the io_uring arm
+	 * explicitly, the thread-pool arm by letting the kernel truncate `pread` and
+	 * `pwrite` to it -- so a transfer above roughly 2 GiB is short on Linux too.
+	 * A layer that must refuse that
 	 * request has to do so before submitting.
 	 */
 	struct io_request

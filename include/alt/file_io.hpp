@@ -37,11 +37,14 @@ namespace alt
 		 * Which built-in backend to use. `automatic` probes the platform and settles on
 		 * the best one it can run, and file_io::backend() reports what was chosen: on
 		 * Windows that is io_backend_kind::iocp, or io_backend_kind::thread_pool if the
-		 * completion port or its thread cannot be created; on every other platform in
+		 * completion port or its thread cannot be created; on Linux it is
+		 * io_backend_kind::io_uring, or io_backend_kind::thread_pool if a ring cannot be
+		 * created (a kernel without io_uring, or one a container's policy forbids it on) or
+		 * the running kernel lacks an opcode the backend needs; on every other platform in
 		 * this release it is io_backend_kind::thread_pool. Naming a kind this build does
-		 * not provide (`iocp` off Windows, `io_uring` everywhere in this release), or
-		 * `manual`, which cannot be selected by value, fails create() rather than
-		 * silently substituting another; an explicit `iocp` on Windows that cannot be
+		 * not provide (`iocp` off Windows, `io_uring` off Linux), or `manual`, which
+		 * cannot be selected by value, fails create() rather than silently substituting
+		 * another; an explicit `iocp` on Windows or `io_uring` on Linux that cannot be
 		 * built fails create() with the reason.
 		 *
 		 * On an IOCP service, files brought in with async_file::adopt() are served by a
@@ -138,7 +141,9 @@ namespace alt
 		 * asserts on whichever I/O thread finishes first, far from the mistake), or
 		 * io_backend_kind::manual; with std::errc::not_supported for a kind this build
 		 * does not provide; with the operating system's error for an explicit
-		 * io_backend_kind::iocp whose completion port or thread cannot be created; and
+		 * io_backend_kind::iocp whose completion port or thread cannot be created, or an
+		 * explicit io_backend_kind::io_uring whose ring cannot be (std::errc::not_supported
+		 * if the kernel lacks an opcode the backend needs); and
 		 * with std::errc::not_enough_memory if constructing the service throws
 		 * std::bad_alloc.
 		 */

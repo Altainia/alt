@@ -39,10 +39,7 @@ namespace alt
 		// ---------------------------------------------------------------------
 
 #ifndef _WIN32
-		std::error_code errno_error() noexcept
-		{
-			return {errno, std::system_category()};
-		}
+		using detail::errno_error;
 #endif
 
 		std::error_code canceled_error() noexcept
@@ -86,11 +83,7 @@ namespace alt
 		}
 #endif
 
-		/// The byte count a positional transfer may move: never more than the buffer holds.
-		std::size_t transfer_size(const io_request& request) noexcept
-		{
-			return std::min(request.size, request.buffer.size());
-		}
+		using detail::transfer_size;
 
 		/// Whether @p how asks for at least one of read and write access; open() accepts nothing else.
 		bool requests_access(const flags<open_flag> how) noexcept

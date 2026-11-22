@@ -12,6 +12,7 @@
 #include <vector>
 
 // Guarded inside: on every other platform it declares nothing.
+#include "io_backend_internal.hpp"
 #include "io_backend_iocp.hpp"
 
 namespace alt
@@ -140,42 +141,6 @@ namespace alt
 		}
 #endif
 
-		/**
-		 * The probe: resolves a requested kind to a backend this build provides, and builds it.
-		 *
-		 * Resolving and building are one step because on Windows whether `automatic` gets IOCP
-		 * depends on whether building it succeeds. It falls back to the thread pool when the
-		 * port or its thread cannot be created, which file_io::backend() then reports; an
-		 * explicit `iocp` request fails with that error instead. A later backend adds its branch
-		 * ahead of the fallback in the same way.
-		 *
-		 * May throw std::bad_alloc, which create() reports.
-		 */
-		built_backend probe(thread_pool& workers, const io_backend_kind requested)
-		{
-			// Each platform-specific case returns ahead of the shared one below it; elsewhere
-			// its label is empty and it falls into that one.
-			switch(requested)
-			{
-			case io_backend_kind::automatic:
-#ifdef _WIN32
-				return automatic_on_windows(workers);
-#endif
-			case io_backend_kind::thread_pool:
-				return make_thread_pool_backend(workers);
-			case io_backend_kind::iocp:
-#ifdef _WIN32
-				return detail::make_iocp_backend(workers);
-#endif
-			case io_backend_kind::io_uring:
-				return std::unexpected(std::make_error_code(std::errc::not_supported));
-			case io_backend_kind::manual:
-				return std::unexpected(std::make_error_code(std::errc::invalid_argument));
-			}
-
-			return std::unexpected(std::make_error_code(std::errc::invalid_argument));
-		}
-
 		/** The argument checks both create() overloads share. */
 		std::error_code check_arguments(const scheduler_ref completion, const file_io_options& options)
 		{
@@ -189,6 +154,72 @@ namespace alt
 
 	}
 
+	namespace detail
+	{
+
+#ifdef __linux__
+		std::expected<std::unique_ptr<io_backend>, std::error_code> automatic_on_linux(thread_pool& workers, const std::size_t queue_depth, const std::size_t max_in_flight, const io_uring_factory make_ring)
+		{
+			built_backend ring = make_ring(workers, queue_depth, max_in_flight);
+			if(ring)
+			{
+				return ring;
+			}
+			return make_thread_pool_backend(workers);
+		}
+#endif
+
+		/*
+		 * The probe: resolves a requested kind to a backend this build provides, and builds it.
+		 *
+		 * Resolving and building are one step because whether `automatic` gets IOCP or io_uring
+		 * depends on whether building it succeeds. It falls back to the thread pool when the
+		 * port, the ring or its thread cannot be created, which file_io::backend() then reports;
+		 * an explicit `iocp` or `io_uring` request fails with that error instead. A later backend
+		 * adds its branch ahead of the fallback in the same way.
+		 *
+		 * May throw std::bad_alloc, which create() reports.
+		 */
+#ifdef __linux__
+		std::expected<std::unique_ptr<io_backend>, std::error_code> probe_backend(thread_pool& workers, const file_io_options& options, const io_uring_factory make_ring)
+#else
+		std::expected<std::unique_ptr<io_backend>, std::error_code> probe_backend(thread_pool& workers, const file_io_options& options)
+#endif
+		{
+			// Each platform-specific case returns ahead of the shared one below it; elsewhere
+			// its label is empty and it falls into that one.
+			switch(options.backend)
+			{
+			case io_backend_kind::automatic:
+#ifdef _WIN32
+				return automatic_on_windows(workers);
+#endif
+#ifdef __linux__
+				return automatic_on_linux(workers, options.queue_depth, options.max_in_flight, make_ring);
+#endif
+			case io_backend_kind::thread_pool:
+				return make_thread_pool_backend(workers);
+			case io_backend_kind::iocp:
+#ifdef _WIN32
+				return make_iocp_backend(workers);
+#else
+				return std::unexpected(std::make_error_code(std::errc::not_supported));
+#endif
+			case io_backend_kind::io_uring:
+#ifdef __linux__
+				return make_ring(workers, options.queue_depth, options.max_in_flight);
+#else
+				return std::unexpected(std::make_error_code(std::errc::not_supported));
+#endif
+			case io_backend_kind::manual:
+				return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+			}
+
+			return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+		}
+
+	}
+
 	std::expected<file_io, std::error_code> file_io::create(thread_pool& workers, const scheduler_ref completion, const file_io_options& options)
 	{
 		if(const std::error_code bad = check_arguments(completion, options))
@@ -198,7 +229,7 @@ namespace alt
 
 		try
 		{
-			built_backend built = probe(workers, options.backend);
+			built_backend built = detail::probe_backend(workers, options);
 			if(!built)
 			{
 				return std::unexpected(built.error());
