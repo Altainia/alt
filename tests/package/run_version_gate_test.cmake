@@ -41,9 +41,13 @@ endif()
 
 set(failures "")
 
-macro(record_failure _case _text)
+# A function rather than a macro: a macro's arguments are re-parsed, so a backslash in
+# the captured output -- every Windows path has one -- became an "Invalid character
+# escape" error that replaced the failure it was meant to report.
+function(record_failure _case _text)
     list(APPEND failures "[${_case}] ${_text}")
-endmacro()
+    set(failures "${failures}" PARENT_SCOPE)
+endfunction()
 
 # Configures the consumer for one case. Sets CASE_RC and CASE_OUT in the caller.
 function(run_case _want _quiet)
@@ -185,14 +189,15 @@ function(run_link_case _slug _prefix)
     set(CASE_OUT "${_so}${_se}" PARENT_SCOPE)
 endfunction()
 
+run_link_case(link_installed "${prefix}")
+if(NOT CASE_RC EQUAL 0)
+    record_failure("link" "a consumer linking alt::alt did not configure and build:\n${CASE_OUT}")
+endif()
+
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     if(NOT _targets MATCHES "PkgConfig::LIBURING")
         record_failure("link"
-            "the installed AltTargets.cmake does not name PkgConfig::LIBURING, so the link cases below prove nothing about the dependency")
-    endif()
-    run_link_case(link_installed "${prefix}")
-    if(NOT CASE_RC EQUAL 0)
-        record_failure("link" "a consumer linking alt::alt did not configure and build:\n${CASE_OUT}")
+            "the installed AltTargets.cmake does not name PkgConfig::LIBURING, so the link case above proves nothing about the dependency")
     endif()
 
     # Negative control: the installed config with its Linux block removed must FAIL to
@@ -218,7 +223,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
         endif()
     endif()
 else()
-    message(STATUS "package_version_gate: this is not Linux, so the link cases are skipped")
+    message(STATUS "package_version_gate: this is not Linux, so the dependency-block control is skipped")
 endif()
 
 if(failures)
