@@ -1294,11 +1294,11 @@ TEST_F(AsyncFileTest, CancellingAnAdoptedFilesQueuedReadReachesThePool)
 	using void_type    = std::expected<void, std::error_code>;
 	const auto blocker = std::make_shared<outcome<void_type>>();
 	const auto hold    = [gate, entered] {
-		entered->store(true);
-		while(!gate->load())
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds{1});
-		}
+    entered->store(true);
+    while(!gate->load())
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
 	};
 	const alt::cancellation_handle blocker_chain = alt::start(capture(service->run(hold), blocker));
 	ASSERT_TRUE(pump_until([&] { return entered->load(); }));

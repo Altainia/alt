@@ -988,8 +988,8 @@ namespace
 		{
 			static std::atomic<int> counter{0};
 			const std::wstring      name = L"\\\\.\\pipe\\alt_io_backend_" + std::to_wstring(::GetCurrentProcessId()) + L"_" +
-			                               std::to_wstring(counter.fetch_add(1));
-			server.value                 = ::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 0, 4096, 0, nullptr);
+			                          std::to_wstring(counter.fetch_add(1));
+			server.value = ::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 0, 4096, 0, nullptr);
 			if(server.value == INVALID_HANDLE_VALUE)
 			{
 				server.value = nullptr;
