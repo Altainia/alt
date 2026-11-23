@@ -122,6 +122,40 @@ jobs:
         run: cmake --preset ${{ matrix.preset }} -DALT_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} --parallel
+      # Diagnostic for issue #68: test discovery once overran gtest_discover_tests' 5s
+      # limit on this runner, where the same listing takes ~0.3-0.6s locally, and the
+      # cause was never measured. Two launches, back to back, so a one-off first-launch
+      # cost (such as a scan of the freshly built executable) shows as a gap between
+      # them. Running here warms the executable before ctest's own discovery, so this
+      # step may hide the original failure; it records every run's numbers instead of
+      # only the rare failing one. It never fails the job, and its own timeout keeps a
+      # hang from holding the runner.
+      - name: Time test discovery (issue #68)
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |
+          $exe = Get-ChildItem "build/${{ matrix.preset }}/tests" -Recurse -Filter alt_tests.exe | Select-Object -First 1
+          if (-not $exe) { Write-Output "alt_tests.exe not found under build/${{ matrix.preset }}/tests"; exit 0 }
+          $size = [math]::Round($exe.Length / 1MB, 1)
+          $age = [math]::Round(((Get-Date) - $exe.LastWriteTime).TotalSeconds, 1)
+          $rows = foreach ($launch in 1, 2) {
+              $watch = [System.Diagnostics.Stopwatch]::StartNew()
+              $listing = & $exe.FullName --gtest_list_tests 2>&1
+              $code = $LASTEXITCODE
+              $watch.Stop()
+              $count = @($listing | Where-Object { $_ -match '^  \S' }).Count
+              "| ${{ matrix.preset }} | $launch | $([math]::Round($watch.Elapsed.TotalSeconds, 3)) | $code | $count |"
+          }
+          $report = @(
+              "### Test discovery timing (issue #68)",
+              "",
+              "alt_tests.exe: $size MB, written ${age}s before the first launch",
+              "",
+              "| preset | launch | seconds | exit | tests listed |",
+              "|---|---|---|---|---|"
+          ) + $rows
+          $report | Write-Output
+          $report | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
 
