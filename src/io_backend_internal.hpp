@@ -83,6 +83,18 @@ namespace alt::detail
 
 #ifndef _WIN32
 	/**
+	 * The file descriptor @p handle carries.
+	 *
+	 * A native_handle is wide enough for a Win32 HANDLE, so off Windows the cast back down is the
+	 * whole conversion: every backend here operates on ordinary descriptors. The Windows
+	 * counterpart is windows_io::to_handle().
+	 */
+	inline int to_fd(const native_handle handle) noexcept
+	{
+		return static_cast<int>(handle);
+	}
+
+	/**
 	 * An errno value as an error_code in the system category.
 	 *
 	 * For a caller that already holds the value, such as a completion-queue consumer that has negated a

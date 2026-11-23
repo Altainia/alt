@@ -63,10 +63,7 @@ namespace alt
 		using detail::windows_io::normalize_error;
 		using detail::windows_io::to_handle;
 #else
-		int to_fd(native_handle handle) noexcept
-		{
-			return static_cast<int>(handle);
-		}
+		using detail::to_fd;
 #endif
 
 #ifndef _WIN32

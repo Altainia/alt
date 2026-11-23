@@ -277,13 +277,6 @@ namespace alt::detail
 			return ring_sizes{.submission_entries = static_cast<unsigned>(submission), .completion_entries = static_cast<unsigned>(completion)};
 		}
 
-		/// The file descriptor @p handle carries. A ring operates on ordinary descriptors.
-		/// A third copy of the pool backend's own one-line cast; issue #74 moves it to a header.
-		int to_fd(const native_handle handle) noexcept
-		{
-			return static_cast<int>(handle);
-		}
-
 		/**
 		 * One read, write or fsync on the ring, owned by the backend from submission until the reaper has
 		 * consumed its completion.
