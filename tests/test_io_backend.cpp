@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -1188,6 +1189,38 @@ TEST_F(ThreadPoolBackendTest, PositionalTransfersOnAnAdoptedOverlappedFileHandle
 	EXPECT_EQ(read_whole(path), "hello world");
 }
 
+TEST_F(ThreadPoolBackendTest, AnOpenPolicysExtraFlagsReachCreateFile)
+{
+	use_policy({.extra_flags = static_cast<std::uint32_t>(FILE_FLAG_OVERLAPPED), .prepare = nullptr, .context = nullptr});
+	const std::wstring name = L"\\\\.\\pipe\\alt_open_policy_" + std::to_wstring(::GetCurrentProcessId());
+	scoped_handle      server(::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 0, 0, nullptr));
+	ASSERT_NE(server.value, INVALID_HANDLE_VALUE) << ::GetLastError();
+
+	const auto file = open_file(std::filesystem::path(name), alt::flags(alt::open_flag::read));
+	ASSERT_TRUE(file.has_value()) << file.error().message();
+	// The client connected by opening; this only settles the server's side of the handshake.
+	static_cast<void>(::ConnectNamedPipe(server.value, nullptr));
+
+	scoped_handle event(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+	ASSERT_NE(event.value, nullptr);
+	OVERLAPPED position{};
+	position.hEvent = event.value;
+	char       byte = 0;
+	const BOOL done = ::ReadFile(reinterpret_cast<HANDLE>((*file)->native()), &byte, 1, nullptr, &position);
+	// A synchronous handle would have blocked above; an overlapped one answers at once.
+	ASSERT_EQ(done, FALSE);
+	ASSERT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_IO_PENDING));
+
+	DWORD written = 0;
+	ASSERT_NE(::WriteFile(server.value, "z", 1, &written, nullptr), FALSE);
+	ASSERT_EQ(::WaitForSingleObject(event.value, 10'000), WAIT_OBJECT_0);
+	DWORD moved = 0;
+	ASSERT_NE(::GetOverlappedResult(reinterpret_cast<HANDLE>((*file)->native()), &position, &moved, FALSE), FALSE);
+	EXPECT_EQ(moved, 1U);
+	EXPECT_EQ(byte, 'z');
+}
+#endif
+
 namespace
 {
 	/// What a prepare hook saw: how often it ran, and the last handle it was given.
@@ -1228,14 +1261,17 @@ TEST_F(ThreadPoolBackendTest, AnOpenWhosePrepareHookFailsReportsThatErrorAndLeav
 	use_policy({.extra_flags = 0, .prepare = record_prepare, .context = &log});
 	const auto path = write_file("data.txt", "x");
 
-	// A first open settles whatever the process allocates once, so the count below is steady.
+	// A first open settles whatever the process allocates once, so the Windows handle count
+	// below is steady. Harmless elsewhere, where a specific descriptor is checked instead.
 	log.result = {};
 	ASSERT_TRUE(open_file(path, alt::flags(alt::open_flag::read)).has_value());
 	log.result = std::make_error_code(std::errc::io_error);
 	log.calls  = 0;
 
+#ifdef _WIN32
 	DWORD before = 0;
 	ASSERT_NE(::GetProcessHandleCount(::GetCurrentProcess(), &before), FALSE);
+#endif
 
 	alt::io_open_args  args{.path = path, .open_flags = alt::flags(alt::open_flag::read), .mode = {}};
 	alt::native_handle handle = alt::invalid_native_handle;
@@ -1245,45 +1281,26 @@ TEST_F(ThreadPoolBackendTest, AnOpenWhosePrepareHookFailsReportsThatErrorAndLeav
 	request.out        = &handle;
 	const auto outcome = run(request);
 
-	DWORD after = 0;
-	ASSERT_NE(::GetProcessHandleCount(::GetCurrentProcess(), &after), FALSE);
 	EXPECT_EQ(log.calls, 1);
 	EXPECT_EQ(outcome.error, std::errc::io_error);
 	EXPECT_EQ(handle, alt::invalid_native_handle);
+
+#ifdef _WIN32
+	DWORD after = 0;
+	ASSERT_NE(::GetProcessHandleCount(::GetCurrentProcess(), &after), FALSE);
 	EXPECT_EQ(after, before) << "the handle the failed open created was not closed";
-}
-
-TEST_F(ThreadPoolBackendTest, AnOpenPolicysExtraFlagsReachCreateFile)
-{
-	use_policy({.extra_flags = static_cast<std::uint32_t>(FILE_FLAG_OVERLAPPED), .prepare = nullptr, .context = nullptr});
-	const std::wstring name = L"\\\\.\\pipe\\alt_open_policy_" + std::to_wstring(::GetCurrentProcessId());
-	scoped_handle      server(::CreateNamedPipeW(name.c_str(), PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 0, 0, nullptr));
-	ASSERT_NE(server.value, INVALID_HANDLE_VALUE) << ::GetLastError();
-
-	const auto file = open_file(std::filesystem::path(name), alt::flags(alt::open_flag::read));
-	ASSERT_TRUE(file.has_value()) << file.error().message();
-	// The client connected by opening; this only settles the server's side of the handshake.
-	static_cast<void>(::ConnectNamedPipe(server.value, nullptr));
-
-	scoped_handle event(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
-	ASSERT_NE(event.value, nullptr);
-	OVERLAPPED position{};
-	position.hEvent = event.value;
-	char       byte = 0;
-	const BOOL done = ::ReadFile(reinterpret_cast<HANDLE>((*file)->native()), &byte, 1, nullptr, &position);
-	// A synchronous handle would have blocked above; an overlapped one answers at once.
-	ASSERT_EQ(done, FALSE);
-	ASSERT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_IO_PENDING));
-
-	DWORD written = 0;
-	ASSERT_NE(::WriteFile(server.value, "z", 1, &written, nullptr), FALSE);
-	ASSERT_EQ(::WaitForSingleObject(event.value, 10'000), WAIT_OBJECT_0);
-	DWORD moved = 0;
-	ASSERT_NE(::GetOverlappedResult(reinterpret_cast<HANDLE>((*file)->native()), &position, &moved, FALSE), FALSE);
-	EXPECT_EQ(moved, 1U);
-	EXPECT_EQ(byte, 'z');
-}
+#else
+	// The descriptor the hook was handed must be closed by open_with_policy's failure arm. This
+	// asks about THAT descriptor rather than a process-wide count, so a steady total cannot
+	// satisfy it while this one leaks -- and it is the only thing that executes the POSIX
+	// ::close arm, which was compiled but unreached by any Linux test, sanitizer or coverage run
+	// until this case stopped being Windows-only. Issue #70.
+	ASSERT_NE(log.seen, alt::invalid_native_handle) << "the prepare hook never saw a descriptor";
+	errno = 0;
+	EXPECT_EQ(::fcntl(static_cast<int>(log.seen), F_GETFD), -1) << "the descriptor the failed open created was still open";
+	EXPECT_EQ(errno, EBADF) << "errno was " << errno << ": " << std::generic_category().message(errno);
 #endif
+}
 
 TEST_F(ThreadPoolBackendTest, AReadOrWriteOnAClosedDescriptorReportsTheOperatingSystemsError)
 {
