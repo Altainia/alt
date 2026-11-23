@@ -156,6 +156,27 @@ jobs:
       - name: Run cppcheck
         run: cmake --build --preset debug --target cppcheck
 
+  clang-format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        # Pinned on purpose, for the same reason clang-tidy is. clang-format's output
+        # changes between releases, so an unpinned formatter would make this gate flap
+        # whenever the runner image moves -- and a format gate that fails spuriously is
+        # one somebody switches off, which is how the drift this job exists to stop got
+        # in. ubuntu-latest does not package this release; the PyPI wheel carries the
+        # exact LLVM build and needs no extra apt repository. Keep the version here and
+        # the one named in CLAUDE.md's clang-format section in step.
+        run: |
+          python3 -m venv /tmp/clang-format-venv
+          /tmp/clang-format-venv/bin/pip install --quiet clang-format==21.1.8
+      - name: Check formatting
+        # --Werror turns a needed edit into a failure; without it clang-format reports
+        # the diff and exits 0, which would make this job incapable of failing.
+        run: git ls-files -z '*.cpp' '*.hpp' | xargs -0 /tmp/clang-format-venv/bin/clang-format --dry-run --Werror
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

@@ -21,6 +21,11 @@ namespace sha_vectors
 		std::string_view expected{};
 	};
 
+	// clang-format off
+	// The length column is right-aligned on purpose: these are boundary lengths around each
+	// algorithm's block size, and reading the progression (55, 56, 63, 64, 65, ...) down the
+	// column is the whole point of the table. clang-format would left-align them and re-indent
+	// the rows, so the tables below are exempt rather than reflowed.
 	inline constexpr boundary_case sha1[] = {
 		{  0, "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
 		{  1, "5ba93c9db0cff93f52b521d7420e43f6eda2784f"},
@@ -121,5 +126,6 @@ namespace sha_vectors
 		{255, "fd932614f375bf71420530a690cb16e52c08e99cfe741ac8436fca8c8bfd5676"},
 		{256, "0837a11d994d5aa860d06917a8a0f63e3111b95633deeb15eed9949376f37d36"},
 	};
+	// clang-format on
 
 } // namespace sha_vectors

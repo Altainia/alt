@@ -224,12 +224,12 @@ namespace alt
 			}
 			constexpr std::int64_t windows_to_unix_100ns = 116444736000000000LL;
 			const auto             ticks                 = (static_cast<std::int64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
-			                                               static_cast<std::int64_t>(info.ftLastWriteTime.dwLowDateTime);
-			out.size                                     = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-			out.mtime_ns                                 = (ticks - windows_to_unix_100ns) * 100;
-			out.kind                                     = kind_of(info.dwFileAttributes);
-			out.identity.device                          = info.dwVolumeSerialNumber;
-			out.identity.serial                          = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+			                   static_cast<std::int64_t>(info.ftLastWriteTime.dwLowDateTime);
+			out.size            = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+			out.mtime_ns        = (ticks - windows_to_unix_100ns) * 100;
+			out.kind            = kind_of(info.dwFileAttributes);
+			out.identity.device = info.dwVolumeSerialNumber;
+			out.identity.serial = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
 			return {};
 		}
 
@@ -467,8 +467,8 @@ namespace alt
 			}
 			const auto wide_count = static_cast<int>(wide.size());
 			const auto failure    = [] {
-				const DWORD code = ::GetLastError();
-				return code == ERROR_NO_UNICODE_TRANSLATION ? std::make_error_code(std::errc::illegal_byte_sequence) : last_error();
+        const DWORD code = ::GetLastError();
+        return code == ERROR_NO_UNICODE_TRANSLATION ? std::make_error_code(std::errc::illegal_byte_sequence) : last_error();
 			};
 			// The first call measures, the second converts; both reject invalid UTF-16 the same way.
 			const int size = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wide_count, nullptr, 0, nullptr, nullptr);
