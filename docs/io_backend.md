@@ -337,7 +337,17 @@ disregarded. Since `automatic` resolves to io_uring on Linux, a program that ado
 sees an error become a success between alt 1.17 and 1.18. The seam promises neither behavior,
 so neither is wrong; it does mean that the file-layer suite's thread-pool run and its
 `file_layer_on_io_uring` run are not equivalent coverage, because each can use a descriptor
-the other arm would refuse. Issue #79 tracks the choice of a contract.
+the other arm would refuse.
+
+The contract settles this by declaring the divergence rather than picking a winner, which is
+what the seam already did for a Windows pipe handle: `async_file::adopt()` requires a seekable
+descriptor, and what a non-seekable one does is backend-specific and promised by neither arm, so
+a caller must avoid one rather than rely on either outcome. Making the arms agree was considered
+and rejected -- teaching the ring arm to refuse would need a seekability probe on every transfer
+and would fight this backend's own suite, which reads pipes through the ring deliberately.
+`IoUringBackendTest.TheTwoLinuxArmsDivergeOnANonSeekableDescriptorAsDocumented` is that
+statement's executable record; before it the divergence lived in prose alone and either arm could
+have changed with nothing failing.
 
 **Transfers.** Each ring operation gets a heap record holding its copy of the request's
 `io_buffer` (which keeps the bytes alive while the kernel owns them), the callback and the

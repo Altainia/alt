@@ -120,10 +120,15 @@ namespace alt
 		 *               queues a packet to a completion port the handle is associated
 		 *               with. A pipe handle ignores the offset rather than failing, so
 		 *               it is the caller's to avoid. A POSIX descriptor must be
-		 *               seekable, because positional transfers need that: a
-		 *               non-seekable one (a FIFO, socket or tty) reports
-		 *               std::errc::illegal_seek. One in O_NONBLOCK mode on a device
-		 *               that honours it reports
+		 *               seekable, because positional transfers need that, and what a
+		 *               non-seekable one (a FIFO, socket or tty) does is
+		 *               BACKEND-SPECIFIC and promised by neither arm: the thread-pool
+		 *               backend refuses it with std::errc::invalid_seek, while the
+		 *               io_uring backend performs the transfer and silently discards
+		 *               the offset -- the same shape as the Windows pipe handle above.
+		 *               So a non-seekable descriptor is the caller's to avoid rather
+		 *               than something to rely on failing. One in O_NONBLOCK mode on a
+		 *               device that honours it reports
 		 *               std::errc::resource_unavailable_try_again instead of waiting.
 		 *               Handles opened by file_io::open satisfy all of this; on Windows,
 		 *               one from an IOCP service is overlapped and associated with that

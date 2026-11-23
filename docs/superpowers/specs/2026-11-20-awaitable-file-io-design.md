@@ -432,6 +432,16 @@ tracked as issue #52; it is untested here because no Windows host was available 
 **Resolved by issue #52:** the arm now gives each transfer its own event, waits on it when
 the call goes pending, and tags the event's low-order bit so a handle the consumer has
 associated with a completion port gets no packet naming the worker's stack `OVERLAPPED`.
+
+**Updated by issue #79 (phase 7b):** the POSIX half of that precondition no longer names an
+error, so the sentence above records what `adopt()` said in 7a rather than what it says now.
+`adopt()` still requires a seekable descriptor, but what a non-seekable one does is
+backend-specific and promised by neither arm: the thread-pool arm refuses it, while the io_uring
+backend 7b added performs the transfer and discards the offset. Two corrections are folded into
+that, both left standing above because they are what 7a wrote: the condition the pool arm reports
+is `std::errc::invalid_seek`, not `std::errc::illegal_seek` -- that spelling is ESPIPE's strerror
+text and is not a `std::errc` member at all, which only came to light when a test was finally
+compiled against the claim.
 The Windows half of the synchronous-handle precondition is lifted. The 7c question below
 is unchanged: the pool arm can now serve an overlapped handle, but that does not give an
 IOCP backend a way to prepare one.

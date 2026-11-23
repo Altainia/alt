@@ -906,6 +906,73 @@ TEST_F(IoUringBackendTest, BothFsyncFormsOnAPipeReportInvalidArgumentWhereAZeroC
 	}
 }
 
+namespace
+{
+	/**
+	 * Runs @p request on @p backend and returns its completion.
+	 *
+	 * The fixture's run() submits to the ring it owns; this one is handed the backend, so one case
+	 * can put the same request to both Linux arms.
+	 */
+	alt::io_completion run_on(alt::io_backend& backend, const alt::io_request& request)
+	{
+		waiter     w;
+		const auto token = backend.submit(request, deliver, &w);
+		EXPECT_TRUE(token.has_value());
+		if(!token)
+		{
+			return alt::io_completion{.bytes = 0, .error = token.error()};
+		}
+		EXPECT_TRUE(w.done.try_acquire_for(completion_guard)) << "the operation never completed";
+		EXPECT_EQ(w.calls.load(), 1);
+		return w.result;
+	}
+} // namespace
+
+/**
+ * The two Linux arms on a NON-SEEKABLE descriptor, which is the one place they are not
+ * interchangeable.
+ *
+ * async_file::adopt() requires a seekable POSIX descriptor, and since issue #79 its contract states
+ * that what a non-seekable one does is backend-specific and promised by neither arm, rather than
+ * naming an error the io_uring arm does not report. This case is that statement's only executable
+ * record: without it the divergence lives in prose alone, and either arm could change without
+ * anything failing.
+ *
+ * The NONZERO offset is load-bearing. At offset 0 the ring arm would succeed whether it honored the
+ * offset or discarded it, so the case could not tell those apart. Asking for bytes at a position a
+ * pipe does not have, and getting the bytes at its front, is what shows the offset was discarded.
+ */
+TEST_F(IoUringBackendTest, TheTwoLinuxArmsDivergeOnANonSeekableDescriptorAsDocumented)
+{
+	const pipe_pair channel;
+	ASSERT_GE(channel.fds[0], 0) << "pipe() failed";
+
+	constexpr std::string_view payload = "abcd";
+	/// A position a pipe does not have, so honoring it could not transfer these bytes.
+	constexpr std::uint64_t absent_offset = 4096;
+
+	ASSERT_EQ(::write(channel.fds[1], payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+	const auto reader = static_cast<alt::native_handle>(channel.fds[0]);
+
+	// The pool arm REFUSES it: pread() on a pipe is ESPIPE whatever the offset. It therefore
+	// consumes nothing, which is what leaves the payload for the ring arm below.
+	auto pool_backend = alt::make_thread_pool_backend(pool());
+	ASSERT_NE(pool_backend, nullptr);
+	const auto through_the_pool = run_on(*pool_backend, positional(alt::io_op::read, reader, buffer_of(payload.size()), absent_offset, payload.size()));
+	EXPECT_EQ(through_the_pool.error, std::errc::invalid_seek) << through_the_pool.error.message();
+	EXPECT_EQ(through_the_pool.bytes, 0U);
+
+	// The ring arm PERFORMS it and discards the offset.
+	auto       buffer           = buffer_of(payload.size());
+	const auto view             = buffer; // copies share storage, so this reads what the kernel wrote
+	const auto through_the_ring = run(positional(alt::io_op::read, reader, std::move(buffer), absent_offset, payload.size()));
+	EXPECT_FALSE(through_the_ring.error) << through_the_ring.error.message();
+	EXPECT_EQ(through_the_ring.bytes, payload.size());
+	EXPECT_EQ(text_of(view, through_the_ring.bytes), payload);
+}
+
 TEST_F(IoUringBackendTest, AnOperationOnAClosedDescriptorReportsBadFileDescriptor)
 {
 	auto file = open_file(write_file("data.txt", "x"), alt::flags(alt::open_flag::read_write));
